@@ -177,17 +177,17 @@ RENDERDOC_API_1_7_0* loadRenderDoc()
 	}
 
 	// 从高到低尝试 API 版本 (结构体前缀兼容)
-	const int versions[] = {
+	const RENDERDOC_Version versions[] = {
 		eRENDERDOC_API_Version_1_7_0,
 		eRENDERDOC_API_Version_1_6_0,
 		eRENDERDOC_API_Version_1_5_0,
 	};
-	for (int v : versions)
+	for (RENDERDOC_Version v : versions)
 	{
 		void* api = nullptr;
 		if (getApi(v, &api) == 1 && api)
 		{
-			logLine("RenderDoc API 已连接 (版本 " + std::to_string(v) + "), 来源: " + how);
+			logLine("RenderDoc API 已连接 (版本 " + std::to_string(static_cast<int>(v)) + "), 来源: " + how);
 			return static_cast<RENDERDOC_API_1_7_0*>(api);
 		}
 	}
