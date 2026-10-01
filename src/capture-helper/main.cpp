@@ -266,15 +266,19 @@ __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 	g_logPath = pluginDir() + "\\capture-helper.log";
 	logLine("==== capture-helper v1.0.0 ====");
 
-	// 记录环境信息 (写入基线记录表用)
+	// 记录环境信息 (写入基线记录表用)。
+	// SKSE 版本打包格式: MAKE_EXE_VERSION = (major<<24)|(minor<<16)|(build<<4)|sub
+	// (见 SKSE 源码 skse_version.h; 0x01050610 = 1.5.97.0, 0x02000140 = 2.0.20.0)
 	const UInt32 rt = skse->runtimeVersion;
+	const UInt32 sv = skse->skseVersion;
 	{
 		char buf[160];
 		std::snprintf(buf, sizeof(buf),
-		    "游戏版本: 0x%08X -> %u.%u.%u.%u | SKSE: 0x%08X (%u)",
+		    "游戏版本: 0x%08X -> %u.%u.%u.%u | SKSE: 0x%08X -> %u.%u.%u.%u",
 		    rt,
-		    (rt >> 24) & 0xFF, (rt >> 16) & 0xFF, (rt >> 8) & 0xFF, rt & 0xFF,
-		    skse->skseVersion, skse->skseVersion);
+		    (rt >> 24) & 0xFF, (rt >> 16) & 0xFF, (rt >> 4) & 0xFFF, rt & 0xF,
+		    sv,
+		    (sv >> 24) & 0xFF, (sv >> 16) & 0xFF, (sv >> 4) & 0xFFF, sv & 0xF);
 		logLine(buf);
 	}
 
