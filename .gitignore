@@ -1,0 +1,22 @@
+# build outputs (由 GitHub Actions 生成, 本地不编译)
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.dll
+*.ipdb
+*.iobj
+build/
+
+# 抓帧原始数据 (体积大, 只在本地保存, 分析笔记放 docs/analysis/)
+captures/
+*.rdc
+
+# 日志
+*.log
+
+# IDE
+.vs/
+.vscode/
+.idea/

@@ -1,0 +1,41 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  capture-helper:
+    name: capture-helper (SKSE plugin)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Locate MSVC (x64)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found" }
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw "MSVC x64 toolset not found" }
+          $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found: $vcvars" }
+          "VCVARS=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Using MSVC env: $vcvars"
+
+      - name: Compile capture-helper.dll
+        shell: cmd
+        run: |
+          call "%VCVARS%"
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /O2 /MD /LD src\capture-helper\main.cpp /Fe:capture-helper.dll
+          if errorlevel 1 exit /b 1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: capture-helper
+          path: capture-helper.dll
+          if-no-files-found: error
