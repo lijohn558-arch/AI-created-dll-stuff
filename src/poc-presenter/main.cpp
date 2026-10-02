@@ -24,6 +24,17 @@
  *   4. 看门狗: 每 5s 复查所有已挂槽位, 被第三方改写则记录并打回; 120s 仍 0 次 Present
  *      给出汇总告警 (已登记 vtable 数), 按日志证据迭代。
  *
+ * v1.2 对策 (v1.1 实测 2026-10-02: 仍 0 触发、无 ★, 但游戏内 RenderDoc overlay 出现
+ *   "D3D11 window0 / window 1 active" —— 证明游戏与 dummy 两个交换链都被 RenderDoc 登记,
+ *   且 window0 (游戏) 排在我们的 dummy 之前):
+ *   1. [主因 P1 时序] SKSE 在主线程同步加载插件, v1.1 在后台线程安装 (21:16:20 完成),
+ *      游戏渲染器初始化夹在 Load 返回与后台安装完成之间就把交换链建好了 → 钩子全晚。
+ *      v1.2 改为在 SKSEPlugin_Load 内同步安装 (等模块 ≤5s、等 renderdoc ≤2s 兜加载序),
+ *      Load 不返回主线程就无法继续初始化 → 保证先于游戏交换链创建;
+ *   2. [保险 P2 口径] 五个工厂口径全取: CreateDXGIFactory 与 CreateDXGIFactory1 各配
+ *      IID0/1/2, 加 CreateDXGIFactory2 —— RenderDoc 包装类若按"所请求接口"分化,
+ *      游戏要的那张类也在登记之列; QI 向上 Factory2 成功即布局含槽14/15/17 (安全升级)。
+ *
  * 钩子转调: 按"调用方 vtable 地址"查登记表取原函数 —— 多张 vtable 各存各的原值。
  * 线程安全: 登记表/槽位写入全部走同一把 CRITICAL_SECTION (可重入)。
  *
@@ -574,19 +585,30 @@ void collectSwpVariants(IDXGISwapChain* any, bool rawPlus, const char* tag)
 	}
 }
 
-void collectFacVariants(IDXGIFactory2* f)
+void collectFacVariants(void* obj, bool plus2, const char* tag)
 {
-	registerFac(f, true, "ours factory");
-	IID iids[2];
-	iids[0] = __uuidof(IDXGIFactory1);
-	iids[1] = __uuidof(IDXGIFactory);
-	const char* nm[2] = { "QI-Factory1", "QI-Factory" };
+	registerFac(obj, plus2, tag);
+	// QI 向下 (Factory1 / Factory0): 只挂槽 10 — 任何工厂布局都有槽 10, 安全
+	IID down[2];
+	down[0] = __uuidof(IDXGIFactory1);
+	down[1] = __uuidof(IDXGIFactory);
+	const char* dn[2] = { "QI-Factory1", "QI-Factory" };
 	for (int i = 0; i < 2; ++i)
 	{
 		void* p = nullptr;
-		if (SUCCEEDED(f->QueryInterface(iids[i], &p)) && p)
+		if (SUCCEEDED(reinterpret_cast<IUnknown*>(obj)->QueryInterface(down[i], &p)) && p)
 		{
-			registerFac(p, false, nm[i]);
+			registerFac(p, false, (std::string(tag) + " " + dn[i]).c_str());
+			reinterpret_cast<IUnknown*>(p)->Release();
+		}
+	}
+	// QI 向上 Factory2: QI 成功即该指针布局保证含槽 14/15/17, 升级安全
+	if (!plus2)
+	{
+		void* p = nullptr;
+		if (SUCCEEDED(reinterpret_cast<IUnknown*>(obj)->QueryInterface(__uuidof(IDXGIFactory2), &p)) && p)
+		{
+			registerFac(p, true, (std::string(tag) + " QI-Factory2").c_str());
 			reinterpret_cast<IUnknown*>(p)->Release();
 		}
 	}
@@ -594,7 +616,54 @@ void collectFacVariants(IDXGIFactory2* f)
 
 // ---------- Hook 安装 ----------
 
-bool installHook()
+bool waitForModules(int timeoutMs, HMODULE& hd3d11, HMODULE& hdxgi)
+{
+	hd3d11 = nullptr;
+	hdxgi = nullptr;
+	for (int waited = 0; waited < timeoutMs; waited += 10)
+	{
+		hd3d11 = GetModuleHandleW(L"d3d11.dll");
+		hdxgi = GetModuleHandleW(L"dxgi.dll");
+		if (hd3d11 && hdxgi)
+			break;
+		Sleep(10);
+	}
+	if (!hd3d11 || !hdxgi)
+	{
+		logLine("等待 d3d11/dxgi 超时 (" + std::to_string(timeoutMs) + "ms): d3d11=" +
+		        (hd3d11 ? "已载入" : "未载入") + " dxgi=" + (hdxgi ? "已载入" : "未载入"));
+		return false;
+	}
+	{
+		char p1[MAX_PATH]{}, p2[MAX_PATH]{};
+		GetModuleFileNameA(hd3d11, p1, MAX_PATH);
+		GetModuleFileNameA(hdxgi, p2, MAX_PATH);
+		logLine("d3d11.dll = " + std::string(p1));
+		logLine("dxgi.dll  = " + std::string(p2));
+	}
+	return true;
+}
+
+// 加载序兜底: 正常应由 capture-helper 先加载 renderdoc; 若我们先被加载,
+// 等它出现 (+500ms 让其挂钩完成) 再安装 — 保证 dummy 与游戏走同一套包装类。
+void waitRenderDocSettle()
+{
+	if (GetModuleHandleW(L"renderdoc.dll"))
+		return;
+	for (int i = 0; i < 200; ++i)
+	{
+		if (GetModuleHandleW(L"renderdoc.dll"))
+		{
+			logLine("renderdoc.dll 在等待后才出现 (加载序兜底) — 再等 500ms 让其挂钩完成");
+			Sleep(500);
+			return;
+		}
+		Sleep(10);
+	}
+	logLine("等待 renderdoc.dll 2s 未出现 (无 capture-helper 场景) — 按当前状态安装");
+}
+
+bool doInstall(HMODULE hd3d11, HMODULE hdxgi)
 {
 	// 0) RenderDoc 加载状态 (判 dummy 是否走其包装类)
 	if (HMODULE hrd = GetModuleHandleW(L"renderdoc.dll"))
@@ -608,43 +677,27 @@ bool installHook()
 		logLine("renderdoc.dll 未加载 (未装 capture-helper?)");
 	}
 
-	// 1) 等 d3d11/dxgi 就位 (最多 30s)
-	HMODULE hd3d11 = nullptr, hdxgi = nullptr;
-	for (int i = 0; i < 3000; ++i)
-	{
-		hd3d11 = GetModuleHandleW(L"d3d11.dll");
-		hdxgi = GetModuleHandleW(L"dxgi.dll");
-		if (hd3d11 && hdxgi)
-			break;
-		Sleep(10);
-	}
-	if (!hd3d11 || !hdxgi)
-	{
-		logLine(std::string("等待 d3d11/dxgi 超时 (30s): d3d11=") +
-		        (hd3d11 ? "已载入" : "未载入") + " dxgi=" + (hdxgi ? "已载入" : "未载入"));
-		return false;
-	}
-	{
-		char p1[MAX_PATH]{}, p2[MAX_PATH]{};
-		GetModuleFileNameA(hd3d11, p1, MAX_PATH);
-		GetModuleFileNameA(hdxgi, p2, MAX_PATH);
-		logLine("d3d11.dll = " + std::string(p1));
-		logLine("dxgi.dll  = " + std::string(p2));
-	}
-
 	// 2) 动态取导出 (不静态链接 d3d11/dxgi, 由我们控制首次加载时机)
 	auto pCreateDevice = reinterpret_cast<HRESULT(WINAPI*)(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT,
 	                                                       const D3D_FEATURE_LEVEL*, UINT, UINT,
 	                                                       ID3D11Device**, D3D_FEATURE_LEVEL*, UINT*)>(
 	    GetProcAddress(hd3d11, "D3D11CreateDevice"));
-	auto pCreateFactory = reinterpret_cast<HRESULT(WINAPI*)(REFIID, void**)>(
+	auto pCreateFactory0 = reinterpret_cast<HRESULT(WINAPI*)(REFIID, void**)>(
+	    GetProcAddress(hdxgi, "CreateDXGIFactory"));
+	auto pCreateFactory1 = reinterpret_cast<HRESULT(WINAPI*)(REFIID, void**)>(
 	    GetProcAddress(hdxgi, "CreateDXGIFactory1"));
-	if (!pCreateDevice || !pCreateFactory)
+	auto pCreateFactory2 = reinterpret_cast<HRESULT(WINAPI*)(UINT, REFIID, void**)>(
+	    GetProcAddress(hdxgi, "CreateDXGIFactory2"));
+	if (!pCreateDevice || !pCreateFactory1)
 	{
 		logLine("导出函数获取失败: D3D11CreateDevice=" + hexOf(reinterpret_cast<const void*>(pCreateDevice)) +
-		        " CreateDXGIFactory1=" + hexOf(reinterpret_cast<const void*>(pCreateFactory)));
+		        " CreateDXGIFactory1=" + hexOf(reinterpret_cast<const void*>(pCreateFactory1)));
 		return false;
 	}
+	if (!pCreateFactory0)
+		logLine("导出 CreateDXGIFactory 不存在 — 跳过该口径");
+	if (!pCreateFactory2)
+		logLine("导出 CreateDXGIFactory2 不存在 (Win8.1 以下) — 跳过该口径");
 
 	// 3) 隐藏窗口 (swapchain 需要 HWND; 不显示, 进程生命周期内保持存活)
 	WNDCLASSA wc{};
@@ -679,14 +732,47 @@ bool installHook()
 		return false;
 	}
 
-	// 5) 工厂 + dummy1 (v1 路径: CreateSwapChainForHwnd)
-	IDXGIFactory2* factory = nullptr;
-	hr = pCreateFactory(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(&factory));
-	if (FAILED(hr) || !factory)
+	// 5) 五个口径取工厂对象 (游戏可能走不同导出或不同 IID, RenderDoc 包装类可能按口径分化;
+	//    此处只取对象不挂钩, 钩子统一在第 8 步装, 避免自己的 dummy 创建走钩子产生噪音)
+	void* facObjs[5] = {};
 	{
-		logLine("CreateDXGIFactory1(IDXGIFactory2) 失败 " + hexHr(hr));
+		HRESULT fhr = E_FAIL;
+		if (pCreateFactory0)
+		{
+			fhr = pCreateFactory0(__uuidof(IDXGIFactory), &facObjs[0]);
+			logLine("工厂口径0 CreateDXGIFactory+IID0: " +
+			        ((SUCCEEDED(fhr) && facObjs[0]) ? std::string("OK ") + hexOf(facObjs[0])
+			                                        : "失败 " + hexHr(fhr)));
+		}
+		fhr = pCreateFactory1(__uuidof(IDXGIFactory), &facObjs[1]);
+		logLine("工厂口径1 CreateDXGIFactory1+IID0: " +
+		        ((SUCCEEDED(fhr) && facObjs[1]) ? std::string("OK ") + hexOf(facObjs[1])
+		                                        : "失败 " + hexHr(fhr)));
+		fhr = pCreateFactory1(__uuidof(IDXGIFactory1), &facObjs[2]);
+		logLine("工厂口径2 CreateDXGIFactory1+IID1: " +
+		        ((SUCCEEDED(fhr) && facObjs[2]) ? std::string("OK ") + hexOf(facObjs[2])
+		                                        : "失败 " + hexHr(fhr)));
+		fhr = pCreateFactory1(__uuidof(IDXGIFactory2), &facObjs[3]);
+		logLine("工厂口径3 CreateDXGIFactory1+IID2: " +
+		        ((SUCCEEDED(fhr) && facObjs[3]) ? std::string("OK ") + hexOf(facObjs[3])
+		                                        : "失败 " + hexHr(fhr)));
+		if (pCreateFactory2)
+		{
+			fhr = pCreateFactory2(0, __uuidof(IDXGIFactory2), &facObjs[4]);
+			logLine("工厂口径4 CreateDXGIFactory2+IID2: " +
+			        ((SUCCEEDED(fhr) && facObjs[4]) ? std::string("OK ") + hexOf(facObjs[4])
+			                                        : "失败 " + hexHr(fhr)));
+		}
+	}
+	IDXGIFactory2* factory = reinterpret_cast<IDXGIFactory2*>(facObjs[3]);
+	if (!factory)
+		factory = reinterpret_cast<IDXGIFactory2*>(facObjs[4]);
+	if (!factory)
+	{
+		logLine("无可用 Factory2 对象 (口径3/4 均失败) — 无法创建 dummy, 安装失败");
 		return false;
 	}
+	// 5b) dummy1 (v1 路径: CreateSwapChainForHwnd)
 	DXGI_SWAP_CHAIN_DESC1 sd{};
 	sd.Width = 4;
 	sd.Height = 4;
@@ -735,8 +821,17 @@ bool installHook()
 	if (sc0)
 		collectSwpVariants(sc0, false, "dummy2(v0)");
 
-	// 8) 挂工厂的交换链创建方法 — 游戏创建交换链时就地打它的 vtable (兜每实例隔离)
-	collectFacVariants(factory);
+	// 8) 挂五个口径工厂的交换链创建方法 — 游戏创建交换链时就地打它的 vtable;
+	//    plus2 仅对 IID2 口径为 true (该布局保证含槽14/15/17, 防越界)
+	{
+		const char* facTags[5] = {
+			"工厂口径0(Factory导出+IID0)", "工厂口径1(Factory1导出+IID0)",
+			"工厂口径2(Factory1导出+IID1)", "工厂口径3(Factory1导出+IID2)",
+			"工厂口径4(Factory2导出+IID2)" };
+		for (int i = 0; i < 5; ++i)
+			if (facObjs[i])
+				collectFacVariants(facObjs[i], i >= 3, facTags[i]);
+	}
 
 	// 9) 汇总 (sc0/sc1/factory/dev 故意不释放: 对象驻留 = 钩子常驻)
 	{
@@ -749,6 +844,16 @@ bool installHook()
 		        hexOf(reinterpret_cast<const void*>(&hookedPresent)));
 	}
 	return true;
+}
+
+// 统一安装入口: 等模块 (≤waitMs) + 等 renderdoc 加载序落定 + 完整安装
+bool installHook(int waitMs)
+{
+	HMODULE hd3d11 = nullptr, hdxgi = nullptr;
+	if (!waitForModules(waitMs, hd3d11, hdxgi))
+		return false;
+	waitRenderDocSettle();
+	return doInstall(hd3d11, hdxgi);
 }
 
 // ---------- 看门狗: 每 5s 复查被改写槽位并打回 (须持 g_cs) ----------
@@ -799,15 +904,8 @@ void verifyAndRepair()
 	LeaveCriticalSection(&g_cs);
 }
 
-void installThread()
+void watchdogThread()
 {
-	logLine("Hook 安装线程启动 (等 d3d11/dxgi 就位, 最多 30s)");
-	if (!installHook())
-	{
-		logLine("Hook 安装失败 (详见上方日志)");
-		return;
-	}
-
 	bool reported = false, alarmed = false;
 	int ticks = 0;
 	for (;;)
@@ -838,6 +936,17 @@ void installThread()
 	}
 }
 
+// 后备: 同步安装未就绪 (模块/加载序) 时, 后台再等最多 30s 安装, 然后进入看门狗
+void fallbackInstallThread()
+{
+	logLine("后台兜底线程: 最多再等 30s 安装");
+	if (installHook(30000))
+		logLine("后台安装完成");
+	else
+		logLine("后台安装失败 (详见上方日志)");
+	watchdogThread();
+}
+
 } // namespace
 
 // ---------- DLL 入口 ----------
@@ -860,7 +969,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 {
 	info->infoVersion = PluginInfo::kInfoVersion;
 	info->name = "PocPresenter";
-	info->version = (0u << 16) | (2u << 8) | 0u; // 0.2.0
+	info->version = (0u << 16) | (3u << 8) | 0u; // 0.3.0
 
 	if (skse->isEditor)  // 只进游戏本体, 不进 Creation Kit
 		return false;
@@ -871,7 +980,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.2.0 (PoC-A v1.1: 多vtable + 工厂拦截 + 看门狗) ====");
+	logLine("==== poc-presenter v0.3.0 (PoC-A v1.2: 同步安装 + 五口径工厂 + 看门狗) ====");
 
 	InitializeCriticalSection(&g_cs);
 
@@ -889,7 +998,19 @@ __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 		logLine(buf);
 	}
 
-	std::thread(installThread).detach();
+	// v1.2 核心: 同步安装 — SKSE 在主线程加载插件, Load 不返回游戏就无法继续初始化,
+	// 由此保证钩子先于游戏交换链创建 (v1.1 后台线程安装曾输给渲染器初始化的竞态)。
+	// Load 内阻塞有界: 等模块 ≤5s + 等 renderdoc ≤2s; 未就绪则退后台兜底线程。
+	if (installHook(5000))
+	{
+		logLine("同步安装完成 (SKSE 加载线程内, 先于游戏渲染器初始化)");
+		std::thread(watchdogThread).detach();
+	}
+	else
+	{
+		logLine("同步安装未完成 → 后台兜底线程");
+		std::thread(fallbackInstallThread).detach();
+	}
 	logLine("就绪 — 不改变画面; 进游戏后观察本日志");
 	return true;
 }
