@@ -25,10 +25,11 @@ skyrim-vulkan/
 ├── .github/workflows/build.yml   # CI: MSVC x64 编译 capture-helper
 ├── docs/                          # 项目文档（进 git）
 ├── src/
-│   └── capture-helper/            # SKSE 插件: 进程内 RenderDoc 抓帧引导
-│       ├── main.cpp
-│       ├── skse_abi.h             # SKSE64 2.0.20 最小 ABI 声明
-│       └── renderdoc_app.h        # RenderDoc 官方 in-app API 头 (MIT)
+│   ├── capture-helper/            # SKSE 插件: 进程内 RenderDoc 抓帧引导
+│   │   ├── main.cpp
+│   │   ├── skse_abi.h             # SKSE64 2.0.20 最小 ABI 声明（poc-presenter 共用）
+│   │   └── renderdoc_app.h        # RenderDoc 官方 in-app API 头 (MIT)
+│   └── poc-presenter/             # SKSE 插件: PoC-A Present Hook 验证（main.cpp）
 ├── tools/                         # 分析脚本（qrenderdoc 内嵌 Python 运行）
 │   ├── rdc_extract.py + rdc_pass2~6.py  # 六轮提取（RDC_SCENE 选场景，无头批跑）
 │   ├── rdc_run.ps1                # 无头批跑 runner（-Scene/-Targets/-PsEvents/-PsWL）
@@ -62,3 +63,32 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 ### 日常抓帧
 若只想抓帧不想构建插件，也可直接用 RenderDoc UI 的 Launch Application 外部注入
 （配置见 `docs/02-RenderDoc抓帧操作清单.md` §2）；插件方式为更稳定的备选路径。
+
+---
+
+## 子项目：poc-presenter（PoC-A：Present Hook 验证）
+
+**作用**：`docs/00` 首周行动项 #4 / 最高风险项 #1（渲染管线可否 Hook）的第一环——
+用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
+本步**不碰 Vulkan、不改变画面**，只产出日志。
+
+**机制**：进程内自建 dummy 设备 + dummy 交换链 → 拿到游戏同款交换链的 vtable →
+`VirtualProtect` 改写类级槽 4（Present）→ 钩子内计数/打印交换链描述/算 FPS 后转调原函数。
+原函数若来自 RenderDoc 包装层则抓帧链路不受影响（先我们 → 后 RenderDoc → 再真实呈现）。
+
+### 构建
+push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从 **Actions → Artifacts**
+下载 `poc-presenter.zip`
+
+### 安装与验收
+1. `poc-presenter.dll` 放入 `<游戏>/Data/SKSE/Plugins/`（与 capture-helper.dll 并列）
+2. MO2 正常启动游戏，进到有画面的场景
+3. 看 `Data/SKSE/Plugins/poc-presenter.log`，依次应出现：
+   - `Hook 安装成功: Present 槽4 -> ...`
+   - **`第 1 次 Present: 1920x1080 ... title="..."`**（关键行——证明拦到了游戏的 Present）
+   - `Present 已开始触发 ... — PoC-A 验收通过`，之后每 600 帧一行 `近600帧 xx.x FPS`
+4. 游戏画面应完全正常（本 PoC 不改变呈现）。若 30s 后出现「0 次 Present」告警，
+   按日志中的模块路径与 vtable 信息迭代（时序问题在上 Vulkan 前暴露正是本 PoC 的价值）
+
+验收通过后进入 **PoC-B**：在 Present 里创建 Vulkan instance/swapchain → 游戏窗口出
+清屏/三角形 → F12 抓这帧 → `rdc_run` 提取链 → `rdc_compare -Base S4 -Cand <候选>` 首次候选比对。
