@@ -65,8 +65,11 @@ jobs:
         run: |
           call "%VCVARS%"
           if errorlevel 1 exit /b 1
-          cl /nologo /std:c++17 /utf-8 /EHsc /O2 /MD /LD src\poc-presenter\main.cpp /Fe:poc-presenter.dll user32.lib
-          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /utf-8 /EHsc /O2 /MD /LD src\poc-presenter\main.cpp /Fe:poc-presenter.dll user32.lib > cl_poc.log 2>&1
+          set CLRC=%ERRORLEVEL%
+          type cl_poc.log
+          powershell -NoProfile -Command "Get-Content cl_poc.log | ForEach-Object { if ($_ -like '*error*') { Write-Output ('::error::' + $_) } }"
+          exit /b %CLRC%
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
