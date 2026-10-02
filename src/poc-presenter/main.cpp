@@ -45,6 +45,17 @@
  *     每个新工厂先建辅助 v0 dummy (拿它所属类的交换链 vtable — 若是真 dxgi 类,
  *     游戏 Present 即被槽4截住), 再挂其创建方法; 日志带"设备链"前缀自证落在哪个模块。
  *
+ * v1.4 对策 (v1.3 双跑实测 2026-10-02 22:15/22:18 — 同步安装两跑均 OK):
+ *   - 两跑都有"设备链 GetAdapter"行但零"设备链工厂"行 → v1.3 代码 bug: 在适配器上
+ *     用了 QI 而非 GetParent (适配器不实现工厂接口, QI 必失败且被静默吞掉) →
+ *     v1.4 改 GetParent + 失败打日志 + 适配器行改打 vtable 所在模块;
+ *   - 无 capture-helper: ★ 于 +8s 触发后日志终止 — registerSwp 对"与 dummy 同类"
+ *     的 vtable 原是静默匹配, 之后无 Present 行 → v1.4 给匹配路径补日志、★ 行附
+ *     swapDesc, 下一跑即可分辨"同类已挂" vs "新类" vs "挂后无 Present";
+ *   - 有 capture-helper: 仍 0 ★ → 与"游戏工厂在 SKSE/renderdoc 生效前已是真 dxgi
+ *     类"假说一致; GetParent 若拿到真类即双类覆盖成立, 若仍 renderdoc 类 →
+ *     下一步加载序方案 (先于 capture-helper 加载, 拿未被 renderdoc 拦截的真导出)。
+ *
  * 钩子转调: 按"调用方 vtable 地址"查登记表取原函数 —— 多张 vtable 各存各的原值。
  * 线程安全: 登记表/槽位写入全部走同一把 CRITICAL_SECTION (可重入)。
  *
@@ -325,6 +336,11 @@ void registerSwp(void* obj, bool plus, const char* tag)
 		g_swp[idx].orig18 = nullptr;
 		g_swp[idx].has18 = false;
 	}
+	else
+	{
+		// 匹配路径原先是静默的 — v1.4 补日志: 游戏交换链若与 dummy 同类, 此行即证据
+		logLine(std::string(tag) + ": vtable 已登记 (与既有同类) " + hexOf(vtbl));
+	}
 	if (plus && !g_swp[idx].has18)
 	{
 		// 只有确认实现 1 及以上接口的 vtable 才安全读槽 18 (布局至少 19 项)
@@ -505,7 +521,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChain(IDXGIFactory* self, IUnknown* de
 	HRESULT hr = reinterpret_cast<CreateSwapChain_t>(orig)(self, dev, desc, out);
 	if (SUCCEEDED(hr) && out && *out)
 	{
-		logLine("★ 工厂拦截 CreateSwapChain → swapchain=" + hexOf(*out));
+		logLine("★ 工厂拦截 CreateSwapChain → swapchain=" + hexOf(*out) + " | " + swapDesc(*out));
 		registerSwp(*out, false, "★游戏 CreateSwapChain");
 	}
 	return hr;
@@ -526,7 +542,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(IDXGIFactory2* self, IUnk
 	HRESULT hr = reinterpret_cast<CreateSwapChainForHwnd_t>(orig)(self, dev, hwnd, desc, fs, restrictOut, out);
 	if (SUCCEEDED(hr) && out && *out)
 	{
-		logLine("★ 工厂拦截 CreateSwapChainForHwnd → swapchain=" + hexOf(*out));
+		logLine("★ 工厂拦截 CreateSwapChainForHwnd → swapchain=" + hexOf(*out) + " | " + swapDesc(*out));
 		registerSwp(*out, true, "★游戏 CreateSwapChainForHwnd");
 	}
 	return hr;
@@ -546,7 +562,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForCoreWindow(IDXGIFactory2* self
 	HRESULT hr = reinterpret_cast<CreateSwapChainForCoreWindow_t>(orig)(self, dev, window, desc, restrictOut, out);
 	if (SUCCEEDED(hr) && out && *out)
 	{
-		logLine("★ 工厂拦截 CreateSwapChainForCoreWindow → swapchain=" + hexOf(*out));
+		logLine("★ 工厂拦截 CreateSwapChainForCoreWindow → swapchain=" + hexOf(*out) + " | " + swapDesc(*out));
 		registerSwp(*out, true, "★游戏 CreateSwapChainForCoreWindow");
 	}
 	return hr;
@@ -566,7 +582,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForComposition(IDXGIFactory2* sel
 	HRESULT hr = reinterpret_cast<CreateSwapChainForComposition_t>(orig)(self, dev, desc, out);
 	if (SUCCEEDED(hr) && out && *out)
 	{
-		logLine("★ 工厂拦截 CreateSwapChainForComposition → swapchain=" + hexOf(*out));
+		logLine("★ 工厂拦截 CreateSwapChainForComposition → swapchain=" + hexOf(*out) + " | " + swapDesc(*out));
 		registerSwp(*out, true, "★游戏 CreateSwapChainForComposition");
 	}
 	return hr;
@@ -845,7 +861,11 @@ bool doInstall(HMODULE hd3d11, HMODULE hdxgi)
 			IDXGIAdapter* adp = nullptr;
 			if (SUCCEEDED(gid->GetAdapter(&adp)) && adp)
 			{
-				logLine("设备链 GetAdapter = " + hexOf(adp) + " 来自 " + modulePathOf(adp));
+				{
+					void** avtbl = *reinterpret_cast<void***>(adp);
+					logLine("设备链 GetAdapter = " + hexOf(adp) + " vtable=" + hexOf(avtbl) +
+					        " 来自 " + modulePathOf(avtbl));
+				}
 				void* seen[8] = {};
 				int nSeen = 0;
 				for (int i = 0; i < 5; ++i)
@@ -868,8 +888,13 @@ bool doInstall(HMODULE hd3d11, HMODULE hdxgi)
 				for (int i = 0; i < 3; ++i)
 				{
 					void* f = nullptr;
-					if (FAILED(adp->QueryInterface(fids[i], &f)) || !f)
+					// 注意: 不是 QI — 适配器不实现工厂接口, 须 GetParent 上溯
+					HRESULT qhr = adp->GetParent(fids[i], &f);
+					if (FAILED(qhr) || !f)
+					{
+						logLine("设备链工厂 IID" + std::to_string(i) + " GetParent 失败 " + hexHr(qhr));
 						continue;
+					}
 					if (isSeen(f))
 					{
 						logLine("设备链工厂 IID" + std::to_string(i) + " = " + hexOf(f) + " (与已有重复, 跳过)");
@@ -1065,7 +1090,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 {
 	info->infoVersion = PluginInfo::kInfoVersion;
 	info->name = "PocPresenter";
-	info->version = (0u << 16) | (4u << 8) | 0u; // 0.4.0
+	info->version = (0u << 16) | (5u << 8) | 0u; // 0.5.0
 
 	if (skse->isEditor)  // 只进游戏本体, 不进 Creation Kit
 		return false;
@@ -1076,7 +1101,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.4.0 (PoC-A v1.3: 同步安装 + 五口径工厂 + 设备链 + 看门狗) ====");
+	logLine("==== poc-presenter v0.5.0 (PoC-A v1.4: 同步安装 + 五口径工厂 + 设备链(GetParent) + 看门狗) ====");
 
 	InitializeCriticalSection(&g_cs);
 

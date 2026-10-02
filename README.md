@@ -93,7 +93,9 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 > 游戏窗口先于我们的 dummy → P1 时序确诊 → v1.2 改同步安装；**v1.2 双跑**：有
 > capture-helper 时五口径全 OK 但都在 renderdoc 类上、仍 0 触发，无 capture-helper 时
 > ★ 在 +7s 于 dxgi 真类正常触发 → **P3 类分叉确诊**（游戏拿工厂不走导出 / renderdoc
-> 生效前已有真对象）→ v1.3 增设设备链通道做双类覆盖。
+> 生效前已有真对象）→ v1.3 增设设备链通道做双类覆盖；**v1.3 双跑实测**：设备链因
+> 误用 QI 而静默失败（适配器要 GetParent），且无 renderdoc 时 ★ +8s 后日志终止（匹配
+> 路径静默、无 Present 行）→ v1.4 改 GetParent、补失败日志/匹配日志、★ 行附 swapDesc。
 
 ### 构建
 push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从 **Actions → Artifacts**
@@ -105,9 +107,12 @@ push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从
 3. 看 `Data/SKSE/Plugins/poc-presenter.log`，依次应出现：
    - `同步安装完成 (SKSE 加载线程内, 先于游戏渲染器初始化)`（v1.2 关键行——时序竞态已排除）
    - `工厂口径0..4: OK 0x...`（五口径取工厂对象的结果）
-   - `设备链 GetAdapter = 0x... 来自 ...` + `设备链工厂 IID0/1/2 = ... 来自 ...`
-     （v1.3 关键行——若「来自」落在 **dxgi.dll** 即拿到真类，双类覆盖成立）
+   - `设备链 GetAdapter = 0x... vtable=0x... 来自 ...` + `设备链工厂 IID0/1/2 = ... 来自 ...`
+     （v1.4 关键行——若「来自」落在 **dxgi.dll** 即拿到真类，双类覆盖成立；
+     若 GetParent 失败会显式打 `GetParent 失败 hr=...`）
    - `设备链辅助 dummy IID...: ...`（该类交换链 vtable 也被收集的证据）
+   - `...: vtable 已登记 (与既有同类) 0x...`（游戏交换链与 dummy 同类的证据——
+     此时槽 4 已挂，下一行就该是 Present）
    - `登记完成: 交换链 vtable N 个 (含 Present 挂钩), 工厂 vtable M 个 (含创建方法挂钩)`
    - `★ 工厂拦截 ...`（游戏创建交换链时——出现即证明时机+口径都已覆盖）
    - **`第 1 次 Present (经 Present): ... 1920x1080 ... title="..."`**（关键行——证明拦到游戏 Present）
