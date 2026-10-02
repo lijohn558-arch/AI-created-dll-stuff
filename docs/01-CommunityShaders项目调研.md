@@ -183,6 +183,12 @@ Community Shaders 内置了完整的 RenderDoc 程序化集成，其中**踩坑�
   `IDXGISwapChainTest` 接口都做了仿真转发）。
 - RenderDoc 同为包装对象——**本项目实测证据**：v1.2/v1.3/v1.4 带 capture-helper 的日志里，
   五口径工厂 / 设备链 / 辅助 dummy 的 vtable 全落在 `renderdoc.dll`（README 实测链）。
+- **包装桩字节实证（v1.5 探针 B，2026-10-02）**：renderdoc 交换链类 slot4 原实现 = 11 字节
+  三指令 thunk（`48 8B 49 10 | 48 8B 01 | 48 FF 60 20` = `mov rcx,[rcx+10]; mov rax,[rcx];
+  jmp [rax+20]`，后接 INT3 填充；slot18 同款跳 `[rax+90]`）——即**动态读取真对象当前
+  vtable 并转发**，不缓存函数指针 ⇒ 只要真类 slot4 是我们的钩子，包装层 Present 最终必落
+  入我方钩子（这决定了加载序方案下 ★ 中否不再影响计数）。CreateSwapChain 原实现为真函数
+  序言，到 `sub rsp,0xA0` 共 15 字节全位置无关，可安全窃取做 trampoline。
 - 共同点：**两者都不修补多方共用的共享类 vtable**——要么拥有对象（包装），要么拥有函数
   入口（MinHook 导出级/函数级 detour）。
 

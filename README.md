@@ -104,7 +104,16 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 > 覆盖层（GFE，启动时注入）** → 调研 CS/ReShade/RenderDoc 的拦截姿势（docs/01 §7）：
 > CS 根本不碰 DXGI Present（引擎层注入）；ReShade/RenderDoc 均为**包装对象自有 vtable +
 > 导出级/函数级 detour**、不修补公共类 vtable → v1.6 备选 = 对 dxgi 真 Present 实现做
-> 函数级 detour（探针 B 字节选窃取长度），兜底 = 引擎层注入。
+> 函数级 detour（探针 B 字节选窃取长度），兜底 = 引擎层注入；
+> **v1.5 单跑（带 capture-helper，23:26）**：★ 仍 0 ⇒ 对比两跑可锁定——**游戏工厂恒为真
+> dxgi 类**（无 renderdoc 时我方导出=真类故 ★ 中；有 renderdoc 时我方只能拿到包装类而游戏
+> 仍持真类故 ★ 不中）；探针 B 实锤 renderdoc 的 Present 桩 = 11 字节三指令**动态转发 thunk**
+> （`mov rcx,[rcx+10]; mov rax,[rcx]; jmp [rax+20]` → 转发到真对象**当前** slot4）⇒ 只要握有
+> 真类 slot4，包装层最终必落我方钩子（★ 中否不再影响计数）；CreateSwapChain 序言 15 字节
+> 全位置无关（可安全窃取）；探针 W 仅唯一游戏窗口（+Steam `DIEmWin`），无第二宿主；
+> dummy3 FLIP 被系统拒 0x80070005（低优先级）。**修法 = 加载序**：`capture-helper.dll` 改名
+> `z-capture-helper.dll` 让 poc-presenter 先装真类 → 待双跑验证（无 helper 取证 GFE / 改名后
+> 带 helper 验收）。
 
 ### 构建
 push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从 **Actions → Artifacts**
