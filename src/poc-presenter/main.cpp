@@ -35,6 +35,16 @@
  *      IID0/1/2, 加 CreateDXGIFactory2 —— RenderDoc 包装类若按"所请求接口"分化,
  *      游戏要的那张类也在登记之列; QI 向上 Factory2 成功即布局含槽14/15/17 (安全升级)。
  *
+ * v1.3 对策 (v1.2 双跑实测 2026-10-02 — 同步安装 P1 已修: 两跑均"同步安装完成"):
+ *   - 有 capture-helper: 五口径工厂全 OK 但同为 renderdoc.dll 一张类, 120s 仍无 ★、
+ *     0 次 Present → 游戏的工厂不是我们 patch 的那张类 (P3);
+ *   - 无 capture-helper: ★ 在 +7s 正常触发 (CreateSwapChain → dxgi 真类) →
+ *     游戏拿工厂的路径在无 renderdoc 世界 = 真 dxgi 类, 有 renderdoc 时落到
+ *     "非导出"路径 (设备链 GetParent, 或 renderdoc 生效前已取得的真对象)。
+ *   → v1.3 增设设备链通道: device → QI IDXGIDevice → GetAdapter → GetParent 三 IID,
+ *     每个新工厂先建辅助 v0 dummy (拿它所属类的交换链 vtable — 若是真 dxgi 类,
+ *     游戏 Present 即被槽4截住), 再挂其创建方法; 日志带"设备链"前缀自证落在哪个模块。
+ *
  * 钩子转调: 按"调用方 vtable 地址"查登记表取原函数 —— 多张 vtable 各存各的原值。
  * 线程安全: 登记表/槽位写入全部走同一把 CRITICAL_SECTION (可重入)。
  *
@@ -821,6 +831,92 @@ bool doInstall(HMODULE hd3d11, HMODULE hdxgi)
 	if (sc0)
 		collectSwpVariants(sc0, false, "dummy2(v0)");
 
+	// 7b) 设备链取工厂 (游戏常见路径: device → IDXGIDevice → GetAdapter → GetParent)。
+	//     实测 P3 (v1.2 双跑 2026-10-02): 有 renderdoc 时五口径导出工厂全被其包装
+	//     (vtable 都在 renderdoc.dll), 游戏却没走我们 patch 的那张类 — 120s 无 ★ 无 Present;
+	//     无 renderdoc 时同一条钩子链在 dxgi 真类上 ★ 正常触发 (+7s) → 游戏拿工厂走的不是
+	//     导出 (或在 renderdoc 生效前就拿到了真对象), 其类 = 真 dxgi 类。本步经设备链探
+	//     GetParent: 若落到真 dxgi 类, 辅助 dummy 会把真交换链类也挂上 (双类覆盖);
+	//     先统一建辅助 dummy (此时还没挂这些工厂的槽, 不产生自身 ★ 噪音), 再统一挂钩。
+	{
+		IDXGIDevice* gid = nullptr;
+		if (SUCCEEDED(dev->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&gid))) && gid)
+		{
+			IDXGIAdapter* adp = nullptr;
+			if (SUCCEEDED(gid->GetAdapter(&adp)) && adp)
+			{
+				logLine("设备链 GetAdapter = " + hexOf(adp) + " 来自 " + modulePathOf(adp));
+				void* seen[8] = {};
+				int nSeen = 0;
+				for (int i = 0; i < 5; ++i)
+					if (facObjs[i])
+						seen[nSeen++] = facObjs[i];
+				auto isSeen = [&](const void* p) {
+					for (int k = 0; k < nSeen; ++k)
+						if (seen[k] == p)
+							return true;
+					return false;
+				};
+				void* newFacs[3] = {};
+				bool newPlus2[3] = {};
+				int newIdx[3] = {};
+				int nNew = 0;
+				IID fids[3];
+				fids[0] = __uuidof(IDXGIFactory2);
+				fids[1] = __uuidof(IDXGIFactory1);
+				fids[2] = __uuidof(IDXGIFactory);
+				for (int i = 0; i < 3; ++i)
+				{
+					void* f = nullptr;
+					if (FAILED(adp->QueryInterface(fids[i], &f)) || !f)
+						continue;
+					if (isSeen(f))
+					{
+						logLine("设备链工厂 IID" + std::to_string(i) + " = " + hexOf(f) + " (与已有重复, 跳过)");
+						continue;
+					}
+					seen[nSeen++] = f;
+					logLine("设备链工厂 IID" + std::to_string(i) + " = " + hexOf(f) + " 来自 " + modulePathOf(f));
+					DXGI_SWAP_CHAIN_DESC d{};
+					d.BufferDesc.Width = 4;
+					d.BufferDesc.Height = 4;
+					d.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+					d.SampleDesc.Count = 1;
+					d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+					d.BufferCount = 2;
+					d.OutputWindow = hwnd;
+					d.Windowed = TRUE;
+					d.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+					IDXGISwapChain* aux = nullptr;
+					HRESULT ahr = reinterpret_cast<IDXGIFactory*>(f)->CreateSwapChain(dev, &d, &aux);
+					if (FAILED(ahr) || !aux)
+					{
+						logLine("设备链辅助 dummy IID" + std::to_string(i) + " CreateSwapChain 失败 " + hexHr(ahr));
+					}
+					else
+					{
+						logLine("设备链辅助 dummy IID" + std::to_string(i) + ": " + swapDesc(aux));
+						collectSwpVariants(aux, false, ("设备链dummy IID" + std::to_string(i)).c_str());
+					}
+					newFacs[nNew] = f;
+					newPlus2[nNew] = (i == 0);
+					newIdx[nNew] = i;
+					++nNew;
+				}
+				// pass2: 统一挂这些新工厂的交换链创建方法 (辅助 dummy 已先建, 无自身 ★)
+				for (int k = 0; k < nNew; ++k)
+					collectFacVariants(newFacs[k], newPlus2[k],
+					                    ("设备链GetParent工厂 IID" + std::to_string(newIdx[k])).c_str());
+				adp->Release();
+			}
+			gid->Release();
+		}
+		else
+		{
+			logLine("设备链: QI IDXGIDevice 失败 — 跳过该通道");
+		}
+	}
+
 	// 8) 挂五个口径工厂的交换链创建方法 — 游戏创建交换链时就地打它的 vtable;
 	//    plus2 仅对 IID2 口径为 true (该布局保证含槽14/15/17, 防越界)
 	{
@@ -969,7 +1065,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 {
 	info->infoVersion = PluginInfo::kInfoVersion;
 	info->name = "PocPresenter";
-	info->version = (0u << 16) | (3u << 8) | 0u; // 0.3.0
+	info->version = (0u << 16) | (4u << 8) | 0u; // 0.4.0
 
 	if (skse->isEditor)  // 只进游戏本体, 不进 Creation Kit
 		return false;
@@ -980,7 +1076,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.3.0 (PoC-A v1.2: 同步安装 + 五口径工厂 + 看门狗) ====");
+	logLine("==== poc-presenter v0.4.0 (PoC-A v1.3: 同步安装 + 五口径工厂 + 设备链 + 看门狗) ====");
 
 	InitializeCriticalSection(&g_cs);
 

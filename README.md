@@ -72,24 +72,28 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
 本步**不碰 Vulkan、不改变画面**，只产出日志。
 
-**机制（v1.2，五通道）**：
+**机制（v1.3，六通道）**：
 1. **同步安装（v1.2 主修正）**——钩子在 `SKSEPlugin_Load` 内同步装完（等模块 ≤5s、等
    renderdoc ≤2s 兜加载序）；SKSE 主线程加载插件，Load 不返回游戏就无法继续初始化，
-   由此**保证先于游戏交换链创建**（v1.1 后台线程安装曾输给渲染器初始化的竞态：日志
-   21:16:20 装完，而游戏 overlay 里游戏窗口排在我们 dummy 之前 = 游戏交换链先建好了）；
+   由此**保证先于游戏交换链创建**（v1.1 后台线程安装曾输给渲染器初始化的竞态）；
 2. **多 vtable 收集**——dummy1（ForHwnd→SwapChain1 口径）+ dummy2（工厂 v0 CreateSwapChain 口径）
    + 两者各自 QI SwapChain/1/2/3，每张不同 vtable 挂槽 4（Present），经 1 口径见过的加挂槽 18（Present1）；
 3. **五口径工厂拦截**——CreateDXGIFactory 与 CreateDXGIFactory1 各配 IID0/1/2，加
    CreateDXGIFactory2：RenderDoc 包装类若按「所请求接口」分化，游戏要的那张也在登记之列；
    挂槽 10/14/15/17 四个交换链创建方法，游戏创建交换链时拿到其对象就地打 vtable，日志带 ★；
-4. **安全阀**——原值须落在 dxgi.dll / renderdoc.dll 内才挂（防错槽位）；14/15/17 仅对
+4. **设备链通道（v1.3 新增）**——device → QI `IDXGIDevice` → `GetAdapter` → `GetParent`
+   三 IID 取工厂（游戏常见拿工厂路径，非导出）；每个新工厂先建辅助 v0 dummy（拿它所属类的
+   交换链 vtable——若是真 dxgi 类，游戏 Present 即被槽 4 截住），再挂其创建方法；
+5. **安全阀**——原值须落在 dxgi.dll / renderdoc.dll 内才挂（防错槽位）；14/15/17 仅对
    IID2 口径读（防越界）；
-5. **看门狗**——每 5s 复查已挂槽位，被第三方改写则记录并打回；120s 仍 0 次 Present 给汇总告警。
+6. **看门狗**——每 5s 复查已挂槽位，被第三方改写则记录并打回；120s 仍 0 次 Present 给汇总告警。
 
 钩子按「调用方 vtable 地址」查表转调原函数；原函数若来自 RenderDoc 包装层则抓帧链路不受影响。
-> 实测链：v1.0 单挂 dummy 槽4 → 0 触发（类不匹配）；v1.1 四通道 → 仍 0 触发、无 ★，
-> 但游戏内 RenderDoc overlay 出现「window0(游戏)/window1(dummy)」→ **P1 时序竞态确诊**，
-> 故 v1.2 把安装改为同步。
+> 实测链：v1.0 单挂槽4 → 0 触发（类不匹配）；v1.1 四通道 → 0 触发、无 ★，overlay 暴露
+> 游戏窗口先于我们的 dummy → P1 时序确诊 → v1.2 改同步安装；**v1.2 双跑**：有
+> capture-helper 时五口径全 OK 但都在 renderdoc 类上、仍 0 触发，无 capture-helper 时
+> ★ 在 +7s 于 dxgi 真类正常触发 → **P3 类分叉确诊**（游戏拿工厂不走导出 / renderdoc
+> 生效前已有真对象）→ v1.3 增设设备链通道做双类覆盖。
 
 ### 构建
 push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从 **Actions → Artifacts**
@@ -101,6 +105,9 @@ push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从
 3. 看 `Data/SKSE/Plugins/poc-presenter.log`，依次应出现：
    - `同步安装完成 (SKSE 加载线程内, 先于游戏渲染器初始化)`（v1.2 关键行——时序竞态已排除）
    - `工厂口径0..4: OK 0x...`（五口径取工厂对象的结果）
+   - `设备链 GetAdapter = 0x... 来自 ...` + `设备链工厂 IID0/1/2 = ... 来自 ...`
+     （v1.3 关键行——若「来自」落在 **dxgi.dll** 即拿到真类，双类覆盖成立）
+   - `设备链辅助 dummy IID...: ...`（该类交换链 vtable 也被收集的证据）
    - `登记完成: 交换链 vtable N 个 (含 Present 挂钩), 工厂 vtable M 个 (含创建方法挂钩)`
    - `★ 工厂拦截 ...`（游戏创建交换链时——出现即证明时机+口径都已覆盖）
    - **`第 1 次 Present (经 Present): ... 1920x1080 ... title="..."`**（关键行——证明拦到游戏 Present）
