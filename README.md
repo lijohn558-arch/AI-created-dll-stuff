@@ -72,9 +72,17 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
 本步**不碰 Vulkan、不改变画面**，只产出日志。
 
-**机制**：进程内自建 dummy 设备 + dummy 交换链 → 拿到游戏同款交换链的 vtable →
-`VirtualProtect` 改写类级槽 4（Present）→ 钩子内计数/打印交换链描述/算 FPS 后转调原函数。
-原函数若来自 RenderDoc 包装层则抓帧链路不受影响（先我们 → 后 RenderDoc → 再真实呈现）。
+**机制（v1.1，四通道）**：
+1. **多 vtable 收集**——dummy1（ForHwnd→SwapChain1 口径）+ dummy2（工厂 v0 CreateSwapChain 口径）
+   + 两者各自 QI SwapChain/1/2/3，每张不同 vtable 挂槽 4（Present），经 1 口径见过的加挂槽 18（Present1）；
+2. **工厂拦截**——挂工厂 vtable 槽 10/14/15/17（四个交换链创建方法），游戏创建交换链时拿到其对象
+   引用就地打 vtable（兜「每实例一张 vtable」），日志带 ★；
+3. **安全阀**——原值须落在 dxgi.dll / renderdoc.dll 内才挂（防错槽位）；
+4. **看门狗**——每 5s 复查已挂槽位，被第三方改写则记录并打回；120s 仍 0 次 Present 给汇总告警。
+
+钩子按「调用方 vtable 地址」查表转调原函数；原函数若来自 RenderDoc 包装层则抓帧链路不受影响。
+> v1.0 实测：单挂 dummy 的槽 4，30s 内 0 触发（slot4 原值在 renderdoc.dll 内）→ 游戏交换链用的
+> 不是同一张 vtable，故升级为本四通道方案。
 
 ### 构建
 push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从 **Actions → Artifacts**
@@ -84,11 +92,12 @@ push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从
 1. `poc-presenter.dll` 放入 `<游戏>/Data/SKSE/Plugins/`（与 capture-helper.dll 并列）
 2. MO2 正常启动游戏，进到有画面的场景
 3. 看 `Data/SKSE/Plugins/poc-presenter.log`，依次应出现：
-   - `Hook 安装成功: Present 槽4 -> ...`
-   - **`第 1 次 Present: 1920x1080 ... title="..."`**（关键行——证明拦到了游戏的 Present）
+   - `登记完成: 交换链 vtable N 个 (含 Present 挂钩), 工厂 vtable M 个 (含创建方法挂钩)`
+   - `★ 工厂拦截 ...`（可选，视游戏交换链创建路径）
+   - **`第 1 次 Present (经 Present): ... 1920x1080 ... title="..."`**（关键行——证明拦到游戏 Present）
    - `Present 已开始触发 ... — PoC-A 验收通过`，之后每 600 帧一行 `近600帧 xx.x FPS`
-4. 游戏画面应完全正常（本 PoC 不改变呈现）。若 30s 后出现「0 次 Present」告警，
-   按日志中的模块路径与 vtable 信息迭代（时序问题在上 Vulkan 前暴露正是本 PoC 的价值）
+4. 游戏画面应完全正常（本 PoC 不改变呈现）。若 120s 后仍 0 次触发，看日志里各 vtable 的
+   本体/原值模块、★工厂拦截是否出现、有无「被改写」记录，贴日志迭代（多通道自证正是 v1.1 的价值）
 
 验收通过后进入 **PoC-B**：在 Present 里创建 Vulkan instance/swapchain → 游戏窗口出
 清屏/三角形 → F12 抓这帧 → `rdc_run` 提取链 → `rdc_compare -Base S4 -Cand <候选>` 首次候选比对。
