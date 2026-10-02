@@ -16,7 +16,7 @@
  *
  * 为什么 dummy 和游戏的交换链共享同一张 vtable:
  *   - 无 RenderDoc: 双方都来自真实 dxgi.dll 的交换链实现类, vtable 是类级共享 (.rdata);
- *   - 有 RenderDoc (in-app, capture-helper 已加载): 其对 CreateDXGIFactory*/D3D11CreateDevice
+ *   - 有 RenderDoc (in-app, capture-helper 已加载): 其对 CreateDXGIFactory 系列与 D3D11CreateDevice
  *     的拦截让 dummy 与游戏拿到同一包装类 → 改的仍是游戏实际用的那张 vtable, 且"原函数"
  *     指向 RenderDoc 的包装 Present → 抓帧链路不受影响 (先我们、后 RenderDoc、再真实呈现);
  *   - 若因加载时序导致两边不同类 (装好但不触发), 日志 30s 后给出告警 → 按证据迭代。
