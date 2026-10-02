@@ -114,6 +114,20 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 > dummy3 FLIP 被系统拒 0x80070005（低优先级）。**修法 = 加载序**：`capture-helper.dll` 改名
 > `z-capture-helper.dll` 让 poc-presenter 先装真类 → 待双跑验证（无 helper 取证 GFE / 改名后
 > 带 helper 验收）。
+> **v1.6 落地（外部同好建议采纳 + 本机字节取齐）**：建议四方案——A 解包 renderdoc 包装取真
+> 对象、B 函数级 detour（更彻底）、C 不再追真工厂 vtable（★ 仅诊断，目标是 Present）、
+> D 加载序（改名零成本可测、与 B 并行不冲突），外加顺手修「设备链工厂行打对象地址恒 ?」
+> 的 bug。本机用 PowerShell `Add-Type` 只读转储取齐真存根字节（dxgi 与游戏同 boot 同基址
+> `0x7FFBBACF0000`，三址全验证落在本进程 dxgi 内）：Present `@dxgi+0x2E460` 前 **14B 恰为
+> 指令边界且零地址依赖**（`48 83 EC 38 4C 89 44 24 50 4C 8D 4C 24 50`）、Present1
+> `@dxgi+0x4EE60` 边界在 **15B**、CreateSwapChain 序言 25B 起有 RIP 相对寻址（18B 可窃，
+> 但按 C 不挂工厂）→ **v1.6 = 方案B**：入口只改 5B `E9 rel32` → 近端跳板（±2GB 内
+> VirtualAlloc 存 FF25 绝对跳到钩子）——只碰前 5 字节，不破坏第三方 trampoline 的续接区；
+> 入口若已被 GFE/renderdoc 改成跳板（E9/FF25/mov rax,jmp rax）→ **CHAIN** 计数后直接转发
+> 其目标、链式共存；前导字节与预期不符 → 保守跳过并留档；vtable 钩子转调期间置 TLS 标记、
+> 函数钩子据此跳过计数（双层不双计）——**任何调用路径（类 vtable 虚调用 / GFE 包装绕行 /
+> renderdoc 动态转发）最终都落进同一函数入口，计数必然发生**（v1.4「计数恒 0」的破局点）。
+> 方案A 暂缓为 v1.7 备选（B 若通则 A 仅诊断增益）。
 
 ### 构建
 push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从 **Actions → Artifacts**
@@ -132,8 +146,15 @@ push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从
    - `...: vtable 已登记 (与既有同类) 0x...`（游戏交换链与 dummy 同类的证据——
      此时槽 4 已挂，下一行就该是 Present）
    - `登记完成: 交换链 vtable N 个 (含 Present 挂钩), 工厂 vtable M 个 (含创建方法挂钩)`
+   - `方案B 交叉: dummy slot4 orig4=... == dxgi+0x2E460 (真类直验 ✓)`（无 renderdoc）或
+     `≠ ... (包装类, 属预期, 方案B 不受影响)`（有 renderdoc）
+   - `方案B Present: RAW 已装 target=... trampoline=... 窃取14B (入口 5B E9)`；
+     若入口已被 GFE/renderdoc 先占则为 `CHAIN 已装 (入口原为 ...)`——两者都是成功
+     （v1.6 关键行——函数级 detour 生效，绕过 vtable 的 Present 也被计数；前导字节
+     守卫失败会打 `入口字节与预期不符 ... 保守跳过` 并附前 16 字节留档）
    - `★ 工厂拦截 ...`（游戏创建交换链时——出现即证明时机+口径都已覆盖）
-   - **`第 1 次 Present (经 Present): ... 1920x1080 ... title="..."`**（关键行——证明拦到游戏 Present）
+   - **`第 1 次 Present (经 Present / 函数detour): ... 1920x1080 ... title="..."`**
+     （关键行——证明拦到游戏 Present；经 `函数detour` 即方案B 独立命中）
    - `Present 已开始触发 ... — PoC-A 验收通过`，之后每 600 帧一行 `近600帧 xx.x FPS`
 4. 游戏画面应完全正常（本 PoC 不改变呈现）。若 120s 后仍 0 次触发，看日志里各 vtable 的
    本体/原值模块、★工厂拦截是否出现、有无「被改写」记录，贴日志迭代（多通道自证价值）

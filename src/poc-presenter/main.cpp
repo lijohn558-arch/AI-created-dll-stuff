@@ -1,5 +1,5 @@
 /*
- * poc-presenter — PoC-A v1.1 (插件版本 0.2.0): SKSE 插件载体的 Present Hook 验证
+ * poc-presenter — PoC-A v1.6 (插件版本 0.7.0): SKSE 插件载体的 Present Hook 验证
  *
  * 目的 (docs/00 首周行动项 #4 / 最高风险项 #1 的第一环):
  *   证明能在真实游戏进程内拦截 IDXGISwapChain::Present —— 这是 PoC-B (在 Present 里
@@ -69,6 +69,28 @@
  *   探针 W (窗口): 安装末尾与 t=10s/60s 枚举本进程顶层窗口, 找第二个交换链宿主;
  *   附带: dummy3 FLIP_DISCARD 口径纳入登记 (翻转类 vtable 覆盖)。
  *
+ * v1.6 对策 (v1.5 实测 2026-10-02/03 — renderdoc 存根字节实锤 + 本机 dxgi 字节取齐;
+ *   采纳外部同好对四方案的建议, 落地方案B + 顺手 bug 修):
+ *   - 有 renderdoc: 探针 B 实锤包装类 slot4 = 11 字节动态转发存根
+ *     (48 8B 49 10 / 48 8B 01 / 48 FF 60 20) — 每次调用重取真对象 slot4, 不缓存 FP;
+ *   - 无 renderdoc (GFE 在场, run2): 类 vtable 挂好、看门狗零改写、计数恒 0 →
+ *     存在绕过类 vtable 的 Present 调用路径 (覆盖层包装 / 缓存函数指针);
+ *   - 本机同 boot 只读转储取齐 dxgi 真存根字节 (与游戏同 dxgi 基址):
+ *     Present  @dxgi+0x2E460 前14B 恰为指令边界且零地址依赖;
+ *     Present1 @dxgi+0x4EE60 边界在 15B — 窃取长度与字节守卫由此定死。
+ *   → 方案B (函数级 detour, 覆盖一切调用路径 — v1.4 计数恒 0 的破局点):
+ *     1) 目标 = dxgi 存根 (RVA + 前导字节双校验; 字节不符 → 保守跳过并留档);
+ *     2) 入口只改 5 字节 E9 → 近端跳板 (±2GB 内 VirtualAlloc, 存 FF25 绝对跳到钩子)
+ *        — 只碰前 5 字节, 不破坏第三方 trampoline 的续接字节;
+ *     3) 入口若已被第三方 (GFE/renderdoc) 改成跳板 (E9 / FF25 / mov rax,jmp rax)
+ *        → CHAIN: 不做 trampoline, 钩子计数后直接转发其目标, 链式共存;
+ *     4) vtable 钩子转调期间置 TLS 标记, 函数钩子据此跳过计数 — 双层不双计,
+ *        任何单一路径必被其一计到。
+ *   附带: 设备链工厂 IID 行补打 vtable 所在模块 (原打对象地址=堆上, 恒 "来自 ?")。
+ *   暂缓: 方案A (解包 renderdoc 包装取真对象) 留作 v1.7 备选 (B 若通则 A 仅诊断增益);
+ *         方案D (capture-helper 改名 z- 先加载) 零成本可顺手验证; 按建议不再追真
+ *         工厂 vtable (★ 仅诊断, 目标是 Present 而非创建路径)。
+ *
  * 钩子转调: 按"调用方 vtable 地址"查登记表取原函数 —— 多张 vtable 各存各的原值。
  * 线程安全: 登记表/槽位写入全部走同一把 CRITICAL_SECTION (可重入)。
  *
@@ -98,6 +120,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <fstream>
 #include <string>
@@ -543,6 +566,222 @@ void notePresent(const char* via, IDXGISwapChain* sc)
 	}
 }
 
+// ---------- v1.6 方案B: 真 Present/Present1 函数级 detour ----------
+// 目标 = dxgi 里 vtable slot4/18 直指的存根函数 (RVA 对本机 dxgi.dll 文件版本恒定,
+// 前导字节双校验防漂移)。任何调用路径 — 类 vtable 虚调用、GFE 包装直调、renderdoc
+// 包装层动态转发 — 最终都落进这个函数入口, 计数必然发生。
+//
+// 入口只写 5 字节 E9 rel32 → 近端跳板 (±2GB 内分配, 存 FF25 绝对跳转到钩子):
+//   - 只碰前 5 字节 → 即便第三方 (GFE/renderdoc) 先前的 detour 只窃取了 5~N 字节,
+//     其 trampoline 续接区 (t+5 起) 保持原样, 不会踩坏;
+//   - 钩子函数可能离 dxgi 超过 ±2GB (模块高位分布), 故不能直接 E9, 必须近端中转;
+//   - 入口已是他人跳板 → CHAIN 模式: 不建 trampoline, 钩子计数后把原跳板目标当作
+//     resume 直接转发, 与既有 detour 链式共存。
+// trampoline (RAW) = 窃取的原字节 + FF25 绝对跳回 target+steal, 分配在任意位置。
+
+struct CodeDetour
+{
+	void* target = nullptr;
+	void* resume = nullptr;  // RAW: trampoline; CHAIN: 第三方跳板目标
+	bool active = false;
+};
+
+static CodeDetour g_detP, g_detP1;
+// vtable 钩子转调原函数期间置位 → 函数钩子识别为"已被 vtable 层计过数", 只转发
+static thread_local bool g_inVtableHook = false;
+
+static bool isExecutablePage(const void* p)
+{
+	MEMORY_BASIC_INFORMATION mbi{};
+	if (VirtualQuery(p, &mbi, sizeof(mbi)) == 0 || mbi.State != MEM_COMMIT)
+		return false;
+	const DWORD prot = mbi.Protect & 0xFF;
+	return prot == PAGE_EXECUTE || prot == PAGE_EXECUTE_READ ||
+	       prot == PAGE_EXECUTE_READWRITE || prot == PAGE_EXECUTE_WRITECOPY;
+}
+
+// 5 字节 E9 rel32; 目标超出 ±2GB 时返回 false (不写)
+static bool writeRelJump(void* at, void* to)
+{
+	const intptr_t rel = reinterpret_cast<const unsigned char*>(to) -
+	                     (reinterpret_cast<const unsigned char*>(at) + 5);
+	if (rel < INT32_MIN || rel > INT32_MAX)
+		return false;
+	DWORD old = 0;
+	if (!VirtualProtect(at, 5, PAGE_EXECUTE_READWRITE, &old))
+		return false;
+	unsigned char b[5] = { 0xE9, 0, 0, 0, 0 };
+	const int32_t r32 = static_cast<int32_t>(rel);
+	memcpy(b + 1, &r32, 4);
+	memcpy(at, b, 5);
+	DWORD tmp = 0;
+	VirtualProtect(at, 5, old, &tmp);
+	FlushInstructionCache(GetCurrentProcess(), at, 5);
+	return true;
+}
+
+// 在 target ±64MB 内 (64KB 粒度) 找空闲页, 存放 FF25 → hook 的 14 字节跳板
+static void* allocNearCode(void* target, size_t size)
+{
+	const uintptr_t t = reinterpret_cast<uintptr_t>(target);
+	const uintptr_t base = t & ~uintptr_t(0xFFFF);
+	static const uintptr_t kSteps[] = {
+		0x10000, 0x20000, 0x40000, 0x80000, 0x100000, 0x200000,
+		0x400000, 0x800000, 0x1000000, 0x2000000, 0x4000000 };
+	for (size_t i = 0; i < sizeof(kSteps) / sizeof(kSteps[0]); ++i)
+	{
+		if (base <= kSteps[i])
+			break;
+		const uintptr_t cands[2] = { base - kSteps[i], base + kSteps[i] };
+		for (int c = 0; c < 2; ++c)
+		{
+			void* got = VirtualAlloc(reinterpret_cast<void*>(cands[c]), size,
+			                          MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+			if (!got)
+				continue;
+			const intptr_t d = static_cast<intptr_t>(reinterpret_cast<uintptr_t>(got) - t);
+			if (d >= INT32_MIN + 32 && d <= INT32_MAX - 32)
+				return got;
+			VirtualFree(got, 0, MEM_RELEASE);
+		}
+	}
+	return nullptr;
+}
+
+// 入口跳转: 先试直写 E9 (同 ±2GB), 否则建近端跳板再 E9
+static bool writeEntryJump(void* target, void* hook)
+{
+	if (writeRelJump(target, hook))
+		return true;
+	void* stub = allocNearCode(target, 64);
+	if (!stub)
+		return false;
+	unsigned char b[14] = { 0xFF, 0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+	memcpy(b + 6, &hook, 8);
+	memcpy(stub, b, 14);
+	FlushInstructionCache(GetCurrentProcess(), stub, 14);
+	return writeRelJump(target, stub);
+}
+
+// trampoline = 窃取的原字节 + FF25 绝对跳回 target+steal (自身内存, 无距离约束)
+static void* allocTrampoline(const unsigned char* stolen, int steal, void* backTo)
+{
+	unsigned char* p = static_cast<unsigned char*>(
+	    VirtualAlloc(nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+	if (!p)
+		return nullptr;
+	memcpy(p, stolen, steal);
+	p[steal] = 0xFF;
+	p[steal + 1] = 0x25;
+	p[steal + 2] = p[steal + 3] = p[steal + 4] = p[steal + 5] = 0;
+	memcpy(p + steal + 6, &backTo, 8);
+	FlushInstructionCache(GetCurrentProcess(), p, steal + 14);
+	return p;
+}
+
+static bool installCodeDetour(CodeDetour& d, void* target, void* hook,
+                              const unsigned char* expect, int expectLen, int steal,
+                              const char* tag)
+{
+	const std::string tagStr = std::string("方案B ") + tag;
+	if (!isExecutablePage(target))
+	{
+		logLine(tagStr + ": 目标 " + hexOf(target) + " 不可执行, 跳过");
+		return false;
+	}
+	unsigned char orig[16] = {};
+	memcpy(orig, target, sizeof(orig));
+
+	if (memcmp(orig, expect, expectLen) == 0)
+	{
+		// RAW: 入口是原封的 dxgi 存根 → 窃取字节做 trampoline
+		void* tr = allocTrampoline(orig, steal, static_cast<unsigned char*>(target) + steal);
+		if (!tr)
+		{
+			logLine(tagStr + ": trampoline VirtualAlloc 失败");
+			return false;
+		}
+		if (!writeEntryJump(target, hook))
+		{
+			logLine(tagStr + ": 入口跳转写入失败 (近端跳板分配或 VirtualProtect 拒绝)");
+			return false;
+		}
+		d.resume = tr;
+		d.active = true;
+		logLine(tagStr + ": RAW 已装 target=" + hexOf(target) +
+		        " trampoline=" + hexOf(tr) + " 窃取=" + std::to_string(steal) + "B (入口 5B E9)");
+		return true;
+	}
+
+	// 入口已被第三方改成跳板? → CHAIN: 计数后直接转发其目标, 保留其 handler 链
+	void* chain = nullptr;
+	const char* how = "";
+	if (orig[0] == 0xE9)
+	{
+		int32_t r = 0;
+		memcpy(&r, orig + 1, 4);
+		chain = static_cast<unsigned char*>(target) + 5 + r;
+		how = "E9 rel32";
+	}
+	else if (orig[0] == 0xFF && orig[1] == 0x25)
+	{
+		int32_t disp = 0;
+		memcpy(&disp, orig + 2, 4);
+		const void** slot = reinterpret_cast<const void**>(
+		    static_cast<unsigned char*>(target) + 6 + disp);
+		if (memReadable(slot, sizeof(void*)))
+			memcpy(&chain, slot, sizeof(void*));
+		how = "FF25 abs-indirect";
+	}
+	else if (orig[0] == 0x48 && orig[1] == 0xB8 && orig[10] == 0xFF && orig[11] == 0xE0)
+	{
+		memcpy(&chain, orig + 2, 8);
+		how = "mov rax,imm64; jmp rax";
+	}
+	if (chain && isExecutablePage(chain))
+	{
+		if (!writeEntryJump(target, hook))
+		{
+			logLine(tagStr + ": CHAIN 模式入口跳转写入失败");
+			return false;
+		}
+		d.resume = chain;
+		d.active = true;
+		logLine(tagStr + ": CHAIN 已装 (入口原为 " + std::string(how) + ") target=" +
+		        hexOf(target) + " → 第三方目标 " + hexOf(chain) + " 来自 " +
+		        modulePathOf(chain) + ", 原入口前16字节=" + hexBytes(orig, 16));
+		return true;
+	}
+
+	logLine(tagStr + ": 入口字节与预期不符且非可识别跳板, 保守跳过; target=" +
+	        hexOf(target) + " 前16字节=" + hexBytes(orig, 16));
+	return false;
+}
+
+// 函数级钩子: TLS 置位 = 由 vtable 钩子转来 (它已计数) → 只转发;
+// 否则 = 绕过类 vtable 的直呼路径 (GFE 包装 / 缓存 FP / 包装层动态转发) → 计数。
+static HRESULT STDMETHODCALLTYPE detouredPresent(IDXGISwapChain* sc, UINT sync, UINT flags)
+{
+	if (!g_detP.resume)
+		return E_FAIL;
+	if (!g_inVtableHook)
+		notePresent("函数detour", sc);
+	typedef HRESULT(STDMETHODCALLTYPE* Fn)(IDXGISwapChain*, UINT, UINT);
+	return reinterpret_cast<Fn>(g_detP.resume)(sc, sync, flags);
+}
+
+static HRESULT STDMETHODCALLTYPE detouredPresent1(IDXGISwapChain1* sc, UINT sync, UINT flags,
+                                                  const DXGI_PRESENT_PARAMETERS* params)
+{
+	if (!g_detP1.resume)
+		return E_FAIL;
+	if (!g_inVtableHook)
+		notePresent("函数detour1", sc);
+	typedef HRESULT(STDMETHODCALLTYPE* Fn)(IDXGISwapChain1*, UINT, UINT,
+	                                       const DXGI_PRESENT_PARAMETERS*);
+	return reinterpret_cast<Fn>(g_detP1.resume)(sc, sync, flags, params);
+}
+
 // ---------- 钩子本体 ----------
 
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* sc, UINT sync, UINT flags)
@@ -558,7 +797,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* sc, UINT sync, UINT flag
 		logLine("!! hookedPresent: vtable " + hexOf(vtbl) + " 无登记原函数 — 返回 E_FAIL");
 		return E_FAIL;
 	}
-	return reinterpret_cast<Present_t>(orig)(sc, sync, flags);
+	g_inVtableHook = true; // 转调期间置位: orig(存根) 现已被方案B detour, 其钩子据此不双计
+	const HRESULT hr = reinterpret_cast<Present_t>(orig)(sc, sync, flags);
+	g_inVtableHook = false;
+	return hr;
 }
 
 HRESULT STDMETHODCALLTYPE hookedPresent1(IDXGISwapChain1* sc, UINT sync, UINT flags,
@@ -575,7 +817,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent1(IDXGISwapChain1* sc, UINT sync, UINT fl
 		logLine("!! hookedPresent1: vtable " + hexOf(vtbl) + " 无登记原函数 — 返回 E_FAIL");
 		return E_FAIL;
 	}
-	return reinterpret_cast<Present1_t>(orig)(sc, sync, flags, params);
+	g_inVtableHook = true;
+	const HRESULT hr18 = reinterpret_cast<Present1_t>(orig)(sc, sync, flags, params);
+	g_inVtableHook = false;
+	return hr18;
 }
 
 HRESULT STDMETHODCALLTYPE hookedCreateSwapChain(IDXGIFactory* self, IUnknown* dev,
@@ -999,7 +1244,11 @@ bool doInstall(HMODULE hd3d11, HMODULE hdxgi)
 						continue;
 					}
 					seen[nSeen++] = f;
-					logLine("设备链工厂 IID" + std::to_string(i) + " = " + hexOf(f) + " 来自 " + modulePathOf(f));
+					// 外部建议采纳: 对象在堆上, modulePathOf(对象) 恒 "?",
+					// 须打它 vtable 落在哪个模块 (renderdoc 类 vs 真 dxgi 类一眼可辨)
+					void** fvt = *reinterpret_cast<void***>(f);
+					logLine("设备链工厂 IID" + std::to_string(i) + " = " + hexOf(f) +
+					        " vtbl=" + hexOf(fvt) + " 来自 " + modulePathOf(fvt));
 					DXGI_SWAP_CHAIN_DESC d{};
 					d.BufferDesc.Width = 4;
 					d.BufferDesc.Height = 4;
@@ -1076,6 +1325,39 @@ bool doInstall(HMODULE hd3d11, HMODULE hdxgi)
 	if (g_facN > 0 && g_fac[0].o10)
 		logLine("探针: CreateSwapChain 原实现前32字节 @ " + hexOf(g_fac[0].o10) + " = " +
 		        hexBytes(g_fac[0].o10, 32));
+
+	// v1.6 方案B: 对 dxgi 真 Present/Present1 存根打函数级 detour
+	// RVA 对本机 dxgi.dll 文件版本恒定; 前导字节双校验, 版本漂移即保守跳过
+	{
+		HMODULE hdx = GetModuleHandleA("dxgi.dll");
+		static const unsigned char kPresent[14] = {
+			0x48, 0x83, 0xEC, 0x38, 0x4C, 0x89, 0x44, 0x24, 0x50, 0x4C, 0x8D, 0x4C, 0x24, 0x50 };
+		static const unsigned char kPresent1[15] = {
+			0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10,
+			0x57, 0x48, 0x83, 0xEC, 0x20 };
+		if (hdx)
+		{
+			void* p = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(hdx) + 0x2E460);
+			void* p1 = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(hdx) + 0x4EE60);
+			// 交叉验证: 无 renderdoc 时 dummy 登记的 orig4 应等于 dxgi 存根本体
+			void* orig4 = nullptr;
+			EnterCriticalSection(&g_cs);
+			if (g_swpN > 0)
+				orig4 = g_swp[0].orig4;
+			LeaveCriticalSection(&g_cs);
+			if (orig4)
+				logLine("方案B 交叉: dummy slot4 orig4=" + hexOf(orig4) +
+				        (orig4 == p ? " == dxgi+0x2E460 (真类直验 ✓)"
+				                    : " ≠ dxgi+0x2E460 (包装类, 属预期, 方案B 不受影响)"));
+			installCodeDetour(g_detP, p, reinterpret_cast<void*>(&detouredPresent),
+			                  kPresent, 14, 14, "Present");
+			installCodeDetour(g_detP1, p1, reinterpret_cast<void*>(&detouredPresent1),
+			                  kPresent1, 15, 15, "Present1");
+		}
+		else
+			logLine("方案B: dxgi.dll 未加载 — 跳过函数级 detour");
+	}
+
 	// v1.5 探针 W: 本进程顶层窗口 — 找可能漏钩的第二个交换链的宿主窗口
 	logProcessWindows("安装完成时");
 	return true;
@@ -1236,7 +1518,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 {
 	info->infoVersion = PluginInfo::kInfoVersion;
 	info->name = "PocPresenter";
-	info->version = (0u << 16) | (6u << 8) | 0u; // 0.6.0
+	info->version = (0u << 16) | (7u << 8) | 0u; // 0.7.0
 
 	if (skse->isEditor)  // 只进游戏本体, 不进 Creation Kit
 		return false;
@@ -1247,7 +1529,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.6.0 (PoC-A v1.5: 同步安装 + 五口径 + 设备链 + 对象/字节/窗口三探针) ====");
+	logLine("==== poc-presenter v0.7.0 (PoC-A v1.6: 同步安装 + 五口径 + 设备链 + 三探针 + 方案B函数级detour) ====");
 
 	InitializeCriticalSection(&g_cs);
 
