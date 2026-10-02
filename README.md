@@ -95,7 +95,11 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 > ★ 在 +7s 于 dxgi 真类正常触发 → **P3 类分叉确诊**（游戏拿工厂不走导出 / renderdoc
 > 生效前已有真对象）→ v1.3 增设设备链通道做双类覆盖；**v1.3 双跑实测**：设备链因
 > 误用 QI 而静默失败（适配器要 GetParent），且无 renderdoc 时 ★ +8s 后日志终止（匹配
-> 路径静默、无 Present 行）→ v1.4 改 GetParent、补失败日志/匹配日志、★ 行附 swapDesc。
+> 路径静默、无 Present 行）→ v1.4 改 GetParent、补失败日志/匹配日志、★ 行附 swapDesc；
+> **v1.4 双跑**：设备链/辅助 dummy 全通，但无 renderdoc 时★拦到游戏交换链且其 vptr=
+> 我们挂好的类、120s 槽位未被改写，**Present 计数却恒 0**（游戏虚调用没走到我们的槽）
+> → v1.5 加三探针：A 对象 vptr 盯梢、B 原实现前 32 字节（为函数级 detour 铺路）、
+> W 本进程窗口枚举（找第二个交换链宿主），附 FLIP_DISCARD 口径 dummy3。
 
 ### 构建
 push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从 **Actions → Artifacts**

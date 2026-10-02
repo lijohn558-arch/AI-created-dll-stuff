@@ -56,6 +56,19 @@
  *     类"假说一致; GetParent 若拿到真类即双类覆盖成立, 若仍 renderdoc 类 →
  *     下一步加载序方案 (先于 capture-helper 加载, 拿未被 renderdoc 拦截的真导出)。
  *
+ * v1.5 探针 (v1.4 双跑实测 2026-10-02 22:34/22:38 — ★ 链全通但 Present 恒 0):
+ *   - 无 renderdoc: ★ 拦到游戏交换链 (1920x1080 title="Skyrim Special Edition"),
+ *     对象 vptr = 我们挂好的类 vtable, 看门狗 120s 未见槽位被改写, 但计数恒 0 →
+ *     游戏的 Present 虚调用根本没走到我们的槽 (对象 vptr 后变 / 另一交换链宿主 /
+ *     覆盖层包装 / 或未在渲) — 只能加探针取证;
+ *   - 有 renderdoc: 设备链 GetParent 成功但三工厂+辅助 dummy 全落 renderdoc 类,
+ *     游戏工厂仍不在其中 → 0 ★; 需真 dxgi 类对象 (加载序方案, v1.6 备选)。
+ *   探针 A (对象级): ★ 记录游戏交换链指针, 看门狗每 5s 重读其 vptr/slot4, 变更即打日志;
+ *   探针 B (字节): 安装末尾打 Present/Present1/CreateSwapChain 原实现前 32 字节,
+ *     为函数级 detour (任何虚调用路径都会经过的真实现) 选安全窃取长度;
+ *   探针 W (窗口): 安装末尾与 t=10s/60s 枚举本进程顶层窗口, 找第二个交换链宿主;
+ *   附带: dummy3 FLIP_DISCARD 口径纳入登记 (翻转类 vtable 覆盖)。
+ *
  * 钩子转调: 按"调用方 vtable 地址"查登记表取原函数 —— 多张 vtable 各存各的原值。
  * 线程安全: 登记表/槽位写入全部走同一把 CRITICAL_SECTION (可重入)。
  *
@@ -252,6 +265,7 @@ CRITICAL_SECTION g_cs;  // 可重入, 在 SKSEPlugin_Load 中初始化
 std::atomic<uint64_t> g_presentCount{0};
 std::chrono::steady_clock::time_point g_lastLog{};
 uint64_t g_lastLogCount = 0;
+std::atomic<void*> g_gameSc{nullptr}; // ★ 拦到的游戏交换链对象 (对象级探针用)
 
 void* lookupPresentOrig4(void** vtbl)
 {
@@ -431,6 +445,62 @@ const char* swapFxName(UINT e)
 	}
 }
 
+std::string hexBytes(const void* addr, int n)
+{
+	const unsigned char* p = static_cast<const unsigned char*>(addr);
+	std::string s;
+	char b[8];
+	for (int i = 0; i < n; ++i)
+	{
+		std::snprintf(b, sizeof(b), "%02X ", p[i]);
+		s += b;
+	}
+	return s;
+}
+
+// 对象级探针读内存前的存活校验 (游戏交换链可能已被释放, 防悬垂指针崩溃)
+bool memReadable(const void* p, size_t n)
+{
+	if (!p)
+		return false;
+	MEMORY_BASIC_INFORMATION mbi{};
+	if (VirtualQuery(p, &mbi, sizeof(mbi)) == 0)
+		return false;
+	if (mbi.State != MEM_COMMIT)
+		return false;
+	DWORD prot = mbi.Protect & 0xFF;
+	if (prot == PAGE_NOACCESS || prot == 0)
+		return false;
+	if (mbi.Protect & PAGE_GUARD)
+		return false;
+	const uintptr_t begin = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+	return reinterpret_cast<uintptr_t>(p) + n <= begin + mbi.RegionSize;
+}
+
+static DWORD g_enumPid = 0;
+BOOL CALLBACK enumWndLog(HWND hw, LPARAM)
+{
+	DWORD pid = 0;
+	GetWindowThreadProcessId(hw, &pid);
+	if (pid != g_enumPid)
+		return TRUE;
+	char cls[128]{}, ttl[256]{};
+	GetClassNameA(hw, cls, sizeof(cls));
+	GetWindowTextA(hw, ttl, sizeof(ttl));
+	logLine(std::string("  窗口: hwnd=") + hexOf(static_cast<const void*>(hw)) +
+	        " visible=" + (IsWindowVisible(hw) ? "1" : "0") +
+	        " class=\"" + cls + "\" title=\"" + ttl + "\"");
+	return TRUE;
+}
+
+// v1.5 探针 W: 本进程顶层窗口 — 找可能漏钩的第二个交换链的宿主窗口
+void logProcessWindows(const std::string& tag)
+{
+	g_enumPid = GetCurrentProcessId();
+	logLine("窗口枚举 (" + tag + "):");
+	EnumWindows(enumWndLog, 0);
+}
+
 std::string swapDesc(IDXGISwapChain* sc)
 {
 	DXGI_SWAP_CHAIN_DESC d{};
@@ -522,6 +592,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChain(IDXGIFactory* self, IUnknown* de
 	if (SUCCEEDED(hr) && out && *out)
 	{
 		logLine("★ 工厂拦截 CreateSwapChain → swapchain=" + hexOf(*out) + " | " + swapDesc(*out));
+		g_gameSc.store(*out);
 		registerSwp(*out, false, "★游戏 CreateSwapChain");
 	}
 	return hr;
@@ -543,6 +614,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(IDXGIFactory2* self, IUnk
 	if (SUCCEEDED(hr) && out && *out)
 	{
 		logLine("★ 工厂拦截 CreateSwapChainForHwnd → swapchain=" + hexOf(*out) + " | " + swapDesc(*out));
+		g_gameSc.store(*out);
 		registerSwp(*out, true, "★游戏 CreateSwapChainForHwnd");
 	}
 	return hr;
@@ -563,6 +635,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForCoreWindow(IDXGIFactory2* self
 	if (SUCCEEDED(hr) && out && *out)
 	{
 		logLine("★ 工厂拦截 CreateSwapChainForCoreWindow → swapchain=" + hexOf(*out) + " | " + swapDesc(*out));
+		g_gameSc.store(*out);
 		registerSwp(*out, true, "★游戏 CreateSwapChainForCoreWindow");
 	}
 	return hr;
@@ -583,6 +656,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForComposition(IDXGIFactory2* sel
 	if (SUCCEEDED(hr) && out && *out)
 	{
 		logLine("★ 工厂拦截 CreateSwapChainForComposition → swapchain=" + hexOf(*out) + " | " + swapDesc(*out));
+		g_gameSc.store(*out);
 		registerSwp(*out, true, "★游戏 CreateSwapChainForComposition");
 	}
 	return hr;
@@ -842,10 +916,34 @@ bool doInstall(HMODULE hd3d11, HMODULE hdxgi)
 		}
 	}
 
+	// 6b) dummy3 (FLIP_DISCARD 口径 — 若游戏或系统另有一个翻转类交换链, 也纳入登记)
+	IDXGISwapChain1* scF = nullptr;
+	{
+		DXGI_SWAP_CHAIN_DESC1 f{};
+		f.Width = 4;
+		f.Height = 4;
+		f.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		f.SampleDesc.Count = 1;
+		f.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+		f.BufferCount = 2;
+		f.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+		f.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+		HRESULT fhr = factory->CreateSwapChainForHwnd(dev, hwnd, &f, nullptr, nullptr, &scF);
+		if (SUCCEEDED(fhr) && scF)
+			logLine("dummy3 swapchain (FLIP_DISCARD 路径): " + swapDesc(scF));
+		else
+		{
+			logLine("dummy3 (FLIP_DISCARD) 创建失败 " + hexHr(fhr) + " — 跳过该口径");
+			scF = nullptr;
+		}
+	}
+
 	// 7) 收集并挂所有交换链 vtable 变体 (槽 4 与安全的槽 18)
 	collectSwpVariants(sc1, true, "dummy1(ForHwnd)");
 	if (sc0)
 		collectSwpVariants(sc0, false, "dummy2(v0)");
+	if (scF)
+		collectSwpVariants(scF, true, "dummy3(FLIP)");
 
 	// 7b) 设备链取工厂 (游戏常见路径: device → IDXGIDevice → GetAdapter → GetParent)。
 	//     实测 P3 (v1.2 双跑 2026-10-02): 有 renderdoc 时五口径导出工厂全被其包装
@@ -964,6 +1062,22 @@ bool doInstall(HMODULE hd3d11, HMODULE hdxgi)
 		        "工厂 vtable " + std::to_string(g_facN) + " 个 (含创建方法挂钩); Present 钩子=" +
 		        hexOf(reinterpret_cast<const void*>(&hookedPresent)));
 	}
+
+	// v1.5 探针 B: 原实现前 32 字节 — 为函数级 detour 选安全窃取长度
+	if (g_swpN > 0)
+	{
+		if (g_swp[0].orig4)
+			logLine("探针: Present 原实现前32字节 @ " + hexOf(g_swp[0].orig4) + " = " +
+			        hexBytes(g_swp[0].orig4, 32));
+		if (g_swp[0].orig18)
+			logLine("探针: Present1 原实现前32字节 @ " + hexOf(g_swp[0].orig18) + " = " +
+			        hexBytes(g_swp[0].orig18, 32));
+	}
+	if (g_facN > 0 && g_fac[0].o10)
+		logLine("探针: CreateSwapChain 原实现前32字节 @ " + hexOf(g_fac[0].o10) + " = " +
+		        hexBytes(g_fac[0].o10, 32));
+	// v1.5 探针 W: 本进程顶层窗口 — 找可能漏钩的第二个交换链的宿主窗口
+	logProcessWindows("安装完成时");
 	return true;
 }
 
@@ -1029,12 +1143,44 @@ void watchdogThread()
 {
 	bool reported = false, alarmed = false;
 	int ticks = 0;
+	void** lastGV = nullptr;
+	void* lastS4 = nullptr;
 	for (;;)
 	{
 		Sleep(1000);
 		++ticks;
 		if (ticks % 5 == 0)
+		{
 			verifyAndRepair();
+
+			// v1.5 探针 A: 对象级监视 — 类 vtable 稳不代表游戏对象的 vptr/槽位没变
+			void* gsc = g_gameSc.load();
+			if (gsc && memReadable(gsc, sizeof(void*)))
+			{
+				void** gv = *reinterpret_cast<void***>(gsc);
+				if (memReadable(gv, 5 * sizeof(void*)))
+				{
+					if (gv != lastGV)
+					{
+						logLine("探针: 游戏交换链 vptr=" + hexOf(gv) + " 来自 " + modulePathOf(gv) +
+						        (lastGV ? " (变更! 旧=" + hexOf(lastGV) + ")" : " (基线)"));
+						lastGV = gv;
+						lastS4 = nullptr;
+					}
+					void* s4 = gv[4];
+					if (s4 != lastS4)
+					{
+						logLine("探针: 游戏交换链 slot4=" + hexOf(s4) + " 来自 " + modulePathOf(s4) +
+					                (s4 == reinterpret_cast<void*>(&hookedPresent)
+					                     ? " (我们的钩子 ✓)"
+					                     : " (≠我们的钩子 !!)"));
+						lastS4 = s4;
+					}
+				}
+			}
+		}
+		if (ticks == 10 || ticks == 60)
+			logProcessWindows("运行中 t=" + std::to_string(ticks) + "s");
 
 		const uint64_t n = g_presentCount.load();
 		if (!reported && n > 0)
@@ -1090,7 +1236,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 {
 	info->infoVersion = PluginInfo::kInfoVersion;
 	info->name = "PocPresenter";
-	info->version = (0u << 16) | (5u << 8) | 0u; // 0.5.0
+	info->version = (0u << 16) | (6u << 8) | 0u; // 0.6.0
 
 	if (skse->isEditor)  // 只进游戏本体, 不进 Creation Kit
 		return false;
@@ -1101,7 +1247,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.5.0 (PoC-A v1.4: 同步安装 + 五口径工厂 + 设备链(GetParent) + 看门狗) ====");
+	logLine("==== poc-presenter v0.6.0 (PoC-A v1.5: 同步安装 + 五口径 + 设备链 + 对象/字节/窗口三探针) ====");
 
 	InitializeCriticalSection(&g_cs);
 
