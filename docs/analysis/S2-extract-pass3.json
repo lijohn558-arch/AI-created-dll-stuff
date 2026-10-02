@@ -1,0 +1,72 @@
+{
+  "rdc": "C:\\Users\\joker\\skyrim-vulkan\\captures\\S2-interior.rdc",
+  "errors": [],
+  "groups_by_key": {
+    "ResourceId::17506": [
+      {
+        "eventId": 19377,
+        "key_at_event": "ResourceId::17506",
+        "dispatchDimension": [
+          1,
+          540,
+          1
+        ],
+        "dispatchBase": [
+          0,
+          0,
+          0
+        ],
+        "customName": ""
+      }
+    ]
+  },
+  "unused_cs_attempts": [
+    "ResourceId::0(构造失败)",
+    "ResourceId::17507(构造失败)",
+    "ResourceId::17510(构造失败)",
+    "ResourceId::17511(构造失败)",
+    "ResourceId::17518(构造失败)"
+  ],
+  "reflections": {
+    "ResourceId::17506": {
+      "key": "ResourceId::17506",
+      "boundAtEvent": 19377,
+      "threadDim": [
+        978,
+        1,
+        1
+      ],
+      "stage": "ShaderStage.Compute",
+      "encoding": "ShaderEncoding.DXBC",
+      "entryPoint": "main",
+      "bytecodeSize": 1432,
+      "cbuffers": [
+        {
+          "name": "cbuffer0",
+          "byteSize": 32,
+          "variables": [
+            "cb0_v0",
+            "cb0_v1"
+          ]
+        }
+      ],
+      "readOnly": [
+        {
+          "name": "texture0",
+          "bindArraySize": 1
+        }
+      ],
+      "readWrite": [
+        {
+          "name": "uav0",
+          "bindArraySize": 1
+        }
+      ],
+      "samplers": [
+        "sampler0"
+      ],
+      "disasmLines": 51
+    }
+  },
+  "elapsed_sec": 1.3
+}

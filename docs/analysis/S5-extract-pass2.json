@@ -1,0 +1,67 @@
+{
+  "rdc": "C:\\Users\\joker\\skyrim-vulkan\\captures\\S5-night-combat.rdc",
+  "stride": 10,
+  "errors": [],
+  "dispatch_sampled": 10,
+  "cs_counts_sampled": {
+    "ResourceId::17607": 1,
+    "ResourceId::17608": 9
+  },
+  "cs_counts_extrapolated": {
+    "ResourceId::17607": 10,
+    "ResourceId::17608": 90
+  },
+  "cs_positions_sampled": {
+    "ResourceId::17607": [
+      23801
+    ],
+    "ResourceId::17608": [
+      23885,
+      23965,
+      24045,
+      24125,
+      24205,
+      24285,
+      24365,
+      24445,
+      24525
+    ]
+  },
+  "cs_dispatch_groups": {},
+  "cs_reflections": {
+    "ResourceId::17607": {
+      "key": "ResourceId::17607",
+      "note": "反射获取失败",
+      "dir": null
+    },
+    "ResourceId::17608": {
+      "key": "ResourceId::17608",
+      "note": "反射获取失败",
+      "dir": null
+    }
+  },
+  "draw_sampled": 381,
+  "output_formats": {
+    "R16G16B16A16_FLOAT": 102,
+    "R16G16_FLOAT": 64,
+    "R8G8B8A8_UNORM": 65,
+    "R32_FLOAT": 2,
+    "R8G8_UNORM": 13
+  },
+  "depth_formats": {
+    "D24S8_TYPELESS": 147,
+    "R16_TYPELESS": 230
+  },
+  "rt_combos": {
+    "D:D24S8_TYPELESS + R16G16B16A16_FLOAT": 16,
+    "D:R16_TYPELESS": 230,
+    "D:D24S8_TYPELESS": 54,
+    "D:D24S8_TYPELESS + R16G16B16A16_FLOAT + R16G16_FLOAT + R8G8B8A8_UNORM": 59,
+    "R32_FLOAT": 2,
+    "D:D24S8_TYPELESS + R16G16B16A16_FLOAT + R8G8_UNORM": 13,
+    "R16G16B16A16_FLOAT": 1,
+    "R8G8B8A8_UNORM": 1,
+    "D:D24S8_TYPELESS + R16G16_FLOAT + R8G8B8A8_UNORM": 5
+  },
+  "elapsed_sec": 5.1
+}

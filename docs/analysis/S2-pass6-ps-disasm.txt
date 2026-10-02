@@ -1,0 +1,86 @@
+=== PS 12856 @ev22414 (event 22414) ===
+Shader hash 7c030b7d-73c4ee77-4257b79c-dccaaf66
+
+ps_5_0
+      dcl_globalFlags refactoringAllowed
+      dcl_constantbuffer cb11[1], immediateIndexed
+      dcl_constantbuffer cb1[1], immediateIndexed
+      dcl_sampler s1, mode_default
+      dcl_resource_texture2d (float,float,float,float) t1
+      dcl_input_ps linear v1.xyzw
+      dcl_input_ps linear v2.xyw
+      dcl_output o0.xyzw
+      dcl_temps 1
+   0: add r0.x, -cb11[0].x, l(1.000000)
+   1: lt r0.x, r0.x, l(0)
+   2: discard_nz r0.x
+   3: sample_indexable(texture2d)(float,float,float,float) r0.xy, v1.xyxx, t1.xyzw, s1
+   4: add r0.xy, r0.xyxx, l(-0.500000, -0.500000, 0.000000, 0.000000)
+   5: mad r0.xy, r0.xyxx, l(1.800000, 1.800000, 0.000000, 0.000000), v2.xyxx
+   6: div r0.xy, r0.xyxx, v1.zzzz
+   7: mad o0.xy, r0.xyxx, l(0.500000, 0.500000, 0.000000, 0.000000), l(0.500000, 0.500000, 0.000000, 0.000000)
+   8: mul r0.x, v1.w, cb1[0].x
+   9: mul o0.z, r0.x, v2.w
+  10: mov o0.w, l(1.000000)
+  11: ret
+
+
+=== PS 17375 @ev22488 (event 22488) ===
+Shader hash 559641c9-ba8fce31-4526c9b7-ee808db9
+
+ps_5_0
+      dcl_globalFlags refactoringAllowed
+      dcl_constantbuffer cb12[45], immediateIndexed
+      dcl_constantbuffer cb2[1], immediateIndexed
+      dcl_sampler s0, mode_default
+      dcl_sampler s1, mode_default
+      dcl_resource_texture2d (float,float,float,float) t0
+      dcl_resource_texture2d (float,float,float,float) t1
+      dcl_input_ps linear v1.xy
+      dcl_output o0.xyzw
+      dcl_temps 5
+   0: mul r0.xy, v1.xyxx, cb12[43].xyxx
+   1: max r0.xy, r0.xyxx, l(0, 0, 0, 0)
+   2: mov r1.x, cb12[44].z
+   3: mov r1.y, cb12[43].y
+   4: min r0.xy, r0.xyxx, r1.xyxx
+   5: sample_indexable(texture2d)(float,float,float,float) r2.xyzw, r0.xyxx, t1.xyzw, s1
+   6: sample_indexable(texture2d)(float,float,float,float) r0.xyzw, r0.xyxx, t0.xyzw, s0
+   7: mul r1.z, r2.z, l(0.050000)
+   8: add r2.xy, r2.xyxx, l(-0.500000, -0.500000, 0.000000, 0.000000)
+   9: dp2 r1.w, r1.zzzz, r2.xxxx
+  10: dp2 r1.z, r1.zzzz, r2.yyyy
+  11: add r2.y, r1.z, v1.y
+  12: add r2.x, -r1.w, v1.x
+  13: add r1.zw, r2.xxxy, l(0.000000, 0.000000, -0.850000, -0.850000)
+  14: mad r1.zw, r1.zzzw, l(0.000000, 0.000000, 0.780000, 0.780000), l(0.000000, 0.000000, 0.850000, 0.850000)
+  15: lt r3.xy, l(0.850000, 0.850000, 0.000000, 0.000000), r2.xyxx
+  16: movc r1.zw, r3.xxxy, r1.zzzw, r2.xxxy
+  17: add r3.xy, -r2.xyxx, l(0.150000, 0.150000, 0.000000, 0.000000)
+  18: mad r3.xy, -r3.xyxx, l(0.780000, 0.780000, 0.000000, 0.000000), l(0.150000, 0.150000, 0.000000, 0.000000)
+  19: lt r3.zw, r2.xxxy, l(0.000000, 0.000000, 0.150000, 0.150000)
+  20: movc r1.zw, r3.zzzw, r3.xxxy, r1.zzzw
+  21: add r1.zw, -r2.xxxy, r1.zzzw
+  22: mad r1.zw, r2.zzzz, r1.zzzw, r2.xxxy
+  23: mul r1.zw, r1.zzzw, cb12[43].xxxy
+  24: max r1.zw, r1.zzzw, l(0, 0, 0, 0)
+  25: min r1.xy, r1.xyxx, r1.zwzz
+  26: sample_indexable(texture2d)(float,float,float,float) r1.z, r1.xyxx, t1.xywz, s1
+  27: sample_indexable(texture2d)(float,float,float,float) r3.xyzw, r1.xyxx, t0.xyzw, s0
+  28: ne r1.x, l(0, 0, 0, 0), r1.z
+  29: and r1.y, r1.x, l(1.000000)
+  30: movc r1.x, r1.x, l(0), l(1.000000)
+  31: mul r4.xyzw, r1.yyyy, r3.xyzw
+  32: dp3 r1.y, l(0.299000, 0.587000, 0.114000, 0.000000), r3.xyzx
+  33: mul r1.y, r1.y, cb2[0].w
+  34: mul r1.yzw, r1.yyyy, cb2[0].xxyz
+  35: mad r0.xyzw, r0.xyzw, r1.xxxx, r4.xyzw
+  36: add r1.x, -cb2[0].w, l(1.000000)
+  37: mad r1.xyz, r1.xxxx, r0.xyzx, r1.yzwy
+  38: lt r1.w, l(0.800000), r2.w
+  39: lt r2.x, r2.w, l(1.000000)
+  40: and r1.w, r1.w, r2.x
+  41: movc o0.xyz, r1.wwww, r1.xyzx, r0.xyzx
+  42: mov o0.w, r0.w
+  43: ret
+

@@ -1,0 +1,260 @@
+=== ResourceId::17506 (bound at event 19377) threadDim=[978, 1, 1] groups=[[1, 540, 1]] dispatch=1 总线程=528120 ===
+Shader hash 24d0ca33-16b739c2-2c164c1c-a0e91959
+
+cs_5_0
+      dcl_globalFlags refactoringAllowed
+      dcl_constantbuffer cb0[2], immediateIndexed
+      dcl_sampler s0, mode_default
+      dcl_resource_texture2d (float,float,float,float) t0
+      dcl_uav_typed_texture2d (float,float,float,float) u0
+      dcl_input vThreadGroupID.xy
+      dcl_input vThreadIDInGroup.x
+      dcl_temps 5
+      dcl_tgsm_structured g0, 16, 978
+      dcl_thread_group 978, 1, 1
+   0: iadd r0.x, vThreadIDInGroup.x, l(-9)
+   1: imad r1.x, vThreadGroupID.x, l(960), r0.x
+   2: itof r2.x, r1.x
+   3: itof r2.y, vThreadGroupID.y
+   4: add r0.yz, r2.xxyx, l(0.000000, 0.500000, 0.500000, 0.000000)
+   5: mul r0.yz, r0.yyzy, cb0[0].xxyx
+   6: min r0.yz, r0.yyzy, cb0[1].xxyx
+   7: sample_l(texture2d)(float,float,float,float) r2.xyzw, r0.yzyy, t0.xyzw, s0, l(0)
+   8: store_structured g0.xyzw, vThreadIDInGroup.x, l(0), r2.xyzw
+   9: sync_g_t
+  10: ige r0.y, r0.x, l(0)
+  11: ilt r0.x, r0.x, l(960)
+  12: and r0.x, r0.x, r0.y
+  13: if_nz r0.x
+  14:   iadd r0.xyzw, vThreadIDInGroup.xxxx, l(-8, -6, -4, -2)
+  15:   ld_structured r3.xyzw, r0.x, l(0), g0.xyzw
+  16:   ld_structured r4.xyzw, r0.y, l(0), g0.xyzw
+  17:   mul r4.xyzw, r4.xyzw, l(0.067234, 0.067234, 0.067234, 0.067234)
+  18:   mad r3.xyzw, r3.xyzw, l(0.028532, 0.028532, 0.028532, 0.028532), r4.xyzw
+  19:   ld_structured r4.xyzw, r0.z, l(0), g0.xyzw
+  20:   mad r3.xyzw, r4.xyzw, l(0.124009, 0.124009, 0.124009, 0.124009), r3.xyzw
+  21:   ld_structured r0.xyzw, r0.w, l(0), g0.xyzw
+  22:   mad r0.xyzw, r0.xyzw, l(0.179044, 0.179044, 0.179044, 0.179044), r3.xyzw
+  23:   mad r0.xyzw, r2.xyzw, l(0.202360, 0.202360, 0.202360, 0.202360), r0.xyzw
+  24:   iadd r2.xyzw, vThreadIDInGroup.xxxx, l(2, 4, 6, 8)
+  25:   ld_structured r3.xyzw, r2.x, l(0), g0.xyzw
+  26:   mad r0.xyzw, r3.xyzw, l(0.179044, 0.179044, 0.179044, 0.179044), r0.xyzw
+  27:   ld_structured r3.xyzw, r2.y, l(0), g0.xyzw
+  28:   mad r0.xyzw, r3.xyzw, l(0.124009, 0.124009, 0.124009, 0.124009), r0.xyzw
+  29:   ld_structured r3.xyzw, r2.z, l(0), g0.xyzw
+  30:   mad r0.xyzw, r3.xyzw, l(0.067234, 0.067234, 0.067234, 0.067234), r0.xyzw
+  31:   ld_structured r2.xyzw, r2.w, l(0), g0.xyzw
+  32:   mad r0.xyzw, r2.xyzw, l(0.028532, 0.028532, 0.028532, 0.028532), r0.xyzw
+  33:   mov r1.yzw, vThreadGroupID.yyyy
+  34:   store_uav_typed u0.xyzw, r1.xyzw, r0.xyzw
+  35: endif
+  36: ret
+
+
+=== ResourceId::17507 (bound at event 19389) threadDim=[1, 558, 1] groups=[[960, 1, 1]] dispatch=1 总线程=535680 ===
+Shader hash 5544156e-bb84fd23-761cd4a7-0aed2ece
+
+cs_5_0
+      dcl_globalFlags refactoringAllowed
+      dcl_constantbuffer cb0[2], immediateIndexed
+      dcl_sampler s0, mode_default
+      dcl_resource_texture2d (float,float,float,float) t0
+      dcl_uav_typed_texture2d (float,float,float,float) u0
+      dcl_input vThreadGroupID.xy
+      dcl_input vThreadIDInGroup.y
+      dcl_temps 5
+      dcl_tgsm_structured g0, 16, 558
+      dcl_thread_group 1, 558, 1
+   0: iadd r0.x, vThreadIDInGroup.y, l(-9)
+   1: imad r1.yzw, vThreadGroupID.yyyy, l(0, 540, 540, 540), r0.xxxx
+   2: itof r2.x, vThreadGroupID.x
+   3: itof r2.y, r1.w
+   4: add r0.yz, r2.xxyx, l(0.000000, 0.500000, 0.500000, 0.000000)
+   5: mul r0.yz, r0.yyzy, cb0[0].xxyx
+   6: min r0.yz, r0.yyzy, cb0[1].xxyx
+   7: sample_l(texture2d)(float,float,float,float) r2.xyzw, r0.yzyy, t0.xyzw, s0, l(0)
+   8: store_structured g0.xyzw, vThreadIDInGroup.y, l(0), r2.xyzw
+   9: sync_g_t
+  10: ige r0.y, r0.x, l(0)
+  11: ilt r0.x, r0.x, l(540)
+  12: and r0.x, r0.x, r0.y
+  13: if_nz r0.x
+  14:   iadd r0.xyzw, vThreadIDInGroup.yyyy, l(-8, -6, -4, -2)
+  15:   ld_structured r3.xyzw, r0.x, l(0), g0.xyzw
+  16:   ld_structured r4.xyzw, r0.y, l(0), g0.xyzw
+  17:   mul r4.xyzw, r4.xyzw, l(0.067234, 0.067234, 0.067234, 0.067234)
+  18:   mad r3.xyzw, r3.xyzw, l(0.028532, 0.028532, 0.028532, 0.028532), r4.xyzw
+  19:   ld_structured r4.xyzw, r0.z, l(0), g0.xyzw
+  20:   mad r3.xyzw, r4.xyzw, l(0.124009, 0.124009, 0.124009, 0.124009), r3.xyzw
+  21:   ld_structured r0.xyzw, r0.w, l(0), g0.xyzw
+  22:   mad r0.xyzw, r0.xyzw, l(0.179044, 0.179044, 0.179044, 0.179044), r3.xyzw
+  23:   mad r0.xyzw, r2.xyzw, l(0.202360, 0.202360, 0.202360, 0.202360), r0.xyzw
+  24:   iadd r2.xyzw, vThreadIDInGroup.yyyy, l(2, 4, 6, 8)
+  25:   ld_structured r3.xyzw, r2.x, l(0), g0.xyzw
+  26:   mad r0.xyzw, r3.xyzw, l(0.179044, 0.179044, 0.179044, 0.179044), r0.xyzw
+  27:   ld_structured r3.xyzw, r2.y, l(0), g0.xyzw
+  28:   mad r0.xyzw, r3.xyzw, l(0.124009, 0.124009, 0.124009, 0.124009), r0.xyzw
+  29:   ld_structured r3.xyzw, r2.z, l(0), g0.xyzw
+  30:   mad r0.xyzw, r3.xyzw, l(0.067234, 0.067234, 0.067234, 0.067234), r0.xyzw
+  31:   ld_structured r2.xyzw, r2.w, l(0), g0.xyzw
+  32:   mad r0.xyzw, r2.xyzw, l(0.028532, 0.028532, 0.028532, 0.028532), r0.xyzw
+  33:   mov r1.x, vThreadGroupID.x
+  34:   store_uav_typed u0.xyzw, r1.xyzw, r0.xyzw
+  35: endif
+  36: ret
+
+
+=== ResourceId::17510 (bound at event 22658) threadDim=[485, 1, 1] groups=[[1, 270, 1]] dispatch=1 总线程=130950 ===
+Shader hash 9227338f-5db6d0e1-b0339895-8bea0849
+
+cs_5_0
+      dcl_globalFlags refactoringAllowed
+      dcl_constantbuffer cb0[2], immediateIndexed
+      dcl_sampler s0, mode_default
+      dcl_sampler s1, mode_default
+      dcl_resource_texture2d (float,float,float,float) t0
+      dcl_resource_texture2d (float,float,float,float) t1
+      dcl_uav_typed_texture2d (float,float,float,float) u0
+      dcl_input vThreadGroupID.xy
+      dcl_input vThreadIDInGroup.x
+      dcl_temps 5
+      dcl_tgsm_structured g0, 12, 485
+      dcl_tgsm_structured g1, 4, 485
+      dcl_thread_group 485, 1, 1
+   0: iadd r0.x, vThreadIDInGroup.x, l(-2)
+   1: imad r1.x, vThreadGroupID.x, l(480), r0.x
+   2: itof r2.x, r1.x
+   3: itof r2.y, vThreadGroupID.y
+   4: add r0.yz, r2.xxyx, l(0.000000, 0.500000, 0.500000, 0.000000)
+   5: mul r0.yz, r0.yyzy, cb0[0].xxyx
+   6: min r0.yz, r0.yyzy, cb0[1].xxyx
+   7: sample_l(texture2d)(float,float,float,float) r2.xyz, r0.yzyy, t0.xyzw, s0, l(0)
+   8: store_structured g0.xyz, vThreadIDInGroup.x, l(0), r2.xyzx
+   9: sample_l(texture2d)(float,float,float,float) r0.y, r0.yzyy, t1.yxzw, s1, l(0)
+  10: store_structured g1.x, vThreadIDInGroup.x, l(0), r0.y
+  11: sync_g_t
+  12: ige r0.z, r0.x, l(0)
+  13: ilt r0.w, r0.x, l(480)
+  14: and r0.z, r0.w, r0.z
+  15: if_nz r0.z
+  16:   ld_structured r0.z, r0.x, l(0), g1.xxxx
+  17:   mad r0.z, r0.y, l(5.000000), -r0.z
+  18:   iadd r3.xyz, vThreadIDInGroup.xxxx, l(-1, 1, 2, 0)
+  19:   ld_structured r0.w, r3.x, l(0), g1.xxxx
+  20:   add r0.z, -r0.w, r0.z
+  21:   add r0.y, -r0.y, r0.z
+  22:   ld_structured r0.z, r3.y, l(0), g1.xxxx
+  23:   add r0.y, -r0.z, r0.y
+  24:   ld_structured r0.z, r3.z, l(0), g1.xxxx
+  25:   add r0.y, -r0.z, r0.y
+  26:   ld_structured r0.xzw, r0.x, l(0), g0.xxyz
+  27:   ld_structured r4.xyz, r3.x, l(0), g0.xyzx
+  28:   mul r4.xyzw, r4.xyzx, l(0.244770, 0.244770, 0.244770, 0.244770)
+  29:   mad r4.xyzw, r0.xzwx, l(0.061360, 0.061360, 0.061360, 0.061360), r4.xyzw
+  30:   mad r4.xyzw, r2.xyzx, l(0.387740, 0.387740, 0.387740, 0.387740), r4.xyzw
+  31:   ld_structured r0.xzw, r3.y, l(0), g0.xxyz
+  32:   mad r4.xyzw, r0.xzwx, l(0.244770, 0.244770, 0.244770, 0.244770), r4.xyzw
+  33:   ld_structured r0.xzw, r3.z, l(0), g0.xxyz
+  34:   mad r3.xyzw, r0.xzwx, l(0.061360, 0.061360, 0.061360, 0.061360), r4.xyzw
+  35:   mul r0.x, abs(r0.y), l(25.000000)
+  36:   min r0.x, r0.x, l(1.000000)
+  37:   mad r0.y, r0.x, l(-2.000000), l(3.000000)
+  38:   mul r0.x, r0.x, r0.x
+  39:   mul r0.x, r0.x, r0.y
+  40:   mul r0.x, r0.x, l(0.500000)
+  41:   add r2.xyzw, r2.xyzx, -r3.wyzw
+  42:   mad r0.xyzw, r0.xxxx, r2.xyzw, r3.xyzw
+  43:   mov r1.yzw, vThreadGroupID.yyyy
+  44:   store_uav_typed u0.xyzw, r1.xyzw, r0.xyzw
+  45: endif
+  46: ret
+
+
+=== ResourceId::17511 (bound at event 22670) threadDim=[1, 275, 1] groups=[[480, 1, 1]] dispatch=1 总线程=132000 ===
+Shader hash e92e8ea2-d55b5a69-bfcdb1b9-35252d85
+
+cs_5_0
+      dcl_globalFlags refactoringAllowed
+      dcl_constantbuffer cb0[2], immediateIndexed
+      dcl_sampler s0, mode_default
+      dcl_sampler s1, mode_default
+      dcl_resource_texture2d (float,float,float,float) t0
+      dcl_resource_texture2d (float,float,float,float) t1
+      dcl_uav_typed_texture2d (float,float,float,float) u0
+      dcl_input vThreadGroupID.xy
+      dcl_input vThreadIDInGroup.y
+      dcl_temps 5
+      dcl_tgsm_structured g0, 12, 275
+      dcl_tgsm_structured g1, 4, 275
+      dcl_thread_group 1, 275, 1
+   0: iadd r0.x, vThreadIDInGroup.y, l(-2)
+   1: imad r1.yzw, vThreadGroupID.yyyy, l(0, 270, 270, 270), r0.xxxx
+   2: itof r2.x, vThreadGroupID.x
+   3: itof r2.y, r1.w
+   4: add r0.yz, r2.xxyx, l(0.000000, 0.500000, 0.500000, 0.000000)
+   5: mul r0.yz, r0.yyzy, cb0[0].xxyx
+   6: min r0.yz, r0.yyzy, cb0[1].xxyx
+   7: sample_l(texture2d)(float,float,float,float) r2.xyz, r0.yzyy, t0.xyzw, s0, l(0)
+   8: store_structured g0.xyz, vThreadIDInGroup.y, l(0), r2.xyzx
+   9: sample_l(texture2d)(float,float,float,float) r0.y, r0.yzyy, t1.yxzw, s1, l(0)
+  10: store_structured g1.x, vThreadIDInGroup.y, l(0), r0.y
+  11: sync_g_t
+  12: ige r0.z, r0.x, l(0)
+  13: ilt r0.w, r0.x, l(270)
+  14: and r0.z, r0.w, r0.z
+  15: if_nz r0.z
+  16:   ld_structured r0.z, r0.x, l(0), g1.xxxx
+  17:   mad r0.z, r0.y, l(5.000000), -r0.z
+  18:   iadd r3.xyz, vThreadIDInGroup.yyyy, l(-1, 1, 2, 0)
+  19:   ld_structured r0.w, r3.x, l(0), g1.xxxx
+  20:   add r0.z, -r0.w, r0.z
+  21:   add r0.y, -r0.y, r0.z
+  22:   ld_structured r0.z, r3.y, l(0), g1.xxxx
+  23:   add r0.y, -r0.z, r0.y
+  24:   ld_structured r0.z, r3.z, l(0), g1.xxxx
+  25:   add r0.y, -r0.z, r0.y
+  26:   ld_structured r0.xzw, r0.x, l(0), g0.xxyz
+  27:   ld_structured r4.xyz, r3.x, l(0), g0.xyzx
+  28:   mul r4.xyzw, r4.xyzx, l(0.244770, 0.244770, 0.244770, 0.244770)
+  29:   mad r4.xyzw, r0.xzwx, l(0.061360, 0.061360, 0.061360, 0.061360), r4.xyzw
+  30:   mad r4.xyzw, r2.xyzx, l(0.387740, 0.387740, 0.387740, 0.387740), r4.xyzw
+  31:   ld_structured r0.xzw, r3.y, l(0), g0.xxyz
+  32:   mad r4.xyzw, r0.xzwx, l(0.244770, 0.244770, 0.244770, 0.244770), r4.xyzw
+  33:   ld_structured r0.xzw, r3.z, l(0), g0.xxyz
+  34:   mad r3.xyzw, r0.xzwx, l(0.061360, 0.061360, 0.061360, 0.061360), r4.xyzw
+  35:   mul r0.x, abs(r0.y), l(25.000000)
+  36:   min r0.x, r0.x, l(1.000000)
+  37:   mad r0.y, r0.x, l(-2.000000), l(3.000000)
+  38:   mul r0.x, r0.x, r0.x
+  39:   mul r0.x, r0.x, r0.y
+  40:   mul r0.x, r0.x, l(0.500000)
+  41:   add r2.xyzw, r2.xyzx, -r3.wyzw
+  42:   mad r0.xyzw, r0.xxxx, r2.xyzw, r3.xyzw
+  43:   mov r1.x, vThreadGroupID.x
+  44:   store_uav_typed u0.xyzw, r1.xyzw, r0.xyzw
+  45: endif
+  46: ret
+
+
+=== ResourceId::17518 (bound at event 19700) threadDim=[8, 8, 1] groups=[[240, 135, 1]] dispatch=1 总线程=2073600 ===
+Shader hash 52fc4718-62327668-f0202668-06cff6b9
+
+cs_5_0
+      dcl_globalFlags refactoringAllowed
+      dcl_constantbuffer cb0[2], immediateIndexed
+      dcl_resource_texture2d (float,float,float,float) t0
+      dcl_uav_typed_texture2d (float,float,float,float) u0
+      dcl_input vThreadID.xy
+      dcl_temps 2
+      dcl_thread_group 8, 8, 1
+   0: ult r0.xy, vThreadID.xyxx, cb0[0].zwzz
+   1: and r0.x, r0.y, r0.x
+   2: if_nz r0.x
+   3:   iadd r0.xyzw, vThreadID.xyyy, cb0[1].xyyy
+   4:   iadd r1.xy, vThreadID.xyxx, cb0[0].xyxx
+   5:   mov r1.zw, l(0, 0, 0, 0)
+   6:   ld_indexable(texture2d)(float,float,float,float) r1.xyzw, r1.xyzw, t0.xyzw
+   7:   store_uav_typed u0.xyzw, r0.xyzw, r1.xyzw
+   8: endif
+   9: ret
+

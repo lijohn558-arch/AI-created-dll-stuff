@@ -15,7 +15,8 @@ Skyrim Special Edition 的 Vulkan 直接对接项目 — 让游戏以 Vulkan 渲
 |---|---|
 | [docs/00-总体规划-实施步骤.md](docs/00-总体规划-实施步骤.md) | 九阶段总体规划、里程碑、风险清单、首周行动项 |
 | [docs/01-CommunityShaders项目调研.md](docs/01-CommunityShaders项目调研.md) | CS 项目可复用资料调研（HLSL 源码、Hook 清单、NvAPI 坑） |
-| [docs/02-RenderDoc抓帧操作清单.md](docs/02-RenderDoc抓帧操作清单.md) | 抓帧执行手册（环境、场景、记录表、提取清单） |
+| [docs/02-RenderDoc抓帧操作清单.md](docs/02-RenderDoc抓帧操作清单.md) | 抓帧执行手册（环境、场景、记录表、提取清单、无头批跑 §10、配对 harness §11） |
+| [docs/03-API配对验证收益分析.md](docs/03-API配对验证收益分析.md) | 配对锚点判定口径、收益/风险、现代化扩展顺序（水体→天空→材质→超分→帧生成） |
 
 ## 仓库结构
 
@@ -28,6 +29,10 @@ skyrim-vulkan/
 │       ├── main.cpp
 │       ├── skse_abi.h             # SKSE64 2.0.20 最小 ABI 声明
 │       └── renderdoc_app.h        # RenderDoc 官方 in-app API 头 (MIT)
+├── tools/                         # 分析脚本（qrenderdoc 内嵌 Python 运行）
+│   ├── rdc_extract.py + rdc_pass2~6.py  # 六轮提取（RDC_SCENE 选场景，无头批跑）
+│   ├── rdc_run.ps1                # 无头批跑 runner（-Scene/-Targets/-PsEvents/-PsWL）
+│   └── rdc_compare.py / rdc_compare.ps1  # 配对判定 harness（10 锚点 PASS/DIFF/SKIP）
 └── captures/                      # .rdc 原始文件（不进 git）
 ```
 

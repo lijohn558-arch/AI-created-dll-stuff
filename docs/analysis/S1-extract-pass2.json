@@ -1,0 +1,67 @@
+{
+  "rdc": "C:\\Users\\joker\\skyrim-vulkan\\captures\\S1-city-day.rdc",
+  "stride": 10,
+  "errors": [],
+  "dispatch_sampled": 10,
+  "cs_counts_sampled": {
+    "ResourceId::17607": 1,
+    "ResourceId::17608": 9
+  },
+  "cs_counts_extrapolated": {
+    "ResourceId::17607": 10,
+    "ResourceId::17608": 90
+  },
+  "cs_positions_sampled": {
+    "ResourceId::17607": [
+      26935
+    ],
+    "ResourceId::17608": [
+      27019,
+      27099,
+      27179,
+      27259,
+      27339,
+      27419,
+      27499,
+      27579,
+      27659
+    ]
+  },
+  "cs_dispatch_groups": {},
+  "cs_reflections": {
+    "ResourceId::17607": {
+      "key": "ResourceId::17607",
+      "note": "反射获取失败",
+      "dir": null
+    },
+    "ResourceId::17608": {
+      "key": "ResourceId::17608",
+      "note": "反射获取失败",
+      "dir": null
+    }
+  },
+  "draw_sampled": 452,
+  "output_formats": {
+    "R16G16B16A16_FLOAT": 140,
+    "R16G16_FLOAT": 82,
+    "R8G8B8A8_UNORM": 83,
+    "R32_FLOAT": 1,
+    "R8G8_UNORM": 15
+  },
+  "depth_formats": {
+    "D24S8_TYPELESS": 200,
+    "R16_TYPELESS": 249
+  },
+  "rt_combos": {
+    "D:D24S8_TYPELESS + R16G16B16A16_FLOAT": 30,
+    "D:R16_TYPELESS": 249,
+    "D:D24S8_TYPELESS": 73,
+    "D:D24S8_TYPELESS + R16G16B16A16_FLOAT + R16G16_FLOAT + R8G8B8A8_UNORM": 79,
+    "D:D24S8_TYPELESS + R16G16_FLOAT + R8G8B8A8_UNORM": 3,
+    "R32_FLOAT": 1,
+    "R8G8B8A8_UNORM": 1,
+    "D:D24S8_TYPELESS + R16G16B16A16_FLOAT + R8G8_UNORM": 15,
+    "R16G16B16A16_FLOAT": 1
+  },
+  "elapsed_sec": 6.4
+}

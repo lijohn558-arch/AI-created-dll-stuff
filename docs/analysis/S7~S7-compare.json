@@ -1,0 +1,102 @@
+{
+ "script": "rdc_compare v1",
+ "base": {
+  "dir": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis",
+  "prefix": "S7"
+ },
+ "cand": {
+  "dir": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis",
+  "prefix": "S7"
+ },
+ "anchors": [
+  {
+   "id": "counts.pass1",
+   "name": "Draw/Dispatch/Clear/Copy/PSO",
+   "status": "SKIP",
+   "base": "",
+   "cand": "",
+   "detail": "缺 pass1 JSON"
+  },
+  {
+   "id": "textures.formats",
+   "name": "纹理格式集合",
+   "status": "SKIP",
+   "base": "",
+   "cand": "",
+   "detail": "缺 pass1 JSON"
+  },
+  {
+   "id": "cs.dispatch-profile",
+   "name": "CS dispatch/线程/线程组",
+   "status": "SKIP",
+   "base": "",
+   "cand": "",
+   "detail": "缺 pass4 JSON"
+  },
+  {
+   "id": "cs.bytecode-hash",
+   "name": "CS DXBC 逐字节(反汇编)",
+   "status": "SKIP",
+   "base": "",
+   "cand": "",
+   "detail": "缺 cs-disasm txt"
+  },
+  {
+   "id": "pass5.structure",
+   "name": "分段数/签名多重集",
+   "status": "SKIP",
+   "base": "",
+   "cand": "",
+   "detail": "缺 pass5 JSON"
+  },
+  {
+   "id": "clear.bound-profile",
+   "name": "Clear 方位+绑定格式",
+   "status": "SKIP",
+   "base": "",
+   "cand": "",
+   "detail": "缺 pass5 JSON"
+  },
+  {
+   "id": "clear.target-profile",
+   "name": "Clear 真实目标(格式)",
+   "status": "SKIP",
+   "base": "",
+   "cand": "",
+   "detail": "缺 pass6 JSON"
+  },
+  {
+   "id": "copy.sequence",
+   "name": "Copy 链(src/dst 格式)",
+   "status": "SKIP",
+   "base": "",
+   "cand": "",
+   "detail": "缺 pass5 JSON"
+  },
+  {
+   "id": "conditional-nodes",
+   "name": "条件节点计数",
+   "status": "SKIP",
+   "base": "",
+   "cand": "",
+   "detail": "缺 pass5 JSON"
+  },
+  {
+   "id": "transparent.draws",
+   "name": "透明段 Draw 数",
+   "status": "SKIP",
+   "base": "",
+   "cand": "",
+   "detail": "缺 pass5 JSON"
+  }
+ ],
+ "summary": {
+  "pass": 0,
+  "diff": 0,
+  "skip": 10,
+  "total": 10
+ },
+ "match": false,
+ "errors": [],
+ "elapsed_sec": 0.0
+}
