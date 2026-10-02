@@ -100,6 +100,11 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 > 我们挂好的类、120s 槽位未被改写，**Present 计数却恒 0**（游戏虚调用没走到我们的槽）
 > → v1.5 加三探针：A 对象 vptr 盯梢、B 原实现前 32 字节（为函数级 detour 铺路）、
 > W 本进程窗口枚举（找第二个交换链宿主），附 FLIP_DISCARD 口径 dummy3。
+> **用户取证补充**：run2 那 120s 画面正常动画（Present 必然在发生）+ 本机有 **GeForce
+> 覆盖层（GFE，启动时注入）** → 调研 CS/ReShade/RenderDoc 的拦截姿势（docs/01 §7）：
+> CS 根本不碰 DXGI Present（引擎层注入）；ReShade/RenderDoc 均为**包装对象自有 vtable +
+> 导出级/函数级 detour**、不修补公共类 vtable → v1.6 备选 = 对 dxgi 真 Present 实现做
+> 函数级 detour（探针 B 字节选窃取长度），兜底 = 引擎层注入。
 
 ### 构建
 push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从 **Actions → Artifacts**

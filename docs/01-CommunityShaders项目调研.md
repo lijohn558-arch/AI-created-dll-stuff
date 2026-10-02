@@ -37,6 +37,15 @@ Community Shaders 内置了完整的 RenderDoc 程序化集成，其中**踩坑�
 5. **磁盘空间预检**：按帧数估算所需空间
 6. **DLL 加载位置**：`Data/Renderdoc/renderdoc.dll`（不走系统 PATH）
 
+> **2026-10-02 源码复核**（GitHub API 直读 dev 分支 `src/Features/RenderDoc.cpp`，34.6KB）：以上 6 点全部属实。
+> 补充：① `SetCaptureKeys(nullptr, 0)` 显式清空 RenderDoc 自带热键，触发收归 CS 自家菜单
+> （`HandleCaptureHotkey` / `TriggerMultiFrameCapture`，多帧捕获 #2355）；② renderdoc.dll 随 feature 包
+> 分发于 `features/RenderDoc/Renderdoc/renderdoc.dll`；③ NvAPI 透传为 PR #2621（2026-08），
+> 其源码注释明确写的是 **"the driver remove the device at the first Present"**（混合显卡、启动即崩）。
+> **本项目对齐情况**：`src/capture-helper/main.cpp:292` 已实现同款
+> `SetCaptureOptionU32(eRENDERDOC_Option_AllowUnsupportedVendorExtensions, 0x10DE)`；API 版本阶梯
+> 1_7_0→1_6_0→1_5_0 比 CS 只取 1_7_0 更宽容；触发走同一官方 `TriggerCapture` 接口。
+
 ### 1.3 抓帧前注意事项（来自其 UI 提示）
 - RenderDoc 激活时性能严重下降（帧注解 Frame Annotations 会被强制开启）
 - Upscaling / Frame Generation 可能与抓帧不兼容（抓帧时应关闭 DLSS/FSR/FG）
@@ -147,3 +156,44 @@ Community Shaders 内置了完整的 RenderDoc 程序化集成，其中**踩坑�
 - [ ] 研读 `Common/GBuffer.hlsli` + `FrameBuffer.hlsli`，产出寄存器映射草案
 - [ ] 抓取 CS 官方示例 .rdc（如 issues/社区有分享）先行熟悉结构，再抓自己游戏的帧
 - [ ] 评估 CommonLibSSE-NG 作为 Hook 基础库的可行性（GPL 传染性 vs MIT 的 CommonLibSSE）
+
+---
+
+## 7. Present 拦截路线对比 — PoC-A 的参考系（2026-10-02 补充）
+
+**起因**：PoC-A v1.4 双跑谜团——游戏交换链对象 vptr = 我们挂好的类 vtable、槽 4 被看门狗
+连续 120s 复查稳定指向钩子、游戏画面正常动画（Present 必然在发生），**Present 计数却恒 0**；
+用户确认本机有 **GeForce 覆盖层（GFE，游戏启动时注入）** → 据此调研成熟工具的 Present
+拦截姿势（当日 GitHub API 直读源码实证）。
+
+### 7.1 Community Shaders：根本不拦 Present
+- 全树检索（dev 分支 1064 节点）：**无任何 DXGI/Present hook 文件**——仅有
+  `src/Features/Upscaling/DX12SwapChain.*`（自家超分用的私有 DX12 交换链，不拦截游戏）。
+- 注入全部在引擎层（`src/Hooks.cpp` 1121 行，Address Library 定位，见 §2.2）；对 RenderDoc
+  走官方程序化 API（§1.2），**从不与 RenderDoc/GFE 在 DXGI 层抢对象**。
+- 结论：CS 对本谜团无现成答案，但其「不碰 DXGI、走官方接口」的做法解释了他们为何从未
+  遇到此类问题——**没拦截 Present，就不会被 Present 层的多方混战争吵波及**。
+
+### 7.2 ReShade / RenderDoc：包装对象（proxy COM class）
+- ReShade `source/dxgi/dxgi_swapchain.hpp`：
+  `class DXGISwapChain final : public IDXGISwapChain4`，构造收 `IDXGISwapChain *original`；
+  `Present()` 内 `on_present(Flags)` → `_orig->Present(...)` → `on_finish_present(hr)`——
+  **自有 vtable 的包装类转发到原对象**；配套 `deps/minhook` + `source/hook_manager.cpp`
+  detour dxgi/d3d11 **导出函数**（CreateDXGIFactory 等）以替换创建结果（连 Windows 内部的
+  `IDXGISwapChainTest` 接口都做了仿真转发）。
+- RenderDoc 同为包装对象——**本项目实测证据**：v1.2/v1.3/v1.4 带 capture-helper 的日志里，
+  五口径工厂 / 设备链 / 辅助 dummy 的 vtable 全落在 `renderdoc.dll`（README 实测链）。
+- 共同点：**两者都不修补多方共用的共享类 vtable**——要么拥有对象（包装），要么拥有函数
+  入口（MinHook 导出级/函数级 detour）。
+
+### 7.3 对 PoC-A 的推论
+- 我们的「共享类 vtable 补丁」是三者中唯一改动**公共结构**的方案 → 对 renderdoc 包装、
+  GFE 覆盖层这类第三方对象操作天然脆弱。
+- v1.5 三探针先取证：探针 A（对象 vptr 盯梢）若显示 vptr 被换 → GFE 包装实锤；若 vptr
+  稳如钩子而计数仍 0 → 游戏 Present 落在**另一个对象**上 → 两种结局都指向 **v1.6：
+  函数级 detour**（对 dxgi 真 Present 实现打 trampoline，按 ReShade/MinHook 家族姿势，
+  任何对象、任何包装最终都汇入该函数入口；探针 B 的 32 字节就是选安全窃取长度的原料）。
+- 链式共存注意：函数级 detour 若与 GFE/renderdoc 的 detour 并存，后装者先触发，
+  须把前一家的入口转发出去（MinHook 的引用计数链式即为此设计）。
+- 若函数级 detour 也不通（GFE 在其自有模块内完成全部转发、不回 dxgi），兜底 =
+  **7.1 的 CS 路线**：Present 层不拦，改在引擎层（BSGraphics 帧边界）注入 PoC-B。
