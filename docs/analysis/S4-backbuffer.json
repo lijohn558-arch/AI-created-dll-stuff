@@ -1,0 +1,32 @@
+{
+ "rdc": "C:\\Users\\joker\\skyrim-vulkan\\captures\\S4-water.rdc",
+ "scene": "S4",
+ "full": "S4-water",
+ "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S4-backbuffer.png",
+ "errors": [],
+ "identified_by": "SwapchainImage",
+ "resourceId": "ResourceId::35",
+ "width": 1920,
+ "height": 1080,
+ "data_bytes": 8294400,
+ "row_pitch": 7680,
+ "png_bytes": 3647621,
+ "spotcheck": {
+  "rect-corner-1(16+6,16+6)": [
+   53,
+   78,
+   78
+  ],
+  "triangle-centroid(272,313)": [
+   41,
+   61,
+   61
+  ],
+  "control(1056,540)": [
+   16,
+   25,
+   26
+  ]
+ },
+ "elapsed_sec": 13.6
+}

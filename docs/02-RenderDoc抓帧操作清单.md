@@ -398,9 +398,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_run.ps1 -Script rd
 | 输出 | `docs\analysis\<场景前缀>-backbuffer.png` + 同名 `.json`（含 `spotcheck` 三个抽检点，可与 pass7 互证） |
 | 耗时 | **约 7 s/张**（1920×1080，Python 逐像素转 RGB） |
 
-**已在库的四张**：`S5-backbuffer.png`（10/2 基线：火焰战斗中）、`S5b-backbuffer.png`（注入局：
+**已在库的七张**：`S5-backbuffer.png`（10/2 基线：火焰战斗中）、`S5b-backbuffer.png`（注入局：
 同机位对话状态 + **左上角洋红块与渐变三角形肉眼可见**）、`S6-backbuffer.png`（白漫水池注入局）、
-`S5c-backbuffer.png`（0.9.2 对照局：同机位、**无**洋红块）。
+`S5c-backbuffer.png`（0.9.2 对照局：同机位、**无**洋红块）、`S4b-backbuffer.png` /
+`S4c-backbuffer.png` / `S4-backbuffer.png`（10-03 水体标定三联，见 §13——S4b 有洋红块、
+S4c 干净、S4 基线为同机位**不同存档状态**，三图互证机位与注入态）。
 
 用法要点：把基线与候选两图**并排打开**，能一眼判断两帧是否处于同一游戏状态——这直接决定
 `rdc_compare` 的差异该归因注入还是归因场景（见 §12.6）。
@@ -436,3 +438,93 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_run.ps1 -Script rd
    **噪声底参考**：同为无注入的 `S5 → S5c` 是 pass5 / diff5，draws +464、clear 两档 DIFF、
    透明段 122→161——即跨日那批"场景动态"DIFF **在对照对里原样出现**，copy 两锚点则是 **PASS**。
    （详见 docs/01 §7.9；注意本局 `vulkan=0` 分支其实没被执行到，见 §7.9.5 的缺口。）
+
+---
+
+## 13. 水体场景注入归因标定（S4b/S4c 双帧，2026-10-03）
+
+> 阶段1 配对门的**预演**：在水体场景把「注入指纹」与「会话/帧态漂移」分开钉死，给真 VK
+> 候选帧的 `rdc_compare` 判读提供分级口径。协议沿用 S5b/S5c（§12.6 第 4 条）。
+
+### 13.1 抓帧协议与执行记录
+
+| 帧 | 配置 | 时刻 | 大小 | pass7 哨兵 |
+|---|---|---|---|---|
+| `captures\S4b.rdc` | 默认态（`poc-presenter.ini` 不存在 = 注入开） | 10-03 19:02:49 | 704.1 MB | **SENTINEL_FOUND**：四角 4/4 `(255,0,255)`、三角重心 `(86,217,85)`、对照点 `(15,22,24)`/`(16,36,39)` 干净 |
+| `captures\S4c.rdc` | ini 写 `vulkan=0` 后**重启游戏** | 10-03 19:05:47 | 802.4 MB | **SENTINEL_ABSENT**：0/4 洋红、重心 `(57,77,77)`、对照点 `(17,26,26)`/`(16,40,48)` 干净 |
+
+- 同存档同机位（S4 河谷水面：角色居中站水中、罗盘同向），三张 backbuffer PNG 互证：
+  `S4b-backbuffer.png`（左上洋红块+渐变三角肉眼可见）/ `S4c-backbuffer.png`（干净）/
+  `S4-backbuffer.png`（10-02 基线：**同机位但不同存档状态——角色皮草装**，跨日+跨存档）。
+- 开关语义两条铁律：`pocbEnabled()` 是 `static cached` → **进程内只读一次，改 ini 必须重启游戏**；
+  写入必须 **ASCII 无 BOM**（``[IO.File]::WriteAllText($p,"vulkan=0`r`n",[Text.Encoding]::ASCII)``——
+  BOM/UTF-16 会给首行键加前导字节 → `key != "vulkan"` → 开关静默失效、对照帧被污染）。
+  抓完即删 ini（实验态回收 ✓，已核 `Test-Path` = False）。
+- 执行：提取链 12/12 步（extract→pass6 ×2）全 `errors=0`；pass7 ×2、backbuffer dump ×3 全 `errors=0`。
+- **四路互证（§12.5 口径）全齐**：pass7 探针 json = dump json `spotcheck` 同坐标逐值相等
+  （S4b 角1 `(255,0,255)` / 三角 `(86,217,85)` / 对照 `(15,22,24)`）= PNG 目视 = pass5 `copies`=4。
+
+### 13.2 两道闸门结果
+
+| 比对 | 含义 | 结果 |
+|---|---|---|
+| `-Base S4c -Cand S4b` | 同日相邻时刻、唯一配置差=注入开关 → **指纹标定** | **pass5 / diff5**（skip0） |
+| `-Base S4 -Cand S4c` | 跨日+跨存档、两帧均无注入 → **噪声底** | **pass7 / diff3**（skip0） |
+
+**指纹三口径全中 + 尾验（§12.6 规则 1）**：
+
+1. `counts.pass1.copies` **3→4**；
+2. `copy.sequence` 候选侧独有 `512x512 R8G8B8A8_UNORM -> 1920x1080 R8G8B8A8_UNORM`
+   （基线侧 0 处、`S4~S4c` 对照 0 处——全文 grep 核对）；
+3. `conditional-nodes.copies_total` **3→4**（`S4~S4c` 为 3=3）；
+4. 尾验：pass5 日志 `Copy ev33412: ResourceId::17759(512x512) -> ResourceId::78(1920x1080)`，
+   目标 **78 = pass7/dump 读的 SwapchainImage id `ResourceId::78`**（S4c 侧 backbuffer 为 35——
+   两次启动 id 不同，证 id-free 锚点口径必要，`docs/03` §5 R2）。
+
+**diff5 归因（§12.6 三步走完 + 看图）**：
+
+- **指纹类（预期且必须出现）**：`counts.pass1`（copies 分量）、`copy.sequence`、`conditional-nodes` —— 3 条；
+- **会话态漂移（注入 0 Draw/Dispatch/Clear，不可能产生）**：`counts.pass1` 的 draws/pso/textures
+  分量（3862→2846 / 138→126 / **423→316**）、`pass5.structure`（36 段=36 段、draws_sum 同幅）、
+  `transparent.draws`（276→232）—— 2 条整锚点 + 1 条混合锚点；
+- **段级定位（−1016 draws 精确闭合）**：SEG0（512² 探针段）25→70 **+45**、SEG7（无 RT，深度/阴影类）
+  680→1173 **+493**、SEG9（主 MRT RGBA16F|R16G16|RGBA8）713→1227 **+514**、SEG20（透明 MRT）
+  232→276 **+44**、SEG5 698→632 **−66**、SEG2/3/4/10/18 合计 **−14**，**其余 26 段 draws 全等**
+  （逐段和 = +1016 与 pass1 差值闭合）；
+- **看图结论**：两帧同机位、相邻时刻（两次启动间隔约 3 分钟），构图一致（右崖受光差异=云影/时刻）→
+  漂移归因**会话间场景状态**（候选机制：加载后流送/生成物/可见集未稳定即抓帧——S4b `textures` 316
+  显著低于 S4/S4c 的 418/423，指向资产/对象未全量驻留；**机制未定死 = 诚实边界**，
+  操作口径：以后同机位待画面稳定再 F12、连抓两张核对）。
+
+**噪声底（S4→S4c，pass7/diff3）**：draws 3667→3862（+195）、pso 131→138、textures 418→423、
+透明 242→276（+34）；**其余 7 条锚点全绿**（formats 14=14、CS 98 次 18,786,750 线程三帧全等、
+CS 字节码 9=9、clear 两档、copy.sequence、conditional-nodes 逐值相等）——比 S5 噪声底
+（`S5→S5c` pass5/diff5、draws +464、clear 两档 DIFF）更稳。
+
+### 13.3 锚点稳定性分级（阶段1 判读权威口径）
+
+| 级 | 锚点 | 三帧实测（S4 / S4b / S4c） | 阶段1 用法 |
+|---|---|---|---|
+| **A · 逐帧确定** | `textures.formats`、`cs.dispatch-profile`、`cs.bytecode-hash`、`clear.bound-profile`、`clear.target-profile`、`copy.sequence` 基础三拷贝、`conditional-nodes` 结构（除 copies_total） | 全绿：14=14=14；98 次 / 18,786,750 线程全等；9=9；clear 两档全等 | **硬门槛**：候选帧红一条 = 移植错误 |
+| **F · 注入指纹** | copies +1、copy.sequence 尾条 512²→1920×1080、copies_total +1（目标=SwapchainImage id） | S4c→S4b 三条全中；S4→S4c 零出现 | 注入帧**必须出现**；共享纹理通路若改变拷贝结构，须在候选帧提案里**先声明预期差异**再跑闸门 |
+| **B · 会话/帧态敏感** | `counts.pass1` 的 draws/pso/textures、`pass5.structure` 的 draws_sum 与段签名（`_seg_signature` = viewports/rt_infos/dsv_info，与 draws 无关——2048² R16_TYPELESS 段两两必 DIFF 即此字段漂移）、`transparent.draws` | 同日两抓：draws **−1016**、pso −12、textures −107、透明 −44；跨日：draws +195、pso +7、textures +5、透明 +34 | **不做单对硬门槛**：DIFF 先按 §12.6 看图归因；量级超出本次实测（约 ±1000 draws / ±50 透明 / ±100 textures）才升级为可疑 |
+
+> **「10 锚点全绿」的准确含义**（`docs/03` §3、`docs/00` §1.1 同步按此执行）：
+> **A 类全绿 + F 类必现 + B 类归因后无注入不可解释项**。字面 10/10 只在同帧自比时成立
+> （`S4 vs S4` 10/10，2026-10-03 复跑仍绿）；跨抓帧对必然携带 B 类漂移——这正是 §12.6
+> 判读顺序存在的原因。
+
+### 13.4 复现命令
+
+```powershell
+# 全链（两帧各 6 步：extract → pass2..pass6，-Scene 换 S4c 同跑）
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_run.ps1 -Script rdc_extract.py -Scene S4b
+# 哨兵 / 闸门 / 图证
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_run.ps1 -Script rdc_pass7_pixels.py -Scene S4b
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_compare.ps1 -Base S4c -Cand S4b
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_compare.ps1 -Base S4 -Cand S4c
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_run.ps1 -Script rdc_dump_backbuffer.py -Scene S4b
+```
+
+在档产出：`S4{b,c}-extract*.json`、`S4{b,c}-pass7-pixels.json`、`S4{,b,c}-backbuffer.{json,png}`、
+`S4c~S4b-compare.json`（指纹标定）、`S4~S4c-compare.json`（噪声底）。

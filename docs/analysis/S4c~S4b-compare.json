@@ -1,0 +1,190 @@
+{
+ "script": "rdc_compare v1",
+ "base": {
+  "dir": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis",
+  "prefix": "S4c"
+ },
+ "cand": {
+  "dir": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis",
+  "prefix": "S4b"
+ },
+ "anchors": [
+  {
+   "id": "counts.pass1",
+   "name": "Draw/Dispatch/Clear/Copy/PSO",
+   "status": "DIFF",
+   "base": {
+    "draws": 3862,
+    "dispatches": 98,
+    "clears": 18,
+    "copies": 3,
+    "present": 1,
+    "pso": 138,
+    "textures": 423
+   },
+   "cand": {
+    "draws": 2846,
+    "dispatches": 98,
+    "clears": 18,
+    "copies": 4,
+    "present": 1,
+    "pso": 126,
+    "textures": 316
+   },
+   "detail": "diff keys: draws,copies,pso,textures"
+  },
+  {
+   "id": "textures.formats",
+   "name": "纹理格式集合",
+   "status": "PASS",
+   "base": "14 formats",
+   "cand": "14 formats",
+   "detail": ""
+  },
+  {
+   "id": "cs.dispatch-profile",
+   "name": "CS dispatch/线程/线程组",
+   "status": "PASS",
+   "base": {
+    "count": 98,
+    "grand": 18786750,
+    "groups": {
+     "1,270,1": 1,
+     "1,540,1": 1,
+     "10,6,1": 90,
+     "10,6,90": 1,
+     "1920,2,1": 1,
+     "2,1080,1": 1,
+     "240,135,1": 1,
+     "480,1,1": 1,
+     "960,1,1": 1
+    }
+   },
+   "cand": {
+    "count": 98,
+    "grand": 18786750,
+    "groups": {
+     "1,270,1": 1,
+     "1,540,1": 1,
+     "10,6,1": 90,
+     "10,6,90": 1,
+     "1920,2,1": 1,
+     "2,1080,1": 1,
+     "240,135,1": 1,
+     "480,1,1": 1,
+     "960,1,1": 1
+    }
+   },
+   "detail": ""
+  },
+  {
+   "id": "cs.bytecode-hash",
+   "name": "CS DXBC 逐字节(反汇编)",
+   "status": "PASS",
+   "base": "9 CS blocks",
+   "cand": "9 CS blocks",
+   "detail": ""
+  },
+  {
+   "id": "pass5.structure",
+   "name": "分段数/签名多重集",
+   "status": "DIFF",
+   "base": {
+    "segments": 36,
+    "draws_sum": 3862
+   },
+   "cand": {
+    "segments": 36,
+    "draws_sum": 2846
+   },
+   "detail": "base-only segs x1: -||-||-||-||-||-||-||-|2048x2048 R16_TYPELESS; cand-only segs x1: -||-||-||-||-||-||-||-|2048x2048 R16_TYPELESS"
+  },
+  {
+   "id": "clear.bound-profile",
+   "name": "Clear 方位+绑定格式",
+   "status": "PASS",
+   "base": "ClearColor@- x1; ClearColor@1920x1080 D24S8_TYPELESS x3; ClearColor@1920x1080 D24S8_TYPELESS x1; ClearColor@- x2",
+   "cand": "ClearColor@- x1; ClearColor@1920x1080 D24S8_TYPELESS x3; ClearColor@1920x1080 D24S8_TYPELESS x1; ClearColor@- x2",
+   "detail": ""
+  },
+  {
+   "id": "clear.target-profile",
+   "name": "Clear 真实目标(格式)",
+   "status": "PASS",
+   "base": "ClearColor 1920x1080 R10G10B10A2_UNORM x1; ClearColor 1920x1080 R16G16B16A16_FLOAT x2; ClearColor 1920x1080 R8G8B8A8_UNORM x2; ClearColor 1920x1080 R8G8_UNORM x1",
+   "cand": "ClearColor 1920x1080 R10G10B10A2_UNORM x1; ClearColor 1920x1080 R16G16B16A16_FLOAT x2; ClearColor 1920x1080 R8G8B8A8_UNORM x2; ClearColor 1920x1080 R8G8_UNORM x1",
+   "detail": ""
+  },
+  {
+   "id": "copy.sequence",
+   "name": "Copy 链(src/dst 格式)",
+   "status": "DIFF",
+   "base": [
+    [
+     "1920x1080 D24S8_TYPELESS -> 1920x1080 D24S8_TYPELESS",
+     "1920x1080 R16G16B16A16_FLOAT -> 1920x1080 R16G16B16A16_FLOAT",
+     "1920x1080 D24S8_TYPELESS -> 1920x1080 D24S8_TYPELESS"
+    ],
+    [
+     "1920x1080 D24S8_TYPELESS -> 1920x1080 D24S8_TYPELESS",
+     "1920x1080 R16G16B16A16_FLOAT -> 1920x1080 R16G16B16A16_FLOAT",
+     "1920x1080 D24S8_TYPELESS -> 1920x1080 D24S8_TYPELESS"
+    ]
+   ],
+   "cand": [
+    [
+     "1920x1080 D24S8_TYPELESS -> 1920x1080 D24S8_TYPELESS",
+     "1920x1080 R16G16B16A16_FLOAT -> 1920x1080 R16G16B16A16_FLOAT",
+     "1920x1080 D24S8_TYPELESS -> 1920x1080 D24S8_TYPELESS",
+     "512x512 R8G8B8A8_UNORM -> 1920x1080 R8G8B8A8_UNORM"
+    ],
+    [
+     "1920x1080 D24S8_TYPELESS -> 1920x1080 D24S8_TYPELESS",
+     "1920x1080 R16G16B16A16_FLOAT -> 1920x1080 R16G16B16A16_FLOAT",
+     "1920x1080 D24S8_TYPELESS -> 1920x1080 D24S8_TYPELESS",
+     "512x512 R8G8B8A8_UNORM -> 1920x1080 R8G8B8A8_UNORM"
+    ]
+   ],
+   "detail": "顺序或条目不同"
+  },
+  {
+   "id": "conditional-nodes",
+   "name": "条件节点计数",
+   "status": "DIFF",
+   "base": {
+    "cube512_seg": 2,
+    "gbuffer_mrt_seg": 1,
+    "transparent_mrt_seg": 1,
+    "dark_rgba8_small_seg": 0,
+    "copies_total": 3,
+    "slot2048_clears": 1
+   },
+   "cand": {
+    "cube512_seg": 2,
+    "gbuffer_mrt_seg": 1,
+    "transparent_mrt_seg": 1,
+    "dark_rgba8_small_seg": 0,
+    "copies_total": 4,
+    "slot2048_clears": 1
+   },
+   "detail": "diff keys: copies_total"
+  },
+  {
+   "id": "transparent.draws",
+   "name": "透明段 Draw 数",
+   "status": "DIFF",
+   "base": 276,
+   "cand": 232,
+   "detail": "delta=-44"
+  }
+ ],
+ "summary": {
+  "pass": 5,
+  "diff": 5,
+  "skip": 0,
+  "total": 10
+ },
+ "match": false,
+ "errors": [],
+ "elapsed_sec": 0.1
+}

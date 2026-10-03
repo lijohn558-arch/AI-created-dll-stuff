@@ -1,0 +1,32 @@
+{
+ "rdc": "C:\\Users\\joker\\skyrim-vulkan\\captures\\S4c.rdc",
+ "scene": "S4c",
+ "full": "S4c",
+ "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S4c-backbuffer.png",
+ "errors": [],
+ "identified_by": "SwapchainImage",
+ "resourceId": "ResourceId::35",
+ "width": 1920,
+ "height": 1080,
+ "data_bytes": 8294400,
+ "row_pitch": 7680,
+ "png_bytes": 3722718,
+ "spotcheck": {
+  "rect-corner-1(16+6,16+6)": [
+   47,
+   69,
+   70
+  ],
+  "triangle-centroid(272,313)": [
+   57,
+   77,
+   77
+  ],
+  "control(1056,540)": [
+   17,
+   26,
+   26
+  ]
+ },
+ "elapsed_sec": 6.9
+}
