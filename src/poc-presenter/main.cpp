@@ -1217,7 +1217,7 @@ static bool pocbInit(IDXGISwapChain* sc)
 	if (ndev > 8)
 		ndev = 8;
 	VkPhysicalDevice devs[8]{};
-	fns.vkEnumeratePhysicalDevices(c.inst, &ndev, devs, nullptr);
+	fns.vkEnumeratePhysicalDevices(c.inst, &ndev, devs); // 3 参: (instance, count*, devices*)
 
 	LUID adapterLuid{};
 	bool haveLuid = false;
@@ -1227,8 +1227,8 @@ static bool pocbInit(IDXGISwapChain* sc)
 		IDXGIAdapter* ad = nullptr;
 		if (SUCCEEDED(gdev->GetAdapter(&ad)) && ad)
 		{
-			DXGI_ADAPTER_DESC1 d{};
-			if (SUCCEEDED(ad->GetDesc1(&d)))
+			DXGI_ADAPTER_DESC d{}; // GetDesc (v0 接口) 就有 AdapterLuid, 不必 QI 到 Adapter1
+			if (SUCCEEDED(ad->GetDesc(&d)))
 			{
 				adapterLuid = d.AdapterLuid;
 				haveLuid = true;
