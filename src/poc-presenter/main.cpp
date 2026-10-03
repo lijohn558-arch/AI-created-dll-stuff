@@ -944,10 +944,14 @@ static HRESULT STDMETHODCALLTYPE detouredPresent1(IDXGISwapChain1* sc, UINT sync
 
 // Vulkan 函数表分三层加载: 全局 (vkCreateInstance) → 实例 → 设备。
 // 本机与 CI 都没有 Vulkan SDK ⇒ 不链 vulkan-1.lib, 全部 GetProcAddress 自装。
+// 实例级必查的 7 个 (vkGetPhysicalDeviceProperties2 是可选项: 1.0 实例没有它 = 跳过 LUID 匹配)
+#define POCB_INST_REQ_FNS(X) \
+	X(vkDestroyInstance) X(vkEnumeratePhysicalDevices) X(vkCreateDevice) X(vkGetDeviceProcAddr) \
+	X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceQueueFamilyProperties) \
+	X(vkGetPhysicalDeviceMemoryProperties)
+
 #define POCB_INST_FNS(X) \
-	X(vkDestroyInstance) X(vkEnumeratePhysicalDevices) X(vkCreateDevice) \
-	X(vkGetDeviceProcAddr) X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceProperties2) \
-	X(vkGetPhysicalDeviceQueueFamilyProperties) X(vkGetPhysicalDeviceMemoryProperties)
+	POCB_INST_REQ_FNS(X) X(vkGetPhysicalDeviceProperties2)
 
 #define POCB_DEV_FNS(X) \
 	X(vkDestroyDevice) X(vkGetDeviceQueue) X(vkDeviceWaitIdle) \
@@ -1200,10 +1204,24 @@ static bool pocbInit(IDXGISwapChain* sc)
 #define POCB_LOAD_I(n) fns.n = reinterpret_cast<PFN_##n>(fns.GetInstanceProcAddr(c.inst, #n));
 	POCB_INST_FNS(POCB_LOAD_I)
 #undef POCB_LOAD_I
-	if (!fns.vkEnumeratePhysicalDevices || !fns.vkCreateDevice || !fns.vkGetDeviceQueue)
+	// 只校验**实例级**函数。设备级函数从 vkGetInstanceProcAddr 拿可能返回 NULL (规范允许,
+	// renderdoc in-app 的包装层更倾向如此) —— v0.9.0 实测 vkGetDeviceQueue 就是空, 把整步卡死;
+	// 设备级一律等 vkCreateDevice 之后走 vkGetDeviceProcAddr 重装 (那层必非空)。
+	// 空指针按名字列进日志, 免得下次再靠猜。
 	{
-		pocbFail("实例级函数表不完整 (vkGetInstanceProcAddr 返回空)");
-		return false;
+		std::string nul;
+#define POCB_CHECK_I(n) if (!fns.n) { if (!nul.empty()) nul += ","; nul += #n; }
+		POCB_INST_REQ_FNS(POCB_CHECK_I)
+#undef POCB_CHECK_I
+		if (!nul.empty())
+		{
+			logLine("PoC-B init: 实例级空指针 = " + nul);
+			pocbFail("实例级函数表不完整 (vkGetInstanceProcAddr 返回空)");
+			return false;
+		}
+		if (!fns.vkGetPhysicalDeviceProperties2)
+			logLine("PoC-B init: vkGetPhysicalDeviceProperties2 为空 (1.0 实例, 跳过 LUID 匹配)");
+		logLine("PoC-B init: 实例级函数表 OK (必查 7/7)");
 	}
 
 	// --- 物理设备: 优先选与 D3D11 适配器同 LUID 的那块 (多 GPU 时才不是同一块) ---
@@ -1305,10 +1323,19 @@ static bool pocbInit(IDXGISwapChain* sc)
 #define POCB_LOAD_D(n) fns.n = reinterpret_cast<PFN_##n>(fns.vkGetDeviceProcAddr(c.vdev, #n));
 	POCB_DEV_FNS(POCB_LOAD_D)
 #undef POCB_LOAD_D
-	if (!fns.vkCreateImage || !fns.vkQueueSubmit || !fns.vkCmdDraw || !fns.vkGetDeviceQueue)
+	// 设备级全表校验 (46 个我们真会调的) —— 空的按名字列出来, 不再只报"不完整"
 	{
-		pocbFail("设备级函数表不完整 (vkGetDeviceProcAddr 返回空)");
-		return false;
+		std::string nul;
+#define POCB_CHECK_D(n) if (!fns.n) { if (!nul.empty()) nul += ","; nul += #n; }
+		POCB_DEV_FNS(POCB_CHECK_D)
+#undef POCB_CHECK_D
+		if (!nul.empty())
+		{
+			logLine("PoC-B init: 设备级空指针 = " + nul);
+			pocbFail("设备级函数表不完整 (vkGetDeviceProcAddr 返回空)");
+			return false;
+		}
+		logLine("PoC-B init: 设备级函数表 OK (POCB_DEV_FNS 全查)");
 	}
 	c.qfi = qf;
 	fns.vkGetDeviceQueue(c.vdev, qf, 0, &c.queue); // 必须在上面 load 之后 (v0.9.0 踩过: 先调后 load = 空指针)
@@ -2575,7 +2602,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 {
 	info->infoVersion = PluginInfo::kInfoVersion;
 	info->name = "PocPresenter";
-	info->version = (0u << 16) | (9u << 8) | 0u; // 0.9.0
+	info->version = (0u << 16) | (9u << 8) | 1u; // 0.9.1
 
 	if (skse->isEditor)  // 只进游戏本体, 不进 Creation Kit
 		return false;
@@ -2586,7 +2613,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.9.0 (PoC-A v1.7 验收通过 + PoC-B v0.1: Vulkan 离屏渲染 → 读回 → 注入 backbuffer) ====");
+	logLine("==== poc-presenter v0.9.1 (PoC-A v1.7 验收通过 + PoC-B v0.1: Vulkan 离屏渲染 → 读回 → 注入 backbuffer) ====");
 
 	InitializeCriticalSection(&g_cs);
 

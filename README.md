@@ -72,10 +72,13 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
 本步**不碰 Vulkan、不改变画面**，只产出日志。
 
-> **状态（2026-10-03 14:49）：PoC-A v1.7 双环境闭环完成；PoC-B v0.1（插件 0.9.0）已编译通过，像素探针已就绪**
+> **状态（2026-10-03 15:10）：PoC-A v1.7 双环境闭环完成；PoC-B v0.1 首局实测发现初始化 bug → 插件 0.9.1 已修待重跑**
 > —— 带 renderdoc 局（7201 次 / 60 FPS，判读 §7.6）+ 无 renderdoc/GFE 局（★ 中、6001 次 / 60 FPS，判读 §7.7）
 > 使风险项 #1 第一环「Present 可拦」双环境实证闭合；PoC-B 问的是第二环「**写**」（Vulkan 渲染的像素能否
-> 落进游戏最终呈现的那一帧）。
+> 落进游戏最终呈现的那一帧）。**首局（0.9.0）**：游戏不崩、60 FPS、PoC-A 正常，但 PoC-B 卡在
+> 「实例级函数表不完整」——根因是把设备级 `vkGetDeviceQueue` 混进了 `vkGetInstanceProcAddr`
+> 之后的必查项（规范允许对设备级返回 NULL）；0.9.1 改为实例级 7 项必查 + 设备级 X-macro 全表校验，
+> 空指针按函数名落日志。候选帧 `captures\PoC-B.rdc` 探针复核 `SENTINEL_ABSENT`（注入确实没开，阴性可信）。
 > 唯一未证项：方案B 函数层的独立计数（vtable 层恒先命中 + TLS 去重，见 §7.7 末）。
 
 **机制（v1.7，七通道）**：

@@ -364,6 +364,13 @@ backbuffer 的正式类型），找不到才退回「同尺寸 RGBA8 纹理」�
 | 用例 | verdict | 细节 | errors |
 |---|---|---|---|
 | S4 基线（无注入，对照组） | `SENTINEL_ABSENT` | 0/4 洋红、2 个对照点干净、2.0s | **0** |
+| `PoC-B.rdc`（首局候选帧，插件 0.9.0 初始化失败 → 注入未启用） | `SENTINEL_ABSENT` | 0/4 洋红、对照点干净、2.2s | **0** |
+
+第二行是**候选文件上的首次实跑**：探针能正常打开 PoC-B 抓帧、按 `SwapchainImage` 找到
+backbuffer（该局 `ResourceId::78`，S4 基线是 `ResourceId::35` —— id 是抓帧局部的，属正常），
+并如实报「没注入」。这与当局日志一致（PoC-B 初始化在实例级函数表就失败了，注入从未开启），
+所以**探针在候选文件上的阴性判定是可信的**——下一局若注入成功，同一命令应翻成
+`SENTINEL_FOUND`，这一翻转就是「写进去了」的机器判据。
 
 backbuffer 识别结果：`ResourceId::35 / 1920×1080 / R8G8B8A8_UNORM / 4.0 Bpp / row_pitch 7680`——
 与 poc-presenter 日志里的 `format=28`（= `DXGI_FORMAT_R8G8B8A8_UNORM`）**互证**，说明探针读的
