@@ -1,0 +1,32 @@
+{
+ "rdc": "C:\\Users\\joker\\skyrim-vulkan\\captures\\S5-night-combat.rdc",
+ "scene": "S5",
+ "full": "S5-night-combat",
+ "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S5-backbuffer.png",
+ "errors": [],
+ "identified_by": "SwapchainImage",
+ "resourceId": "ResourceId::35",
+ "width": 1920,
+ "height": 1080,
+ "data_bytes": 8294400,
+ "row_pitch": 7680,
+ "png_bytes": 4739509,
+ "spotcheck": {
+  "rect-corner-1(16+6,16+6)": [
+   22,
+   58,
+   67
+  ],
+  "triangle-centroid(272,313)": [
+   44,
+   96,
+   118
+  ],
+  "control(1056,540)": [
+   187,
+   156,
+   127
+  ]
+ },
+ "elapsed_sec": 7.8
+}

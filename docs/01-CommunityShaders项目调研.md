@@ -373,3 +373,117 @@ v1.6 的 5B `E9` 入口改写、CHAIN 共存、TLS 双层不双计机制不变�
 七条通道全部在真实游戏里走通过，v1.0~v1.6 的 0 计数确系槽位错挂。**→ 进 PoC-B**：
 在 Present 内创建 Vulkan instance/swapchain → 游戏窗口出清屏/三角形 → F12 抓帧 →
 `rdc_run` 提取链 → `rdc_compare -Base S4 -Cand <候选>`。
+
+### 7.8 PoC-B 判读：Vulkan 离屏渲染的像素写进游戏呈现帧（2026-10-03 15:13–15:33）
+
+**架构回顾**（详见 README「PoC-B 三步验收」）：Present 钩子内**不开 Vulkan swapchain**
+（不与游戏 / RenderDoc / GFE 争 HWND）→ 离屏 512×512 洋红清屏 + 渐变三角形 →
+`vkCmdCopyImageToBuffer` 读回 host buffer → `UpdateSubresource` + `CopySubresourceRegion`
+到 backbuffer `(16,16)` → 调原 Present。命令缓冲**录一次逐帧复提交**，任一步失败即关注入、
+游戏照常呈现。
+
+#### 7.8.1 首局（v0.9.0）失败 → 根因与 0.9.1 修复
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `PoC-B 失败: 实例级函数表不完整 (vkGetInstanceProcAddr 返回空) code=0 — 已关闭注入, 游戏照常呈现`（游戏不崩、60 FPS、PoC-A 计数正常） |
+| 根因 | v0.9.0 把**设备级** `vkGetDeviceQueue` 混进了 `vkGetInstanceProcAddr` 之后的必查项——规范允许对设备级命令返回 NULL（renderdoc in-app 包装层更倾向如此）；设备级本该等 `vkCreateDevice` 后走 `vkGetDeviceProcAddr` 重装 |
+| 修复（0.9.1，commit `30e0067`） | ① 拆出 `POCB_INST_REQ_FNS` 必查 7 项（全实例级），`vkGetPhysicalDeviceProperties2` 降为可选；② 实例级/设备级两级都改 X-macro 全表校验，**空指针按函数名落日志**、各加一行 OK 正查；③ 版本号 0.9.0→0.9.1 以便日志段首区分新旧 DLL |
+| 首局副产物 | 该局注入未启用 → `captures\PoC-B.rdc` 被像素探针判 `SENTINEL_ABSENT`（阴性），**证明候选文件上的阴性判定可信**——下一局同一命令翻成 `SENTINEL_FOUND` 即为阳性 |
+
+#### 7.8.2 次局（v0.9.1）日志：PoC-B 全绿
+
+```
+==== poc-presenter v0.9.1 (PoC-A v1.7 验收通过 + PoC-B v0.1: Vulkan 离屏渲染 → 读回 → 注入 backbuffer) ====
+[15:13:04] PoC-B init: 开始 (首次 Present 触发, 一次性)
+[15:13:04] PoC-B init: backbuffer = 1920x1080 format=28 (期望28=R8G8B8A8_UNORM)
+[15:13:05] PoC-B init: 实例级函数表 OK (必查 7/7)
+[15:13:05] PoC-B init: GPU = "NVIDIA GeForce GTX 1660 Ti" LUID匹配=是 apiVer=1.4
+[15:13:07] PoC-B init: 设备级函数表 OK (POCB_DEV_FNS 全查)
+[15:13:07] PoC-B init 完成: 离屏 512x512 (洋红清屏+三角形) → 读回 → CopySubresourceRegion 到 backbuffer (16,16)
+[15:13:07] PoC-B 第 1 帧注入: 渲染+读回+拷贝 7.14 ms → CopySubresourceRegion(16,16 512x512) 已提交
+[15:14:48] PoC-B 注入 3600 帧, 累计均值 6.45 ms/帧 (近帧 6.94 ms) | Present 已触发 3601  近600帧 60.0 FPS
+[15:15:23] PoC-B 注入 4200 帧, 累计均值 6.47 ms/帧 (近帧 6.16 ms) | Present 已触发 4201  近600帧 17.3 FPS
+```
+
+**判读**：LUID 匹配成功（选中同一块 GTX 1660 Ti）→ `apiVer=1.4`（1.1 实例成功，无需回退 1.0）；
+**4200 帧注入零失败、零告警**；均值 **6.47 ms/帧**（含 Vulkan 渲染 + 读回 + 拷贝），近 600 帧恒
+59.5–60.0 FPS ⇒ 60 FPS 预算内（末条 17.3 FPS 是 F12 抓帧瞬间的 RenderDoc 开销，非注入所致）。
+
+#### 7.8.3 三步验收结果
+
+| 步 | 判据 | 实测 |
+|---|---|---|
+| ① 游戏内目视 | 左上角 512×512 洋红块 + 三角形 | ✓ **两个场景都出现**（S5 夜战精准位、白漫水池） |
+| ② 像素探针 | `verdict=SENTINEL_FOUND` | ✓ **两次全中**（见下表） |
+| ③ 结构配对 | `copy +1` 指纹 + 其余同构 | ✓ **Copy 指纹精确 +1**；其余锚点差异全部由图证归因场景动态（见 7.8.5） |
+
+**② 探针明细**（`tools/rdc_pass7_pixels.py`，errors=0）：
+
+| 帧 | 四角 (22,22)(521,22)(22,521)(521,521) | 三角形重心 (272,313) | 对照点 (1056,540)/(1900,1060) |
+|---|---|---|---|
+| `S5b.rdc` | 全 `(255,0,255)` | `(86,217,85)` vs 期望 `(85,217,85)` | `(47,63,58)` / `(13,31,29)` 非洋红 |
+| `S6-pool.rdc` | 全 `(255,0,255)` | `(86,217,85)` | `(65,87,85)` / `(45,69,69)` 非洋红 |
+
+两帧 backbuffer 均按 `ResourceType.SwapchainImage` 权威身份识别（1920×1080 R8G8B8A8_UNORM）。
+三角形重心差 1/255 来自三顶点色（绿 `0,1,0` / 黄 `1,1,0` / 蓝 `0,0.55,1`）光栅化插值的舍入。
+
+**抓帧与命名**：`S5.rdc`→`S5b.rdc`、`水边.rdc`→`S6-pool.rdc`（改名以符合 `rdc_run`/`_SCENES`
+的场景 ID 规范：`-Scene S5b` 会直取 `captures\S5b.rdc`，而 `-Scene S5` 恰好映射到 10/2 的
+基线 `S5-night-combat.rdc`，**不改名就会误抓基线**）。
+
+#### 7.8.4 提取链看到的注入痕迹（pass5）
+
+```
+Copy ev32355: ResourceId::504(1920x1080 D24S8_TYPELESS)   -> ResourceId::563(...)      ← 游戏自己的
+Copy ev45903: ResourceId::364(1920x1080 R16G16B16A16_FLOAT) -> ResourceId::367(...)     ← 游戏自己的
+Copy ev49979: ResourceId::504(1920x1080 D24S8_TYPELESS)   -> ResourceId::509(...)      ← 游戏自己的
+Copy ev50446: ResourceId::17759(512x512 R8G8B8A8_UNORM)    -> ResourceId::78(1920x1080 R8G8B8A8_UNORM)  ← 我们的
+```
+
+末条的源正是我方 512×512 离屏图，目标 `ResourceId::78` **就是像素探针读的那张 SwapchainImage**
+——渲染端（Vulkan）与呈现端（D3D11）在同一个资源 id 上对上了。
+
+#### 7.8.5 结构配对 `rdc_compare -Base S5 -Cand S5b`（pass=3 / diff=7）
+
+| 锚点 | 结果 | 判读 |
+|---|---|---|
+| `textures.formats` | **PASS** 16 = 16 | 纹理格式集合不变 |
+| `cs.dispatch-profile` | **PASS** 98 次 / 18786750 线程 / 9 种组尺寸逐项相等 | 计算着色器档案不变 |
+| `cs.bytecode-hash` | **PASS** 9 个 CS 块全等 | CS 字节码逐字节不变 |
+| `counts.pass1` | DIFF：copies **3→4**、draws 3809→4218、clears 23→22、pso 157→151 | **copies +1 即注入指纹**；其余见 7.8.6 |
+| `copy.sequence` | DIFF：候选两段序列尾部**各追加一条 `512x512 R8G8B8A8_UNORM -> 1920x1080 R8G8B8A8_UNORM`** | 与 §7.8.4 互证，指纹在序列层面可见 |
+| `conditional-nodes` | DIFF：`copies_total 3→4`（其余 5 项全等） | 同一指纹的第二个计数口径 |
+| `pass5.structure` / `clear.*` / `transparent.draws` | DIFF（42→41 段、透明段 122→161） | 场景动态，见 7.8.6 |
+
+#### 7.8.6 差异归因：整帧图证（新工具 `tools/rdc_dump_backbuffer.py`）
+
+为了不靠嘴说"那是场景动态"，写了 `rdc_dump_backbuffer.py`：把抓帧末态 backbuffer 整张导出
+PNG（无 PIL，手写 PNG；`SwapchainImage` 权威身份 + `GetTextureData` 末态整图；约 **7 s/张**）：
+
+| 图 | 内容 |
+|---|---|
+| `docs/analysis/S5-backbuffer.png` | 10/2 基线：**火焰战斗中**（Sigurd 燃烧、`Sigurd: Agggghh!` 字幕、罗盘带敌对标记） |
+| `docs/analysis/S5b-backbuffer.png` | 今日候选：**同机位但对话状态**（Anoriath 对话字幕、无战斗、罗盘无标记）+ **左上角洋红块与渐变三角形** |
+| `docs/analysis/S6-backbuffer.png` | 白漫水池候选：同样带洋红块 + 三角形 |
+
+两图并排即得结论：**同机位、不同时刻**——draws +409 / 透明段 +39 / 分段 42→41 / PSO 157→151 /
+clears 23→22 全部可归因于**游戏状态本身不同**（人物、粒子、字幕、光照档），而非注入：
+注入侧**一个 D3D11 Draw/Dispatch/Clear 都不发**（代码里只有 `UpdateSubresource` +
+`CopySubresourceRegion` + 调原 Present），故 draw 类差异不可能来自注入；**唯一可归因给注入的
+差异就是那 +1 条 Copy**（三处口径互证：`counts.pass1.copies`、`copy.sequence`、
+`conditional-nodes.copies_total`）。
+
+#### 7.8.7 结论与遗留
+
+**结论**：最高风险项 #1 的第二环——「**写**」——**实证闭合**：Vulkan 离屏渲染的像素经
+D3D11 `CopySubresourceRegion` 落进游戏 backbuffer，被游戏 Present 呈现（目视 ✓），
+被 RenderDoc F12 抓帧记录（探针 `SENTINEL_FOUND` ×2 ✓），在结构比对里留下唯一且可归因的
+`+1 Copy` 指纹（✓）。叠加 §7.6/§7.7 的第一环「Present 可拦」双环境闭环，**风险项 #1 的两环
+都已闭合**。
+
+**遗留（低优先级，均不阻塞）**：
+1. **同日同场景噪声底**未测——现有基线是 10/2 的另一场战斗，若要「唯一差别=注入」的严格数字，
+   可跑一次对照局：`<pluginDir>\poc-presenter.ini` 写 `vulkan=0`（逃生门，**至今未实测**）→
+   同机位 F12 → `rdc_compare -Base S5c -Cand S5b`。预期只剩 Copy +1，顺带首测逃生门。
+2. **方案B 函数层独立计数**仍未被观察（沿用 §7.7 末的说明）。

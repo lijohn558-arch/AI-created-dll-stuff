@@ -72,14 +72,13 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
 本步**不碰 Vulkan、不改变画面**，只产出日志。
 
-> **状态（2026-10-03 15:10）：PoC-A v1.7 双环境闭环完成；PoC-B v0.1 首局实测发现初始化 bug → 插件 0.9.1 已修待重跑**
+> **状态（2026-10-03 15:40）：风险项 #1 双环闭合 —— PoC-A（可拦）+ PoC-B（可写）均实测通过，插件 0.9.1**
 > —— 带 renderdoc 局（7201 次 / 60 FPS，判读 §7.6）+ 无 renderdoc/GFE 局（★ 中、6001 次 / 60 FPS，判读 §7.7）
-> 使风险项 #1 第一环「Present 可拦」双环境实证闭合；PoC-B 问的是第二环「**写**」（Vulkan 渲染的像素能否
-> 落进游戏最终呈现的那一帧）。**首局（0.9.0）**：游戏不崩、60 FPS、PoC-A 正常，但 PoC-B 卡在
-> 「实例级函数表不完整」——根因是把设备级 `vkGetDeviceQueue` 混进了 `vkGetInstanceProcAddr`
-> 之后的必查项（规范允许对设备级返回 NULL）；0.9.1 改为实例级 7 项必查 + 设备级 X-macro 全表校验，
-> 空指针按函数名落日志。候选帧 `captures\PoC-B.rdc` 探针复核 `SENTINEL_ABSENT`（注入确实没开，阴性可信）。
-> 唯一未证项：方案B 函数层的独立计数（vtable 层恒先命中 + TLS 去重，见 §7.7 末）。
+> 闭合第一环「Present 可拦」；**PoC-B v0.1 于 0.9.1 局闭合第二环「写」**：Vulkan 离屏 512×512 → 读回 →
+> `CopySubresourceRegion` 进 backbuffer (16,16)，4200 帧零失败、均值 **6.47 ms/帧**、近 600 帧恒 60 FPS；
+> 验收三步 = 两场景目视 ✓ + 像素探针 `SENTINEL_FOUND` ×2 ✓ + 结构配对 `+1 Copy` 指纹（三口径互证）✓，
+> 详见 docs/01 **§7.8**（含整帧 PNG 图证与差异归因）。
+> 遗留低优先级项：① 同日同场景噪声底（`vulkan=0` 对照局，顺带首测逃生门）② 方案B 函数层独立计数（§7.7 末）。
 
 **机制（v1.7，七通道）**：
 1. **同步安装（v1.2 主修正）**——钩子在 `SKSEPlugin_Load` 内同步装完（等模块 ≤5s、等
@@ -225,16 +224,25 @@ push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从
 **刻意不开 Vulkan swapchain**（不与游戏 / RenderDoc / GFE 争 HWND 所有权，且像素落在 D3D11
 帧内 ⇒ F12 抓帧必然记录这次拷贝——配对 harness 只认 D3D11 帧）。
 
-**PoC-B 三步验收（v0.9.0 / PoC-B v0.1）**：
+**PoC-B 三步验收（v0.9.1 / PoC-B v0.1 —— 2026-10-03 已闭合，实测值见 docs/01 §7.8）**：
 
-1. **游戏内目视**：左上角出现 512×512 洋红块 + 三角形；日志有
+1. **游戏内目视 ✓**：左上角 512×512 洋红块 + 渐变三角形（顶点绿/黄/蓝）；日志
    `PoC-B init 完成: 离屏 512x512 ... CopySubresourceRegion 到 backbuffer (16,16)`、
-   `PoC-B 第 1 帧注入: 渲染+读回+拷贝 x.xx ms`，此后每 600 帧一行均值。
-2. **机器判定（像素）**：F12 抓帧 → 拷成 `captures\S4b.rdc` →
-   `powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_run.ps1 -Script rdc_pass7_pixels.py -Scene S4b`
-   → 期望 `verdict=SENTINEL_FOUND`（探针定义 `docs/02` §12；基线对照已跑通：`SENTINEL_ABSENT`、errors=0）。
-3. **结构配对**：`rdc_run.ps1 -Script rdc_extract.py -Scene S4b` 等跑完 →
-   `powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_compare.ps1 -Base S4 -Cand S4b`
-   → 十条结构锚点（预期 `counts.pass1` 的 Copy 因注入 +1 而 DIFF，其余与基线同构）。
+   `PoC-B 第 1 帧注入: 渲染+读回+拷贝 7.14 ms`，此后每 600 帧一行——**4200 帧零失败、
+   累计均值 6.47 ms/帧、近 600 帧恒 60 FPS**。
+2. **机器判定（像素）✓ ×2**：F12 抓帧 → 改名成合法场景 ID（`S5.rdc`→`S5b.rdc`；
+   `-Scene S5` 会映射到 10/2 基线，**不改名会误抓**）→
+   `powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_run.ps1 -Script rdc_pass7_pixels.py -Scene S5b`
+   → `verdict=SENTINEL_FOUND`：四角全 `(255,0,255)`、三角形重心 `(86,217,85)`、对照点干净、errors=0
+   （第二帧 `S6-pool` 同样 FOUND；阴性对照见基线 `SENTINEL_ABSENT`）。
+3. **结构配对 ✓**：`rdc_run.ps1 -Script rdc_extract.py -Scene S5b`（pass4/5/6 同跑）→
+   `powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_compare.ps1 -Base S5 -Cand S5b`
+   → **`copies 3→4`、`copy.sequence` 尾部追加 `512x512 → 1920x1080`、`copies_total 3→4` 三口径同一指纹**，
+   纹理格式 / CS dispatch / CS 字节码三项 PASS；draws 等其余 DIFF 由**整帧 PNG 图证**归因游戏状态
+   （同机位不同时刻：基线=火焰战斗、候选=对话状态；注入侧零 Draw）。
 
-失败即关注入（日志 `PoC-B 失败: ... 已关闭注入`），逃生门 `<pluginDir>\poc-presenter.ini` 写 `vulkan=0`。
+整帧图证（新工具，约 7 s/张）：`powershell ... -File tools\rdc_run.ps1 -Script rdc_dump_backbuffer.py -Scene S5b`
+→ `docs\analysis\<场景>-backbuffer.png`（已在库：`S5` / `S5b` / `S6` 三张，`S5b` 图上肉眼可见洋红块）。
+
+失败即关注入（日志 `PoC-B 失败: <步骤> code=... — 已关闭注入, 游戏照常呈现`），逃生门
+`<pluginDir>\poc-presenter.ini` 写 `vulkan=0`（或 `pocb=0`）——**尚未实测**，跑对照局时顺带验。

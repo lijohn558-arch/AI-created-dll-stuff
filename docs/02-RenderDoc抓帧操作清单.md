@@ -359,23 +359,66 @@ backbuffer 身份一律走 `ResourceType.SwapchainImage`（`ctrl.GetResources()`
 backbuffer 的正式类型），找不到才退回「同尺寸 RGBA8 纹理」这种弱口径——json 的
 `backbuffer.identified_by` 会写明是哪种，**弱口径的结论要打折看**。
 
-### 12.4 自测（2026-10-03，基线 `captures\S4-water.rdc`）
+### 12.4 自测（2026-10-03）
 
 | 用例 | verdict | 细节 | errors |
 |---|---|---|---|
 | S4 基线（无注入，对照组） | `SENTINEL_ABSENT` | 0/4 洋红、2 个对照点干净、2.0s | **0** |
 | `PoC-B.rdc`（首局候选帧，插件 0.9.0 初始化失败 → 注入未启用） | `SENTINEL_ABSENT` | 0/4 洋红、对照点干净、2.2s | **0** |
+| `S5b.rdc`（0.9.1 注入局，S5 夜战） | **`SENTINEL_FOUND`** | 四角全 `(255,0,255)`、重心 `(86,217,85)`、对照点 `(47,63,58)`/`(13,31,29)`、2.2s | **0** |
+| `S6-pool.rdc`（0.9.1 注入局，白漫水池） | **`SENTINEL_FOUND`** | 四角全 `(255,0,255)`、重心 `(86,217,85)`、对照点 `(65,87,85)`/`(45,69,69)`、2.0s | **0** |
 
-第二行是**候选文件上的首次实跑**：探针能正常打开 PoC-B 抓帧、按 `SwapchainImage` 找到
-backbuffer（该局 `ResourceId::78`，S4 基线是 `ResourceId::35` —— id 是抓帧局部的，属正常），
-并如实报「没注入」。这与当局日志一致（PoC-B 初始化在实例级函数表就失败了，注入从未开启），
-所以**探针在候选文件上的阴性判定是可信的**——下一局若注入成功，同一命令应翻成
-`SENTINEL_FOUND`，这一翻转就是「写进去了」的机器判据。
+第 2 行是**候选文件上的首次实跑**：探针能正常打开该抓帧、按 `SwapchainImage` 找到
+backbuffer，并如实报「没注入」——与当局日志一致（PoC-B 初始化在实例级函数表就失败了，注入
+从未开启），所以**探针在候选文件上的阴性判定可信**。第 3、4 行是注入成功后的同一命令翻成
+`SENTINEL_FOUND`，**这一翻转就是「写进去了」的机器判据**（前后共四次运行、errors 全 0）。
 
-backbuffer 识别结果：`ResourceId::35 / 1920×1080 / R8G8B8A8_UNORM / 4.0 Bpp / row_pitch 7680`——
-与 poc-presenter 日志里的 `format=28`（= `DXGI_FORMAT_R8G8B8A8_UNORM`）**互证**，说明探针读的
-正是 DLL 断言的那张交换链图。
+backbuffer 识别结果：基线 `ResourceId::35`、注入局 `ResourceId::78`（**id 是抓帧局部的，属正常**），
+均为 `1920×1080 / R8G8B8A8_UNORM / row_pitch 7680`——与 poc-presenter 日志里的 `format=28`
+（= `DXGI_FORMAT_R8G8B8A8_UNORM`）**互证**，说明探针读的正是 DLL 断言的那张交换链图。
 
 **踩坑**：本版 `ResourceFormat` 既不能直接 `.name` 取到、也没有 `__str__`（`str()` 只给
 `<Swig Object ... at 0x...>` 地址，跨进程不稳定）→ `_fmt_name` 改为逐属性尝试 + 组件数兜底，
 现已返回 `R8G8B8A8_UNORM`。
+
+### 12.5 整帧导出（`rdc_dump_backbuffer.py`，2026-10-03 新增）
+
+7 点探针回答「那几个点对不对」，整帧导出回答「**这一帧长什么样、两帧可不可比**」：
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_run.ps1 -Script rdc_dump_backbuffer.py -Scene S5b
+```
+
+| 项 | 口径 |
+|---|---|
+| 身份 | 与探针同一权威口径 `ResourceType.SwapchainImage`，找不到才退「1920×1080 RGBA8」弱口径（json 的 `identified_by` 标明） |
+| 数据 | `ctrl.SetFrameEvent(末事件)` → `ctrl.GetTextureData(resId, rd.Subresource(0,0,0))`，行距 = `len/height`（紧凑），`row_pitch < w*4` 时**拒绝导出**（避免花屏假图） |
+| 编码 | **无 PIL**，`zlib + struct` 手写 8-bit RGB PNG（`\x89PNG…` + IHDR/IDAT/IEND + CRC32） |
+| 输出 | `docs\analysis\<场景前缀>-backbuffer.png` + 同名 `.json`（含 `spotcheck` 三个抽检点，可与 pass7 互证） |
+| 耗时 | **约 7 s/张**（1920×1080，Python 逐像素转 RGB） |
+
+**已在库的三张**：`S5-backbuffer.png`（10/2 基线：火焰战斗中）、`S5b-backbuffer.png`（注入局：
+同机位对话状态 + **左上角洋红块与渐变三角形肉眼可见**）、`S6-backbuffer.png`（白漫水池注入局）。
+
+用法要点：把基线与候选两图**并排打开**，能一眼判断两帧是否处于同一游戏状态——这直接决定
+`rdc_compare` 的差异该归因注入还是归因场景（见 §12.6）。
+
+### 12.6 结构配对的判读口径（`rdc_compare` 的 DIFF 怎么归因）
+
+`rdc_compare -Base <基线> -Cand <候选>` 十条锚点里，DIFF 不等于「注入造成的」。判读顺序：
+
+1. **先找注入指纹（预期且必须出现，三口径互证）**：
+   `counts.pass1.copies` **+1**、`copy.sequence` 尾部多一条
+   `512x512 R8G8B8A8_UNORM -> 1920x1080 R8G8B8A8_UNORM`、`conditional-nodes.copies_total` **+1**；
+   同时 pass5 日志里应有 `Copy ev…: ResourceId::N(512x512) -> ResourceId::M(1920x1080)`，
+   其目标 **M 必须等于探针读的 SwapchainImage id**。
+2. **注入不可能产生的差异 → 归因场景**：draws / clears / pso / 分段数 / 透明段 Draw。注入侧
+   **一个 D3D11 Draw/Dispatch/Clear 都不发**（只有 `UpdateSubresource` + `CopySubresourceRegion`
+   + 调原 Present），故这些数的变动来自游戏状态本身（人物、粒子、字幕、光照档）。
+3. **归因前必须看图**：跑 §12.5 把两帧导出并排看，确认「同机位不同时刻」还是「同一帧」。
+   2026-10-03 实测（`S5 ~ S5b`）：pass3 / diff7——纹理格式 16=16、CS dispatch 98 次
+   18786750 线程全等、CS 字节码 9 块全等 **PASS**；`copies 3→4` 指纹 ✓；draws 3809→4218
+   (+409) 与分段 42→41、PSO 157→151 经图证确认为**同机位不同时刻**（基线=火焰战斗、候选=对话）。
+4. **要「唯一差别=注入」的严格数字**，需同日同场景的无注入对照帧：
+   `<pluginDir>\poc-presenter.ini` 写 `vulkan=0`（逃生门，**尚未实测**）→ 同机位 F12 →
+   `rdc_compare -Base S5c -Cand S5b`。预期**只剩 Copy +1**；这是遗留项，不阻塞当前结论。
