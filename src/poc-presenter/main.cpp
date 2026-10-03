@@ -206,8 +206,9 @@
  *   → 绑定判非法作废 (回放 8 条 High "Invalid output merger"; 初态内容链证真机 draw 同样
  *   未落地 = 反射 cube 全帧平铺清屏色 = 游戏内视觉回归); 且游戏用创建时缓存 desc →
  *   viewport 恒 512² 字面量 (即便①修好也只渲 1/4 面)。两处同修:
- *   ① 配对 depth 同步升质: cube 命中后开窗, 512² D24S8_TYPELESS 纯2D (mips=1/array=1/
- *      D24 或 D24_TYPELESS + DSV bind) → 1024²。依据 rdc_tex_desc 实测: 全帧唯一 512² D24
+ *   ① 配对 depth 同步升质: cube 命中后开窗, 512² D24 家族 (R24G8_TYPELESS 等 4 个合法
+ *      DXGI 枚举 —— RenderDoc 显示名 "D24S8_TYPELESS", 枚举名里没有 D24S8_TYPELESS;
+ *      纯2D, mips=1/array=1, DSV bind) → 1024²。依据 rdc_tex_desc 实测: 全帧唯一 512² 深度
  *      = 探针 depth; ResourceId 时序 544(cube) < 552(depth) → 前向开窗即可配对。
  *   ② 升质宽高回写游戏自己那一份 desc (const 是 API 约定, 游戏栈变量可写; 写前 VirtualQuery
  *      查页保护, 只读页放弃+告警不崩) —— 游戏缓存的 viewport 等派生值跟着变 1024²。
@@ -555,15 +556,19 @@ static bool probeDesc(const D3D11_TEXTURE2D_DESC* d)
 	           (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
 }
 
-// v0.11 ①: 探针配对 depth (docs/02 §14.4) —— rdc_tex_desc 实测: 512² D24S8_TYPELESS
-// 纯 2D (arraySize=1, mips=1, DSV bind), 全帧唯一 512² D24; cube(544) 早于 depth(552)
-// 创建 → cube 命中后开窗 (g_probeDepthArmed) 等它, 收窗后其余 512² depth 一概不碰
+// v0.11 ①: 探针配对 depth (docs/02 §14.4) —— rdc_tex_desc 实测: 512² D24 家族
+// (RenderDoc 显示名 "D24S8_TYPELESS" = DXGI 枚举 D24 家族, 枚举名里没有 D24S8_TYPELESS,
+// 列全 4 个合法成员: R24G8_TYPELESS(游戏大概率用这个) / D24_UNORM_S8_UINT /
+// R24_UNORM_X8_TYPELESS / X24_TYPELESS_G8_UINT) 纯 2D (arraySize=1, mips=1, DSV bind),
+// 全帧唯一 512² 深度; cube(544) 早于 depth(552) 创建 → cube 命中后开窗
+// (g_probeDepthArmed) 等它, 收窗后其余 512² depth 一概不碰
 // (别的 pass 若 RT 还是 512² 而 depth 被升 = 复刻同一个 bug, 绝不能无条件升)。
 static bool probeDepthDesc(const D3D11_TEXTURE2D_DESC* d)
 {
 	return d->Width == 512 && d->Height == 512 && d->MipLevels == 1 && d->ArraySize == 1 &&
-	       (d->Format == DXGI_FORMAT_D24_UNORM_S8_TYPELESS ||
-	        d->Format == DXGI_FORMAT_D24_UNORM_S8_UINT) &&
+	       (d->Format == DXGI_FORMAT_R24G8_TYPELESS || d->Format == DXGI_FORMAT_D24_UNORM_S8_UINT ||
+	        d->Format == DXGI_FORMAT_R24_UNORM_X8_TYPELESS ||
+	        d->Format == DXGI_FORMAT_X24_TYPELESS_G8_UINT) &&
 	       d->SampleDesc.Count == 1 && d->Usage == D3D11_USAGE_DEFAULT &&
 	       (d->BindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
 }

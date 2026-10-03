@@ -684,8 +684,10 @@ textures 428→438；pso 137=137、clears/copies 全等），B 类 ±1000 带内
 - **阶段1 判定：主体过闸**——共享通路（阶段1 核心交付）实证成立；探针升质单列缺陷清单，
   可按 `probe=0` 逃生门降级，不阻塞主线。
 - **v0.11 修复清单（2026-10-03 已回码 `v0.10.0→v0.11.0`，待 S4e 重抓验证）**：
-  1. ✅ hook 同步升质配对 depth：`probeDepthDesc`（512² D24/D24_TYPELESS + mips=1 +
-     array=1 + DSV bind）+ **cube 命中后 10s 一次性开窗**（依据 `rdc_tex_desc` 实测：
+  1. ✅ hook 同步升质配对 depth：`probeDepthDesc`（512² D24 家族 4 个合法 DXGI 枚举
+     = R24G8_TYPELESS/D24_UNORM_S8_UINT/R24_UNORM_X8_TYPELESS/X24_TYPELESS_G8_UINT，
+     RenderDoc 显示名 "D24S8_TYPELESS"；+ mips=1 + array=1 + DSV bind）+ **cube 命中后
+     10s 一次性开窗**（依据 `rdc_tex_desc` 实测：
      552 全帧唯一 512² D24；ResourceId 时序 544cube<552depth 同突发 → 前向窗即可配对；
      收窗后其余 512² depth 一概不碰——无条件升会把别的 512² pass 也弄成尺寸不匹配）；
   2. ✅ viewport 适配：**原地回写游戏那份 desc**（`pokeDescSize`，写前 `VirtualQuery`
