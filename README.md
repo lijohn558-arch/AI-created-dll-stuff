@@ -17,6 +17,7 @@ Skyrim Special Edition 的 Vulkan 直接对接项目 — 让游戏以 Vulkan 渲
 | [docs/01-CommunityShaders项目调研.md](docs/01-CommunityShaders项目调研.md) | CS 项目可复用资料调研（HLSL 源码、Hook 清单、NvAPI 坑） |
 | [docs/02-RenderDoc抓帧操作清单.md](docs/02-RenderDoc抓帧操作清单.md) | 抓帧执行手册（环境、场景、记录表、提取清单、无头批跑 §10、配对 harness §11） |
 | [docs/03-API配对验证收益分析.md](docs/03-API配对验证收益分析.md) | 配对锚点判定口径、收益/风险、现代化扩展顺序（水体→天空→材质→超分→帧生成） |
+| [docs/04-NIF资源格式调研.md](docs/04-NIF资源格式调研.md) | NIF 顶点格式→Vulkan 映射、材质参数、骨骼蒙皮结构；风险项 #2（蒙皮复杂度）评估（`tools/parse-nif.ps1`） |
 
 ## 仓库结构
 
