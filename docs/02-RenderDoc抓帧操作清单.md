@@ -683,14 +683,21 @@ textures 428→438；pso 137=137、clears/copies 全等），B 类 ±1000 带内
 
 - **阶段1 判定：主体过闸**——共享通路（阶段1 核心交付）实证成立；探针升质单列缺陷清单，
   可按 `probe=0` 逃生门降级，不阻塞主线。
-- **v0.11 修复清单（待回码）**：
-  1. hook 同步升质配对 depth（在 CreateTexture2D 过滤逻辑加 D24S8 判据，与 cube 同批升 1024²）；
-  2. viewport 适配——先查 `main.cpp` 升质是否原地改写 `*pDesc`（若游戏用自身常量 512 则需
-     另拦 RSSetViewports 或重新评估升质方案）；
-  3. 修完重抓 S4e/S4e2 双帧 → 同三闸 + 面导出重过。
+- **v0.11 修复清单（2026-10-03 已回码 `v0.10.0→v0.11.0`，待 S4e 重抓验证）**：
+  1. ✅ hook 同步升质配对 depth：`probeDepthDesc`（512² D24/D24_TYPELESS + mips=1 +
+     array=1 + DSV bind）+ **cube 命中后 10s 一次性开窗**（依据 `rdc_tex_desc` 实测：
+     552 全帧唯一 512² D24；ResourceId 时序 544cube<552depth 同突发 → 前向窗即可配对；
+     收窗后其余 512² depth 一概不碰——无条件升会把别的 512² pass 也弄成尺寸不匹配）；
+  2. ✅ viewport 适配：**原地回写游戏那份 desc**（`pokeDescSize`，写前 `VirtualQuery`
+     查页保护、只读页放弃+告警不崩）——实测坐实游戏用创建时缓存值（不重查 GetDesc），
+     改它手里那份即改 viewport 派生值；若 S4e 抓帧 viewport 仍 512² → 降级 plan-B
+     （拦 RSSetViewports 或重新评估升质方案）；
+  3. ⬜ 修完重抓 S4e/S4e2 双帧 → 同三闸 + 面导出重过（**通过判据**：probe 段 0 条 OM
+     诊断 + viewport=1024² + 六面 md5 互异/uniq 高 + clear.depth 512²→1024² 声明项）。
 - **下一步不被阻塞**：SSR 第二步（或 2048² 探针对照 demo）可先行决策（docs/03 §6.1）。
 
 在档产出：`S4d*-extract*.json`（全套）、`S4c~S4d-compare.json`、`S4b~S4d-compare.json`、
 `S4d2~S4d-compare.json`、`S4d-api-scan.txt`、`S4{b,d}-state-probe.txt`、`S4{b,d}-cubefaces.{json,log}`、
+`S4d-tex-desc.txt`（depth 配对取证：552 = 全帧唯一 512² D24）、
 `S4d-cube-*-face*.png`（6 张 1024²）、`S4b-cube-*-face*.png`（6 张 512² 对照）、
 `S4{d,d2}-pass7-pixels.json`、`S4{d,d2}-backbuffer.{json,png}`。

@@ -201,6 +201,24 @@
  *     PoC-B init 完成: ... → 共享纹理 (NT handle+event闸, 无读回) → ...
  *     PoC-B 第 1 帧注入: 渲染+共享拷贝 x.xx ms (fence x.xx / 闸 x.xx) → ...
  *
+ * ---- v0.11.0 (2026-10-03): 修探针升质两处缺陷 (S4d/S4d2 判读定案, docs/02 §14.4/14.5) ----
+ *   S4d 双帧判读: v0.10.0 升质只翻 cube 不翻 depth → OM = RT1024² + DSV512² 尺寸不匹配
+ *   → 绑定判非法作废 (回放 8 条 High "Invalid output merger"; 初态内容链证真机 draw 同样
+ *   未落地 = 反射 cube 全帧平铺清屏色 = 游戏内视觉回归); 且游戏用创建时缓存 desc →
+ *   viewport 恒 512² 字面量 (即便①修好也只渲 1/4 面)。两处同修:
+ *   ① 配对 depth 同步升质: cube 命中后开窗, 512² D24S8_TYPELESS 纯2D (mips=1/array=1/
+ *      D24 或 D24_TYPELESS + DSV bind) → 1024²。依据 rdc_tex_desc 实测: 全帧唯一 512² D24
+ *      = 探针 depth; ResourceId 时序 544(cube) < 552(depth) → 前向开窗即可配对。
+ *   ② 升质宽高回写游戏自己那一份 desc (const 是 API 约定, 游戏栈变量可写; 写前 VirtualQuery
+ *      查页保护, 只读页放弃+告警不崩) —— 游戏缓存的 viewport 等派生值跟着变 1024²。
+ *   逃生门不变: probe=0 不挂槽; vulkan=0 同样不挂。
+ *   验证闭环 (抓 S4e 后): rdc_api_scan 看 probe 段 viewport=1024² / rdc_dump_cubefaces
+ *      看 0 条 OM 诊断 + 六面内容互异 / rdc_dump_cubefaces 面 PNG 对照 S4d 平铺色。
+ *   关键日志 (新增):
+ *     探针配对depth: 512² D24 → 1024² 第 N 次, hr=0
+ *     探针升质: 游戏描述符页只读 … — 放弃回写 (仅异常内存布局出现, 出现即 §14.5 plan-B)
+ *     探针配对depth: 带初始数据 — 不升 (升了会越界读), 配对失败告警
+ *
  * 构建: GitHub Actions (build.yml job "poc-presenter"), 本地不编译
  * 安装: poc-presenter.dll 放入 <游戏>/Data/SKSE/Plugins/
  */
@@ -481,10 +499,16 @@ static bool iniFlag(const char* key, bool def)
 	return out;
 }
 
-// ---------- 探针升质 hook (v0.10.0): 拦 ID3D11Device::CreateTexture2D (槽5) ----------
+// ---------- 探针升质 hook (v0.11.0): 拦 ID3D11Device::CreateTexture2D (槽5) ----------
 // 水体样本第一步 (docs/00 §1.1 / docs/03 §6.1): 501 = 6面512² RGBA16F 环境反射 cubemap
-// 探针, "只动创建参数" —— 命中描述符时把宽高翻倍 (512²→1024²), 其余字段原样透传。
-// 游戏自己的 pass 照常渲染 (viewport/RTV 从我们返回的对象 GetDesc 拿, 自动适配)。
+// 探针, 命中描述符时把宽高翻倍 (512²→1024²)。
+// v0.11 (docs/02 §14 判读定案) 两处修正, 缺一不可:
+//   ① 配对 depth 同步升质 —— v0.10.0 只翻 cube → OM = RT1024²+DSV512² 尺寸不匹配 →
+//      绑定判非法作废 (回放 8 条 High 诊断, 真机 draw 同样未落地, 反射平铺清屏色)。
+//   ② 升质宽高回写游戏自己那份 desc —— 旧注释「viewport/RTV 从 GetDesc 自动适配」
+//      实测不成立 (v0.10.0 局 probe 段 RSSetViewports 恒 512² 字面量 = 游戏用创建时
+//      缓存值)。RTV/DSV/SRV 的 desc 结构不带宽高 (随纹理对象派生), 只有游戏侧 viewport/
+//      scissors 这类缓存值依赖 desc 宽高 → 回写精准命中要修的东西。
 // 挂法与交换链同款: vtable 槽改写, 原值必须落在 d3d11.dll / renderdoc.dll 才挂 (防错槽位)。
 //   probe=0 (ini) → 完全不挂槽; vulkan=0 → 同样不挂 (S4c 基线口径, 由 pocbEnabled 把关)。
 static bool pocbEnabled();
@@ -498,6 +522,9 @@ static DevEntry g_dev[4];
 static int      g_devN = 0;
 static std::atomic<bool> g_probeOn{false};
 static std::atomic<long> g_probeLogN{0};
+static std::atomic<bool> g_probeDepthArmed{false}; // v0.11: cube 命中后开窗, 等配对 depth
+static std::atomic<long> g_probeDepthN{0};
+static std::atomic<unsigned long long> g_probeArmTick{0}; // v0.11: 开窗时刻, 10s 过窗即收
 
 void* lookupDevTex2D(void** vtbl)
 {
@@ -528,6 +555,43 @@ static bool probeDesc(const D3D11_TEXTURE2D_DESC* d)
 	           (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
 }
 
+// v0.11 ①: 探针配对 depth (docs/02 §14.4) —— rdc_tex_desc 实测: 512² D24S8_TYPELESS
+// 纯 2D (arraySize=1, mips=1, DSV bind), 全帧唯一 512² D24; cube(544) 早于 depth(552)
+// 创建 → cube 命中后开窗 (g_probeDepthArmed) 等它, 收窗后其余 512² depth 一概不碰
+// (别的 pass 若 RT 还是 512² 而 depth 被升 = 复刻同一个 bug, 绝不能无条件升)。
+static bool probeDepthDesc(const D3D11_TEXTURE2D_DESC* d)
+{
+	return d->Width == 512 && d->Height == 512 && d->MipLevels == 1 && d->ArraySize == 1 &&
+	       (d->Format == DXGI_FORMAT_D24_UNORM_S8_TYPELESS ||
+	        d->Format == DXGI_FORMAT_D24_UNORM_S8_UINT) &&
+	       d->SampleDesc.Count == 1 && d->Usage == D3D11_USAGE_DEFAULT &&
+	       (d->BindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
+}
+
+// v0.11 ②: 把升质宽高回写游戏自己那份 desc (docs/02 §14.5)。const 是 API 约定, 游戏栈上
+// 的变量可写; 但写前 VirtualQuery 查页保护 —— 万一 desc 落在 .rdata 只读常量页, 直接写会
+// AV 崩游戏, 所以只读页放弃 + 告警 (降级为 v0.10.0 行为, 由后续抓帧 viewport 判读察觉)。
+static bool pokeDescSize(const D3D11_TEXTURE2D_DESC* desc, UINT w, UINT h)
+{
+	if (!desc)
+		return false;
+	MEMORY_BASIC_INFORMATION mbi;
+	if (VirtualQuery(desc, &mbi, sizeof(mbi)) == 0)
+		return false;
+	const DWORD p = mbi.Protect & 0xff;
+	if (!(p == PAGE_READWRITE || p == PAGE_WRITECOPY || p == PAGE_EXECUTE_READWRITE ||
+	      p == PAGE_EXECUTE_WRITECOPY))
+	{
+		logLine("探针升质: 游戏描述符页只读 (Protect=" + std::to_string(mbi.Protect) +
+		        ") — 放弃回写, viewport 可能仍 512² (docs/02 §14.5 plan-B)");
+		return false;
+	}
+	D3D11_TEXTURE2D_DESC* g = const_cast<D3D11_TEXTURE2D_DESC*>(desc);
+	g->Width = w;
+	g->Height = h;
+	return true;
+}
+
 HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC* desc,
                                                 const D3D11_SUBRESOURCE_DATA* init,
                                                 ID3D11Texture2D** out)
@@ -538,18 +602,66 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* dev, const D3D11_T
 	    lookupDevTex2D(dev ? *reinterpret_cast<void***>(dev) : nullptr));
 	if (!real) // 理论不可达: 只有被我们改过的槽才会进本函数
 		return E_INVALIDARG;
-	// 带初始数据的不换 (探针是 RT 不该有, 有的话宁可不升)
-	if (g_probeOn.load(std::memory_order_relaxed) && desc && !init && probeDesc(desc))
+	if (g_probeOn.load(std::memory_order_relaxed) && desc)
 	{
-		D3D11_TEXTURE2D_DESC d = *desc;
-		d.Width *= 2;
-		d.Height *= 2;
-		const HRESULT hr = real(dev, &d, init, out);
-		const long n = g_probeLogN.fetch_add(1, std::memory_order_relaxed) + 1;
-		if (n <= 16 || (n % 64) == 0)
-			logLine("探针升质: 512² RGBA16F cube(6面) → " + std::to_string(d.Width) + "² 第 " +
-			        std::to_string(n) + " 次, hr=" + std::to_string(hr));
-		return hr;
+		// ---- 探针 cube 升质 (v0.10.0; v0.11 补回写 + 开窗) ----
+		if (probeDesc(desc))
+		{
+			if (init) // 带初始数据的不换 (探针是 RT 不该有, 有的话宁可不升)
+			{
+				logLine("探针升质: cube 描述符命中但带初始数据 — 不升 (保持 512²)");
+				return real(dev, desc, init, out);
+			}
+			D3D11_TEXTURE2D_DESC d = *desc;
+			d.Width *= 2;
+			d.Height *= 2;
+			const HRESULT hr = real(dev, &d, init, out);
+			const long n = g_probeLogN.fetch_add(1, std::memory_order_relaxed) + 1;
+			bool poked = false;
+			if (SUCCEEDED(hr))
+			{
+				// v0.11 ②: 游戏缓存的 desc 宽高跟着变 (viewport/scissors 等派生值)
+				poked = pokeDescSize(desc, d.Width, d.Height);
+				// v0.11 ①: 开窗等配对 depth (cube 544 先于 depth 552 创建, 同一突发)
+				g_probeArmTick.store(GetTickCount64(), std::memory_order_relaxed);
+				g_probeDepthArmed.store(true, std::memory_order_release);
+			}
+			if (n <= 16 || (n % 64) == 0)
+				logLine("探针升质: 512² RGBA16F cube(6面) → " + std::to_string(d.Width) + "² 第 " +
+				        std::to_string(n) + " 次, hr=" + std::to_string(hr) +
+				        ", 回写desc=" + (poked ? "ok" : "no"));
+			return hr;
+		}
+		// ---- 配对 depth 升质 (v0.11 ①): 仅 cube 命中后 10s 窗内、一次性 ----
+		if (g_probeDepthArmed.load(std::memory_order_acquire) && probeDepthDesc(desc))
+		{
+			// 窗口依据: cube→depth 同一初始化突发 (ResourceId 544<552, 毫秒级)。过窗即收,
+			// 会话后期出现的别的 512² D24 一概不碰 —— 误升会复刻 RT/depth 尺寸不匹配。
+			if (GetTickCount64() - g_probeArmTick.load(std::memory_order_relaxed) > 10000)
+			{
+				g_probeDepthArmed.store(false, std::memory_order_release);
+				logLine("探针配对depth: 开窗 10s 已过仍未见 depth — 收窗 (配对失败? 需查)");
+				return real(dev, desc, init, out);
+			}
+			g_probeDepthArmed.store(false, std::memory_order_release); // 一次性收窗
+			if (init)
+			{
+				logLine("探针配对depth: 描述符命中但带初始数据 — 不升 (升了会越界读), 配对失败告警");
+				return real(dev, desc, init, out);
+			}
+			D3D11_TEXTURE2D_DESC d = *desc;
+			d.Width *= 2;
+			d.Height *= 2;
+			const HRESULT hr = real(dev, &d, init, out);
+			const long n = g_probeDepthN.fetch_add(1, std::memory_order_relaxed) + 1;
+			bool poked = false;
+			if (SUCCEEDED(hr))
+				poked = pokeDescSize(desc, d.Width, d.Height);
+			logLine("探针配对depth: 512² D24 → " + std::to_string(d.Width) + "² 第 " +
+			        std::to_string(n) + " 次, hr=" + std::to_string(hr) +
+			        ", 回写desc=" + (poked ? "ok" : "no"));
+			return hr;
+		}
 	}
 	return real(dev, desc, init, out);
 }
@@ -599,7 +711,7 @@ static void installProbeOn(ID3D11Device* dev)
 	g_dev[g_devN].orig5 = o5;
 	++g_devN;
 	patchSlotLocked(&vtbl[5], reinterpret_cast<void*>(&hookedCreateTexture2D));
-	logLine("探针升质: 槽5 已挂 (512² cube→1024², 逃生门 probe=0 / vulkan=0)");
+	logLine("探针升质: 槽5 已挂 (512² cube+配对depth→1024² + 回写desc, 逃生门 probe=0 / vulkan=0)");
 	LeaveCriticalSection(&g_cs);
 }
 
@@ -3133,7 +3245,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.10.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024²) ====");
+	logLine("==== poc-presenter v0.11.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
