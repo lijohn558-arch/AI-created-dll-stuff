@@ -1,5 +1,5 @@
 /*
- * poc-presenter — PoC-A v1.7 (插件版本 0.8.0): SKSE 插件载体的 Present Hook 验证
+ * poc-presenter — PoC-A v1.7 (Present 拦截) + PoC-B v0.1 (Vulkan 注入), 插件版本 0.9.0
  *
  * 目的 (docs/00 首周行动项 #4 / 最高风险项 #1 的第一环):
  *   证明能在真实游戏进程内拦截 IDXGISwapChain::Present —— 这是 PoC-B (在 Present 里
@@ -142,6 +142,25 @@
  *   [..] Present 计数 600  近600帧 xx.x FPS          (周期行)
  *   且游戏画面完全正常 (本 PoC 不改变呈现)。
  *
+ * ---- PoC-B v0.1 (插件 0.9.0, 2026-10-03): 在 Present 里跑 Vulkan 并注入像素 ----
+ *   PoC-A 双环境验收已通过 (带 renderdoc / 无 renderdoc, 判读见 docs/01 §7.6 §7.7);
+ *   PoC-B 接着回答风险项 #1 的"写"这半 —— 拦到 Present 之后, 能不能把 Vulkan 渲出的
+ *   像素送进游戏最终呈现的那一帧。这是 docs/00 收尾决策 #6 (全原生 vs 混合) 的判据。
+ *   路径: Vulkan 离屏 512×512 (洋红清屏 + 三角形) → vkCmdCopyImageToBuffer 读回 →
+ *     UpdateSubresource → CopySubresourceRegion 拷进 backbuffer 的 (16,16) → 调原 Present。
+ *     刻意不开 Vulkan swapchain: 两个 swapchain 抢同一个 HWND 会与游戏 / RenderDoc / GFE
+ *     争呈现所有权且结果不可判; 而像素落在 D3D11 帧内 ⇒ F12 抓帧必然记录这次拷贝。
+ *   关键日志:
+ *     PoC-B init: backbuffer = 1920x1080 format=28 (期望28=R8G8B8A8_UNORM)
+ *     PoC-B init: GPU = "..." LUID匹配=是|否 apiVer=1.x
+ *     PoC-B init 完成: 离屏 512x512 (洋红清屏+三角形) → 读回 → CopySubresourceRegion 到 (16,16)
+ *     PoC-B 第 1 帧注入: 渲染+读回+拷贝 x.xx ms → ... 已提交
+ *     PoC-B 注入 600 帧, 累计均值 x.xx ms/帧 (本帧 x.xx ms)
+ *   失败即关: 任一步失败打 "PoC-B 失败: <步骤> code=... — 已关闭注入, 游戏照常呈现";
+ *   逃生门: <pluginDir>\poc-presenter.ini 写 vulkan=0 → 不重编译即可关掉注入。
+ *   验收: 游戏画面左上角出现 512×512 洋红块 + 三角形, 且 F12 抓的帧里能查到该像素
+ *     (提取链: tools\rdc_pass7_pixels.py 读 backbuffer 探针点)。
+ *
  * 构建: GitHub Actions (build.yml job "poc-presenter"), 本地不编译
  * 安装: poc-presenter.dll 放入 <游戏>/Data/SKSE/Plugins/
  */
@@ -164,6 +183,12 @@
 
 // 与 capture-helper 共用同一份最小 ABI 声明 (单源, 避免漂移)
 #include "..\capture-helper\skse_abi.h"
+
+// PoC-B: Vulkan 注入用 (本机/CI 都没有 Vulkan SDK → 不链 vulkan-1.lib, 只要头文件 +
+// 运行时 GetProcAddress 自己装; 头由 build.yml 额外 checkout KhronosGroup/Vulkan-Headers 提供)
+#include <vulkan/vulkan.h>
+// SPIR-V 字节 (由 tools\make_shaders.ps1 从 shaders\pocb.vert/.frag 生成, 随源码入库)
+#include "pocb_shaders.h"
 
 namespace {
 
@@ -294,6 +319,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForComposition(IDXGIFactory2* sel
 void patchSlotLocked(void** slot, void* target);
 void registerSwp(void* obj, bool plus, const char* tag);
 void registerFac(void* obj, bool plus2, const char* tag);
+void pocbFrame(IDXGISwapChain* sc); // PoC-B: 在 Present 里跑 Vulkan 并注入像素 (v0.9.0)
 
 // ---------- 登记表 (按调用方 vtable 查原函数) ----------
 
@@ -888,11 +914,814 @@ static HRESULT STDMETHODCALLTYPE detouredPresent1(IDXGISwapChain1* sc, UINT sync
 	return reinterpret_cast<Fn>(g_detP1.resume)(sc, sync, flags, params);
 }
 
+// ---------- PoC-B (v0.9.0): 在 Present 里跑 Vulkan, 并把像素写进呈现帧 ----------
+
+// 目的 (docs/00 首周行动项 #4 第二环 / 风险项 #1 的"写"这半):
+//   PoC-A 只证明"能拦 Present"(读); PoC-B 证明"能在拦到的 Present 里跑 Vulkan, 并把
+//   Vulkan 渲出的像素写进游戏最终呈现的那一帧"(写) —— DX11→Vulkan 混合方案的前提。
+//
+// 路径 (刻意不开 Vulkan surface/swapchain, 不抢游戏窗口所有权):
+//   Vulkan 离屏渲 512×512 (洋红清屏 + 三角形)
+//     → vkCmdCopyImageToBuffer 读回 (持久映射 host 内存)
+//     → UpdateSubresource 灌进我方 512×512 D3D11 纹理
+//     → CopySubresourceRegion 拷进交换链 backbuffer 的 (16,16)
+//     → 调原 Present
+//   为什么不直接开 Vulkan swapchain:
+//     1) 两个 swapchain 抢同一个 HWND, 会与游戏 / RenderDoc / GFE 争呈现所有权, 结果不可判;
+//     2) 像素落在 D3D11 帧内 ⇒ F12 抓帧必然记录这次拷贝, rdc 提取链查得到 ——
+//        "抓帧可查"本身就是 PoC-B 的验收项之一 (配对 harness 只认 D3D11 帧)。
+//
+// 失败策略: 任一步失败 ⇒ logLine + state=3 ⇒ 完全不注入, 游戏画面不受影响;
+//           失败前已创建的对象不再回收 (进程内弃用, PoC 口径)。
+// 逃生门:   <pluginDir>\poc-presenter.ini 写 vulkan=0 → 不重编译即可关掉注入。
+// 规模:     每帧 1×512×512×4B = 1MB 读回 + 1MB 上传 + 一次 fence 等待 (耗时见日志)。
+
+#define POCB_W 512
+#define POCB_H 512
+#define POCB_X 16
+#define POCB_Y 16
+#define POCB_BPP 4
+
+// Vulkan 函数表分三层加载: 全局 (vkCreateInstance) → 实例 → 设备。
+// 本机与 CI 都没有 Vulkan SDK ⇒ 不链 vulkan-1.lib, 全部 GetProcAddress 自装。
+#define POCB_INST_FNS(X) \
+	X(vkDestroyInstance) X(vkEnumeratePhysicalDevices) X(vkCreateDevice) \
+	X(vkGetDeviceProcAddr) X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceProperties2) \
+	X(vkGetPhysicalDeviceQueueFamilyProperties) X(vkGetPhysicalDeviceMemoryProperties)
+
+#define POCB_DEV_FNS(X) \
+	X(vkDestroyDevice) X(vkGetDeviceQueue) X(vkDeviceWaitIdle) \
+	X(vkCreateImage) X(vkDestroyImage) X(vkGetImageMemoryRequirements) \
+	X(vkCreateImageView) X(vkDestroyImageView) \
+	X(vkCreateBuffer) X(vkDestroyBuffer) X(vkGetBufferMemoryRequirements) \
+	X(vkAllocateMemory) X(vkFreeMemory) X(vkBindImageMemory) X(vkBindBufferMemory) \
+	X(vkMapMemory) X(vkUnmapMemory) X(vkCreateRenderPass) X(vkDestroyRenderPass) \
+	X(vkCreateFramebuffer) X(vkDestroyFramebuffer) X(vkCreateShaderModule) X(vkDestroyShaderModule) \
+	X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) X(vkCreateGraphicsPipelines) X(vkDestroyPipeline) \
+	X(vkCreateCommandPool) X(vkDestroyCommandPool) X(vkAllocateCommandBuffers) X(vkResetCommandPool) \
+	X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) \
+	X(vkCmdBindPipeline) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw) X(vkCmdCopyImageToBuffer) \
+	X(vkCreateFence) X(vkDestroyFence) X(vkResetFences) X(vkWaitForFences) X(vkQueueSubmit)
+
+#define POCB_DECL_FN(n) PFN_##n n = nullptr;
+
+struct PocbFns
+{
+	PFN_vkGetInstanceProcAddr GetInstanceProcAddr = nullptr;
+	PFN_vkCreateInstance      CreateInstance = nullptr; // 全局级, 只此一个
+	POCB_INST_FNS(POCB_DECL_FN)
+	POCB_DEV_FNS(POCB_DECL_FN)
+};
+
+struct PocbCtx
+{
+	std::atomic<int> state{0}; // 0=未开始 1=初始化中 2=可用 3=失败已禁用
+	// D3D11 侧
+	ID3D11Device*        dev = nullptr;
+	ID3D11DeviceContext* ctx = nullptr;
+	ID3D11Texture2D*     tex = nullptr; // 我方 512×512 DEFAULT 纹理 (接收读回像素)
+	DXGI_FORMAT          fmt = DXGI_FORMAT_UNKNOWN;
+	// Vulkan 侧
+	PocbFns          fns;
+	VkInstance       inst = VK_NULL_HANDLE;
+	VkPhysicalDevice phys = VK_NULL_HANDLE;
+	VkDevice         vdev = VK_NULL_HANDLE;
+	VkQueue          queue = VK_NULL_HANDLE;
+	uint32_t         qfi = 0;
+	VkImage          img = VK_NULL_HANDLE;
+	VkDeviceMemory   imgMem = VK_NULL_HANDLE;
+	VkImageView      view = VK_NULL_HANDLE;
+	VkRenderPass     rp = VK_NULL_HANDLE;
+	VkFramebuffer    fb = VK_NULL_HANDLE;
+	VkShaderModule   vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
+	VkPipelineLayout pl = VK_NULL_HANDLE;
+	VkPipeline       pipe = VK_NULL_HANDLE;
+	VkCommandPool    pool = VK_NULL_HANDLE;
+	VkCommandBuffer  cmd = VK_NULL_HANDLE;
+	VkBuffer         rbuf = VK_NULL_HANDLE;
+	VkDeviceMemory   rbufMem = VK_NULL_HANDLE;
+	void*            mapped = nullptr;
+	VkFence          fence = VK_NULL_HANDLE;
+	// 统计
+	uint64_t frames = 0;
+	double   accMs = 0.0;
+};
+static PocbCtx g_pocb;
+
+static std::string pocbCode(long v)
+{
+	char b[40];
+	std::snprintf(b, sizeof(b), "%ld (0x%08lX)", v, static_cast<unsigned long>(v));
+	return b;
+}
+
+// 失败统一出口: 记日志 + 关注入 (游戏画面从此不受本模块影响)
+static void pocbFail(const char* what, long code)
+{
+	g_pocb.state.store(3);
+	logLine(std::string("PoC-B 失败: ") + what + " code=" + pocbCode(code) + " — 已关闭注入, 游戏照常呈现");
+}
+
+static void pocbFail(const char* what)
+{
+	pocbFail(what, 0);
+}
+
+// 逃生门: <pluginDir>\poc-presenter.ini 里 vulkan=0 / pocb=0 关掉注入 (不重编译)
+static bool pocbEnabled()
+{
+	static int cached = -1;
+	if (cached >= 0)
+		return cached == 1;
+	cached = 1;
+	std::ifstream f(pluginDir() + "\\poc-presenter.ini");
+	std::string line;
+	while (std::getline(f, line))
+	{
+		const size_t eq = line.find('=');
+		if (eq == std::string::npos)
+			continue;
+		std::string key = lowerCopy(line.substr(0, eq));
+		while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back())))
+			key.pop_back(); // 允许 "vulkan = 0" 这种带空格写法
+		if (key != "vulkan" && key != "pocb")
+			continue;
+		for (const char ch : line.substr(eq + 1))
+		{
+			if (std::isspace(static_cast<unsigned char>(ch)))
+				continue;
+			cached = (ch == '0' || ch == 'f' || ch == 'F' || ch == 'n' || ch == 'N') ? 0 : 1;
+			break;
+		}
+	}
+	if (!cached)
+		logLine("PoC-B: poc-presenter.ini 关闭了 vulkan 注入 (vulkan=0)");
+	return cached == 1;
+}
+
+// 找满足属性的内存类型; want=0 表示只要类型位允许
+static int pocbMemType(const VkPhysicalDeviceMemoryProperties& mp, uint32_t bits, VkMemoryPropertyFlags want)
+{
+	for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+	{
+		if ((bits & (1u << i)) != 0 && (mp.memoryTypes[i].propertyFlags & want) == want)
+			return static_cast<int>(i);
+	}
+	return -1;
+}
+
+static bool pocbAllocMem(const VkPhysicalDeviceMemoryProperties& mp, uint32_t bits, VkDeviceSize size,
+                         VkMemoryPropertyFlags want, VkDeviceMemory* out, const char* what)
+{
+	int t = pocbMemType(mp, bits, want);
+	if (t < 0)
+		t = pocbMemType(mp, bits, 0); // 退而求其次: 任一可用类型
+	if (t < 0)
+	{
+		pocbFail(what);
+		return false;
+	}
+	VkMemoryAllocateInfo ai{};
+	ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	ai.allocationSize = size;
+	ai.memoryTypeIndex = static_cast<uint32_t>(t);
+	const VkResult vr = g_pocb.fns.vkAllocateMemory(g_pocb.vdev, &ai, nullptr, out);
+	if (vr != VK_SUCCESS)
+	{
+		pocbFail(what, vr);
+		return false;
+	}
+	return true;
+}
+
+// 一次性初始化: D3D11 口径 + Vulkan 全套离屏管线 (在首次 Present 时同步完成)
+static bool pocbInit(IDXGISwapChain* sc)
+{
+	PocbCtx& c = g_pocb;
+	PocbFns& fns = c.fns;
+	logLine("PoC-B init: 开始 (首次 Present 触发, 一次性)");
+
+	// --- D3D11 侧口径 ---
+	HRESULT hr = sc->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&c.dev));
+	if (FAILED(hr) || !c.dev)
+	{
+		pocbFail("交换链 GetDevice(ID3D11Device)", hr);
+		return false;
+	}
+	c.dev->GetImmediateContext(&c.ctx);
+	if (!c.ctx)
+	{
+		pocbFail("ID3D11Device::GetImmediateContext");
+		return false;
+	}
+	ID3D11Texture2D* bb = nullptr;
+	hr = sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb));
+	if (FAILED(hr) || !bb)
+	{
+		pocbFail("IDXGISwapChain::GetBuffer(0)", hr);
+		return false;
+	}
+	D3D11_TEXTURE2D_DESC bd{};
+	bb->GetDesc(&bd);
+	bb->Release();
+	logLine("PoC-B init: backbuffer = " + std::to_string(bd.Width) + "x" + std::to_string(bd.Height) +
+	        " format=" + std::to_string(static_cast<int>(bd.Format)) + " (期望28=R8G8B8A8_UNORM)");
+	if (bd.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
+	{
+		pocbFail("backbuffer 不是 R8G8B8A8_UNORM — 字节布局假设不成立", static_cast<long>(bd.Format));
+		return false;
+	}
+	if (bd.SampleDesc.Count != 1)
+	{
+		// CopySubresourceRegion 不支持 跨 采样数 拷贝 (MSAA backbuffer 走不通这条路)
+		pocbFail("backbuffer 是多重采样 (CopySubresourceRegion 跨采样数无效)", static_cast<long>(bd.SampleDesc.Count));
+		return false;
+	}
+	if (bd.Width < POCB_X + POCB_W || bd.Height < POCB_Y + POCB_H)
+	{
+		pocbFail("backbuffer 比注入矩形还小");
+		return false;
+	}
+	c.fmt = bd.Format;
+	D3D11_TEXTURE2D_DESC td{};
+	td.Width = POCB_W;
+	td.Height = POCB_H;
+	td.MipLevels = 1;
+	td.ArraySize = 1;
+	td.Format = bd.Format;
+	td.SampleDesc.Count = 1;
+	td.Usage = D3D11_USAGE_DEFAULT;
+	hr = c.dev->CreateTexture2D(&td, nullptr, &c.tex);
+	if (FAILED(hr) || !c.tex)
+	{
+		pocbFail("ID3D11Device::CreateTexture2D (注入用 512×512)", hr);
+		return false;
+	}
+
+	// --- Vulkan loader ---
+	HMODULE hvk = LoadLibraryW(L"vulkan-1.dll");
+	if (!hvk)
+	{
+		pocbFail("LoadLibrary vulkan-1.dll (驱动未装 Vulkan loader?)", static_cast<long>(GetLastError()));
+		return false;
+	}
+	fns.GetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(hvk, "vkGetInstanceProcAddr"));
+	fns.CreateInstance = fns.GetInstanceProcAddr
+	    ? reinterpret_cast<PFN_vkCreateInstance>(fns.GetInstanceProcAddr(nullptr, "vkCreateInstance"))
+	    : nullptr;
+	if (!fns.CreateInstance)
+	{
+		pocbFail("取 vkCreateInstance 失败");
+		return false;
+	}
+
+	VkApplicationInfo ai{};
+	ai.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+	ai.pApplicationName = "poc-presenter PoC-B";
+	ai.applicationVersion = 1;
+	ai.pEngineName = "poc-presenter";
+	ai.engineVersion = 1;
+	ai.apiVersion = VK_API_VERSION_1_1;
+	VkInstanceCreateInfo ici{};
+	ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+	ici.pApplicationInfo = &ai;
+	VkResult vr = fns.CreateInstance(&ici, nullptr, &c.inst);
+	if (vr == VK_ERROR_INCOMPATIBLE_DRIVER)
+	{
+		ai.apiVersion = VK_API_VERSION_1_0;
+		vr = fns.CreateInstance(&ici, nullptr, &c.inst);
+		logLine("PoC-B init: 1.1 被拒(INCOMPATIBLE_DRIVER) → 回退 1.0, 放弃 LUID 匹配");
+	}
+	if (vr != VK_SUCCESS || !c.inst)
+	{
+		pocbFail("vkCreateInstance", vr);
+		return false;
+	}
+#define POCB_LOAD_I(n) fns.n = reinterpret_cast<PFN_##n>(fns.GetInstanceProcAddr(c.inst, #n));
+	POCB_INST_FNS(POCB_LOAD_I)
+#undef POCB_LOAD_I
+	if (!fns.vkEnumeratePhysicalDevices || !fns.vkCreateDevice || !fns.vkGetDeviceQueue)
+	{
+		pocbFail("实例级函数表不完整 (vkGetInstanceProcAddr 返回空)");
+		return false;
+	}
+
+	// --- 物理设备: 优先选与 D3D11 适配器同 LUID 的那块 (多 GPU 时才不是同一块) ---
+	uint32_t ndev = 0;
+	fns.vkEnumeratePhysicalDevices(c.inst, &ndev, nullptr);
+	if (ndev == 0)
+	{
+		pocbFail("vkEnumeratePhysicalDevices 无设备");
+		return false;
+	}
+	if (ndev > 8)
+		ndev = 8;
+	VkPhysicalDevice devs[8]{};
+	fns.vkEnumeratePhysicalDevices(c.inst, &ndev, devs, nullptr);
+
+	LUID adapterLuid{};
+	bool haveLuid = false;
+	IDXGIDevice* gdev = nullptr;
+	if (SUCCEEDED(c.dev->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&gdev))) && gdev)
+	{
+		IDXGIAdapter* ad = nullptr;
+		if (SUCCEEDED(gdev->GetAdapter(&ad)) && ad)
+		{
+			DXGI_ADAPTER_DESC1 d{};
+			if (SUCCEEDED(ad->GetDesc1(&d)))
+			{
+				adapterLuid = d.AdapterLuid;
+				haveLuid = true;
+			}
+			ad->Release();
+		}
+		gdev->Release();
+	}
+	VkPhysicalDevice chosen = devs[0];
+	bool luidHit = false;
+	if (haveLuid && fns.vkGetPhysicalDeviceProperties2)
+	{
+		for (uint32_t i = 0; i < ndev; ++i)
+		{
+			VkPhysicalDeviceProperties2 p2{};
+			p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+			VkPhysicalDeviceIDProperties idp{};
+			idp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+			p2.pNext = &idp;
+			fns.vkGetPhysicalDeviceProperties2(devs[i], &p2);
+			if (idp.deviceLUIDValid && std::memcmp(&adapterLuid, idp.deviceLUID, sizeof(LUID)) == 0)
+			{
+				chosen = devs[i];
+				luidHit = true;
+				break;
+			}
+		}
+	}
+	c.phys = chosen;
+	VkPhysicalDeviceProperties props{};
+	fns.vkGetPhysicalDeviceProperties(chosen, &props);
+	logLine(std::string("PoC-B init: GPU = \"") + props.deviceName + "\" LUID匹配=" +
+	        (luidHit ? "是" : "否") + " apiVer=" +
+	        std::to_string(VK_API_VERSION_MAJOR(props.apiVersion)) + "." +
+	        std::to_string(VK_API_VERSION_MINOR(props.apiVersion)));
+
+	// --- 队列族 + 设备 ---
+	uint32_t nq = 0;
+	fns.vkGetPhysicalDeviceQueueFamilyProperties(chosen, &nq, nullptr);
+	if (nq > 64)
+		nq = 64;
+	VkQueueFamilyProperties qprops[64]{};
+	fns.vkGetPhysicalDeviceQueueFamilyProperties(chosen, &nq, qprops);
+	uint32_t qf = UINT32_MAX;
+	for (uint32_t i = 0; i < nq; ++i)
+	{
+		if ((qprops[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0)
+		{
+			qf = i;
+			break;
+		}
+	}
+	if (qf == UINT32_MAX)
+	{
+		pocbFail("物理设备没有图形队列族");
+		return false;
+	}
+	float prio = 1.0f;
+	VkDeviceQueueCreateInfo qci{};
+	qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+	qci.queueFamilyIndex = qf;
+	qci.queueCount = 1;
+	qci.pQueuePriorities = &prio;
+	VkDeviceCreateInfo dci{};
+	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+	dci.queueCreateInfoCount = 1;
+	dci.pQueueCreateInfos = &qci;
+	vr = fns.vkCreateDevice(chosen, &dci, nullptr, &c.vdev);
+	if (vr != VK_SUCCESS || !c.vdev)
+	{
+		pocbFail("vkCreateDevice", vr);
+		return false;
+	}
+#define POCB_LOAD_D(n) fns.n = reinterpret_cast<PFN_##n>(fns.vkGetDeviceProcAddr(c.vdev, #n));
+	POCB_DEV_FNS(POCB_LOAD_D)
+#undef POCB_LOAD_D
+	if (!fns.vkCreateImage || !fns.vkQueueSubmit || !fns.vkCmdDraw || !fns.vkGetDeviceQueue)
+	{
+		pocbFail("设备级函数表不完整 (vkGetDeviceProcAddr 返回空)");
+		return false;
+	}
+	c.qfi = qf;
+	fns.vkGetDeviceQueue(c.vdev, qf, 0, &c.queue); // 必须在上面 load 之后 (v0.9.0 踩过: 先调后 load = 空指针)
+
+	VkPhysicalDeviceMemoryProperties mem{};
+	fns.vkGetPhysicalDeviceMemoryProperties(chosen, &mem);
+
+	// --- 离屏图 (COLOR_ATTACHMENT | TRANSFER_SRC, 一次 renderpass 清屏+画三角形后读回) ---
+	VkImageCreateInfo imci{};
+	imci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	imci.imageType = VK_IMAGE_TYPE_2D;
+	imci.format = VK_FORMAT_R8G8B8A8_UNORM;
+	imci.extent = VkExtent3D{POCB_W, POCB_H, 1};
+	imci.mipLevels = 1;
+	imci.arrayLayers = 1;
+	imci.samples = VK_SAMPLE_COUNT_1_BIT;
+	imci.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imci.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	imci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	imci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	vr = fns.vkCreateImage(c.vdev, &imci, nullptr, &c.img);
+	if (vr != VK_SUCCESS)
+	{
+		pocbFail("vkCreateImage", vr);
+		return false;
+	}
+	VkMemoryRequirements ireq{};
+	fns.vkGetImageMemoryRequirements(c.vdev, c.img, &ireq);
+	if (!pocbAllocMem(mem, ireq.memoryTypeBits, ireq.size, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+	                  &c.imgMem, "离屏图 vkAllocateMemory"))
+		return false;
+	if (fns.vkBindImageMemory(c.vdev, c.img, c.imgMem, 0) != VK_SUCCESS)
+	{
+		pocbFail("vkBindImageMemory (离屏图)");
+		return false;
+	}
+	VkImageViewCreateInfo vci{};
+	vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vci.image = c.img;
+	vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vci.format = VK_FORMAT_R8G8B8A8_UNORM;
+	vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+	vr = fns.vkCreateImageView(c.vdev, &vci, nullptr, &c.view);
+	if (vr != VK_SUCCESS)
+	{
+		pocbFail("vkCreateImageView", vr);
+		return false;
+	}
+
+	// --- renderpass: UNDEFINED 清屏 → 转到 TRANSFER_SRC_OPTIMAL 供读回 ---
+	VkAttachmentDescription att{};
+	att.format = VK_FORMAT_R8G8B8A8_UNORM;
+	att.samples = VK_SAMPLE_COUNT_1_BIT;
+	att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	att.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	VkAttachmentReference cref{};
+	cref.attachment = 0;
+	cref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	VkSubpassDescription sub{};
+	sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	sub.colorAttachmentCount = 1;
+	sub.pColorAttachments = &cref;
+	VkSubpassDependency deps[2]{};
+	deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+	deps[0].dstSubpass = 0;
+	deps[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	deps[0].srcAccessMask = 0;
+	deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	deps[1].srcSubpass = 0;
+	deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+	deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	deps[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+	deps[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	VkRenderPassCreateInfo rpci{};
+	rpci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+	rpci.attachmentCount = 1;
+	rpci.pAttachments = &att;
+	rpci.subpassCount = 1;
+	rpci.pSubpasses = &sub;
+	rpci.dependencyCount = 2;
+	rpci.pDependencies = deps;
+	vr = fns.vkCreateRenderPass(c.vdev, &rpci, nullptr, &c.rp);
+	if (vr != VK_SUCCESS)
+	{
+		pocbFail("vkCreateRenderPass", vr);
+		return false;
+	}
+	VkFramebufferCreateInfo fci{};
+	fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+	fci.renderPass = c.rp;
+	fci.attachmentCount = 1;
+	fci.pAttachments = &c.view;
+	fci.width = POCB_W;
+	fci.height = POCB_H;
+	fci.layers = 1;
+	vr = fns.vkCreateFramebuffer(c.vdev, &fci, nullptr, &c.fb);
+	if (vr != VK_SUCCESS)
+	{
+		pocbFail("vkCreateFramebuffer", vr);
+		return false;
+	}
+
+	// --- 着色器 (SPIR-V 字节来自 pocb_shaders.h) ---
+	VkShaderModuleCreateInfo smv{};
+	smv.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	smv.codeSize = sizeof(kPocbVertSpv);
+	smv.pCode = kPocbVertSpv;
+	vr = fns.vkCreateShaderModule(c.vdev, &smv, nullptr, &c.vs);
+	if (vr != VK_SUCCESS)
+	{
+		pocbFail("vkCreateShaderModule (vertex)", vr);
+		return false;
+	}
+	VkShaderModuleCreateInfo smf{};
+	smf.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	smf.codeSize = sizeof(kPocbFragSpv);
+	smf.pCode = kPocbFragSpv;
+	vr = fns.vkCreateShaderModule(c.vdev, &smf, nullptr, &c.fs);
+	if (vr != VK_SUCCESS)
+	{
+		pocbFail("vkCreateShaderModule (fragment)", vr);
+		return false;
+	}
+	VkPipelineLayoutCreateInfo plci{};
+	plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	vr = fns.vkCreatePipelineLayout(c.vdev, &plci, nullptr, &c.pl);
+	if (vr != VK_SUCCESS)
+	{
+		pocbFail("vkCreatePipelineLayout", vr);
+		return false;
+	}
+
+	VkPipelineShaderStageCreateInfo stg[2]{};
+	stg[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stg[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+	stg[0].module = c.vs;
+	stg[0].pName = "main";
+	stg[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stg[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	stg[1].module = c.fs;
+	stg[1].pName = "main";
+	VkPipelineVertexInputStateCreateInfo vin{};
+	vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO; // 无顶点缓冲: gl_VertexIndex 取常量
+	VkPipelineInputAssemblyStateCreateInfo ias{};
+	ias.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	ias.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	VkPipelineViewportStateCreateInfo vps{};
+	vps.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	vps.viewportCount = 1;
+	vps.scissorCount = 1;
+	VkPipelineRasterizationStateCreateInfo rs{};
+	rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rs.polygonMode = VK_POLYGON_MODE_FILL;
+	rs.cullMode = VK_CULL_MODE_NONE;
+	rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+	rs.lineWidth = 1.0f;
+	VkPipelineMultisampleStateCreateInfo ms{};
+	ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+	VkPipelineColorBlendAttachmentState cba{};
+	cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+	                     VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+	VkPipelineColorBlendStateCreateInfo cbs{};
+	cbs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	cbs.attachmentCount = 1;
+	cbs.pAttachments = &cba;
+	VkDynamicState dyn[2]{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+	VkPipelineDynamicStateCreateInfo dss{};
+	dss.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dss.dynamicStateCount = 2;
+	dss.pDynamicStates = dyn;
+	VkGraphicsPipelineCreateInfo gpci{};
+	gpci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	gpci.stageCount = 2;
+	gpci.pStages = stg;
+	gpci.pVertexInputState = &vin;
+	gpci.pInputAssemblyState = &ias;
+	gpci.pViewportState = &vps;
+	gpci.pRasterizationState = &rs;
+	gpci.pMultisampleState = &ms;
+	gpci.pColorBlendState = &cbs;
+	gpci.pDynamicState = &dss;
+	gpci.layout = c.pl;
+	gpci.renderPass = c.rp;
+	gpci.subpass = 0;
+	vr = fns.vkCreateGraphicsPipelines(c.vdev, VK_NULL_HANDLE, 1, &gpci, nullptr, &c.pipe);
+	if (vr != VK_SUCCESS)
+	{
+		pocbFail("vkCreateGraphicsPipelines", vr);
+		return false;
+	}
+
+	// --- 读回 buffer (host 可见+一致, 一次 map 长期持有) ---
+	VkBufferCreateInfo bci{};
+	bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bci.size = static_cast<VkDeviceSize>(POCB_W) * POCB_H * POCB_BPP;
+	bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	vr = fns.vkCreateBuffer(c.vdev, &bci, nullptr, &c.rbuf);
+	if (vr != VK_SUCCESS)
+	{
+		pocbFail("vkCreateBuffer (读回)", vr);
+		return false;
+	}
+	VkMemoryRequirements breq{};
+	fns.vkGetBufferMemoryRequirements(c.vdev, c.rbuf, &breq);
+	if (!pocbAllocMem(mem, breq.memoryTypeBits, breq.size,
+	                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+	                  &c.rbufMem, "读回 buffer vkAllocateMemory"))
+		return false;
+	if (fns.vkBindBufferMemory(c.vdev, c.rbuf, c.rbufMem, 0) != VK_SUCCESS)
+	{
+		pocbFail("vkBindBufferMemory (读回)");
+		return false;
+	}
+	vr = fns.vkMapMemory(c.vdev, c.rbufMem, 0, VK_WHOLE_SIZE, 0, &c.mapped);
+	if (vr != VK_SUCCESS || !c.mapped)
+	{
+		pocbFail("vkMapMemory (读回)", vr);
+		return false;
+	}
+
+	// --- 命令: 录一次, 每帧重复提交 (renderpass initialLayout=UNDEFINED 允许逐帧丢弃重清) ---
+	VkCommandPoolCreateInfo cpci{};
+	cpci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+	cpci.queueFamilyIndex = qf;
+	vr = fns.vkCreateCommandPool(c.vdev, &cpci, nullptr, &c.pool);
+	if (vr != VK_SUCCESS)
+	{
+		pocbFail("vkCreateCommandPool", vr);
+		return false;
+	}
+	VkCommandBufferAllocateInfo cbai{};
+	cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	cbai.commandPool = c.pool;
+	cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	cbai.commandBufferCount = 1;
+	vr = fns.vkAllocateCommandBuffers(c.vdev, &cbai, &c.cmd);
+	if (vr != VK_SUCCESS)
+	{
+		pocbFail("vkAllocateCommandBuffers", vr);
+		return false;
+	}
+	VkCommandBufferBeginInfo cbBegin{};
+	cbBegin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	cbBegin.flags = 0; // 可重复提交 (ONE_TIME_SUBMIT 只能提一次)
+	if (fns.vkBeginCommandBuffer(c.cmd, &cbBegin) != VK_SUCCESS)
+	{
+		pocbFail("vkBeginCommandBuffer");
+		return false;
+	}
+	// 洋红清屏 —— 像素探针的哨兵色 (游戏里不可能出现的 255,0,255)
+	VkClearValue clr{};
+	clr.color.float32[0] = 1.0f;
+	clr.color.float32[1] = 0.0f;
+	clr.color.float32[2] = 1.0f;
+	clr.color.float32[3] = 1.0f;
+	VkRenderPassBeginInfo rpbi{};
+	rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	rpbi.renderPass = c.rp;
+	rpbi.framebuffer = c.fb;
+	rpbi.renderArea = VkRect2D{VkOffset2D{0, 0}, VkExtent2D{POCB_W, POCB_H}};
+	rpbi.clearValueCount = 1;
+	rpbi.pClearValues = &clr;
+	fns.vkCmdBeginRenderPass(c.cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+	fns.vkCmdBindPipeline(c.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, c.pipe);
+	VkViewport vp{};
+	vp.x = 0.0f;
+	vp.y = 0.0f;
+	vp.width = static_cast<float>(POCB_W);
+	vp.height = static_cast<float>(POCB_H);
+	vp.minDepth = 0.0f;
+	vp.maxDepth = 1.0f;
+	fns.vkCmdSetViewport(c.cmd, 0, 1, &vp);
+	VkRect2D sci{VkOffset2D{0, 0}, VkExtent2D{POCB_W, POCB_H}};
+	fns.vkCmdSetScissor(c.cmd, 0, 1, &sci);
+	fns.vkCmdDraw(c.cmd, 3, 1, 0, 0); // 无顶点缓冲的三角形
+	fns.vkCmdEndRenderPass(c.cmd);
+	VkBufferImageCopy bic{};
+	bic.bufferOffset = 0;
+	bic.bufferRowLength = 0;   // 0 = 紧凑排布 (512×4 字节/行)
+	bic.bufferImageHeight = 0;
+	bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+	bic.imageOffset = VkOffset3D{0, 0, 0};
+	bic.imageExtent = VkExtent3D{POCB_W, POCB_H, 1};
+	fns.vkCmdCopyImageToBuffer(c.cmd, c.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, c.rbuf, 1, &bic);
+	if (fns.vkEndCommandBuffer(c.cmd) != VK_SUCCESS)
+	{
+		pocbFail("vkEndCommandBuffer");
+		return false;
+	}
+	VkFenceCreateInfo fci2{};
+	fci2.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	fci2.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+	vr = fns.vkCreateFence(c.vdev, &fci2, nullptr, &c.fence);
+	if (vr != VK_SUCCESS)
+	{
+		pocbFail("vkCreateFence", vr);
+		return false;
+	}
+
+	char sum[320];
+	std::snprintf(sum, sizeof(sum),
+	    "PoC-B init 完成: 离屏 %dx%d (洋红清屏+三角形) → 读回 → CopySubresourceRegion 到 backbuffer (%d,%d)",
+	    POCB_W, POCB_H, POCB_X, POCB_Y);
+	logLine(sum);
+	return true;
+}
+
+// 每帧: 提交一次 Vulkan 命令 → fence 等待 → 读回像素 → 拷进 backbuffer
+static void pocbInject(PocbCtx& c, IDXGISwapChain* sc)
+{
+	const auto t0 = std::chrono::steady_clock::now();
+
+	// 每帧取一次 backbuffer (ResizeBuffers 后对象会换, 缓存会悬垂 → 每帧取最稳)
+	ID3D11Texture2D* bb = nullptr;
+	HRESULT hr = sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb));
+	if (FAILED(hr) || !bb)
+	{
+		pocbFail("运行期 IDXGISwapChain::GetBuffer(0)", hr);
+		return;
+	}
+	D3D11_TEXTURE2D_DESC bd{};
+	bb->GetDesc(&bd);
+	if (bd.Format != c.fmt || bd.SampleDesc.Count != 1 ||
+	    bd.Width < POCB_X + POCB_W || bd.Height < POCB_Y + POCB_H)
+	{
+		bb->Release();
+		logLine("PoC-B: backbuffer 口径变化 (format=" + std::to_string(static_cast<int>(bd.Format)) +
+		        " " + std::to_string(bd.Width) + "x" + std::to_string(bd.Height) +
+		        " samples=" + std::to_string(bd.SampleDesc.Count) + ") → 本帧跳过注入");
+		return;
+	}
+
+	c.fns.vkResetFences(c.vdev, 1, &c.fence);
+	VkSubmitInfo si{};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &c.cmd;
+	VkResult vr = c.fns.vkQueueSubmit(c.queue, 1, &si, c.fence);
+	if (vr == VK_SUCCESS)
+		vr = c.fns.vkWaitForFences(c.vdev, 1, &c.fence, VK_TRUE, UINT64_MAX);
+	if (vr != VK_SUCCESS)
+	{
+		bb->Release();
+		pocbFail("vkQueueSubmit / vkWaitForFences", vr);
+		return;
+	}
+
+	c.ctx->UpdateSubresource(c.tex, 0, nullptr, c.mapped, POCB_W * POCB_BPP, 0);
+	D3D11_BOX box{0, 0, 0, static_cast<UINT>(POCB_W), static_cast<UINT>(POCB_H), 1};
+	c.ctx->CopySubresourceRegion(bb, 0, POCB_X, POCB_Y, 0, c.tex, 0, &box);
+	bb->Release();
+
+	const auto t1 = std::chrono::steady_clock::now();
+	const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+	c.frames++;
+	c.accMs += ms;
+	if (c.frames == 1)
+	{
+		char b[224];
+		std::snprintf(b, sizeof(b),
+		    "PoC-B 第 1 帧注入: 渲染+读回+拷贝 %.2f ms → CopySubresourceRegion(%d,%d %dx%d) 已提交",
+		    ms, POCB_X, POCB_Y, POCB_W, POCB_H);
+		logLine(b);
+	}
+	else if (c.frames % 600 == 0)
+	{
+		char b[160];
+		std::snprintf(b, sizeof(b), "PoC-B 注入 %llu 帧, 累计均值 %.2f ms/帧 (本帧 %.2f ms)",
+		    static_cast<unsigned long long>(c.frames), c.accMs / static_cast<double>(c.frames), ms);
+		logLine(b);
+	}
+}
+
+// 由 hookedPresent / hookedPresent1 在调原 Present 之前调用
+void pocbFrame(IDXGISwapChain* sc)
+{
+	if (!sc || !pocbEnabled())
+		return;
+	PocbCtx& c = g_pocb;
+	const int st = c.state.load();
+	if (st == 3)
+		return;
+	if (st == 0)
+	{
+		int expect = 0;
+		if (!c.state.compare_exchange_strong(expect, 1))
+			return; // 另一线程正在初始化
+		if (!pocbInit(sc))
+		{
+			c.state.store(3);
+			return;
+		}
+		c.state.store(2);
+	}
+	if (c.state.load() != 2)
+		return;
+	pocbInject(c, sc);
+}
+
 // ---------- 钩子本体 ----------
 
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* sc, UINT sync, UINT flags)
 {
 	notePresent("Present", sc);
+	pocbFrame(sc); // PoC-B: 在调原 Present 之前把 Vulkan 渲出的像素写进 backbuffer
 	void** vtbl = *reinterpret_cast<void***>(sc);
 	void* orig = nullptr;
 	EnterCriticalSection(&g_cs);
@@ -913,6 +1742,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent1(IDXGISwapChain1* sc, UINT sync, UINT fl
                                           const DXGI_PRESENT_PARAMETERS* params)
 {
 	notePresent("Present1", sc);
+	pocbFrame(sc); // PoC-B: 同 hookedPresent (交换链若走 Present1 口径也照注入)
 	void** vtbl = *reinterpret_cast<void***>(sc);
 	void* orig = nullptr;
 	EnterCriticalSection(&g_cs);
@@ -1745,7 +2575,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 {
 	info->infoVersion = PluginInfo::kInfoVersion;
 	info->name = "PocPresenter";
-	info->version = (0u << 16) | (8u << 8) | 0u; // 0.8.0
+	info->version = (0u << 16) | (9u << 8) | 0u; // 0.9.0
 
 	if (skse->isEditor)  // 只进游戏本体, 不进 Creation Kit
 		return false;
@@ -1756,7 +2586,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.8.0 (PoC-A v1.7: 槽位勘误 8/22 + 工厂 10/15/16/24 + 方案B运行时靶 + 方案A解包 + 阳性确认) ====");
+	logLine("==== poc-presenter v0.9.0 (PoC-A v1.7 验收通过 + PoC-B v0.1: Vulkan 离屏渲染 → 读回 → 注入 backbuffer) ====");
 
 	InitializeCriticalSection(&g_cs);
 
