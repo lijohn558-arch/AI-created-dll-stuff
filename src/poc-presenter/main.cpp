@@ -173,6 +173,13 @@
  *   登记行明示未挂 ⇒ 游戏 Present 只能从方案B 的函数级 detour 进来, 日志应出现
  *   "第 1 次 Present (经 函数detour)"。可与 vulkan=0 同用 (一次跑局清两条遗留)。
  *
+ * ---- v0.9.3 (2026-10-03): 函数层 detour 也驱动 PoC-B (兜底模式补注入) ----
+ *   0.9.2 对照局发现: pocbFrame 只在 hookedPresent/hookedPresent1 (vtable 层) 里调,
+ *   vtable=0 时函数层 detour 只计数不注入 ⇒ 兜底模式下 PoC-B 永远不跑, 逃生门
+ *   pocbEnabled() 也走不到 (日志看不到 "关闭了 vulkan 注入" 那行)。
+ *   修法: detouredPresent/detouredPresent1 在 !g_inVtableHook 分支里也调 pocbFrame
+ *   (经 vtable 转来的调用 TLS 置位, 不会二次注入)。
+ *
  * 构建: GitHub Actions (build.yml job "poc-presenter"), 本地不编译
  * 安装: poc-presenter.dll 放入 <游戏>/Data/SKSE/Plugins/
  */
@@ -950,7 +957,11 @@ static HRESULT STDMETHODCALLTYPE detouredPresent(IDXGISwapChain* sc, UINT sync, 
 	if (!g_detP.resume)
 		return E_FAIL;
 	if (!g_inVtableHook)
+	{
 		notePresent("函数detour", sc);
+		pocbFrame(sc); // v0.9.3: vtable 层不可用时 (vtable=0 或挂不上) 也得注入 —— 否则
+		               // PoC-B 只在 vtable 模式下工作, 逃生门 pocbEnabled() 也永远走不到
+	}
 	typedef HRESULT(STDMETHODCALLTYPE* Fn)(IDXGISwapChain*, UINT, UINT);
 	return reinterpret_cast<Fn>(g_detP.resume)(sc, sync, flags);
 }
@@ -961,7 +972,10 @@ static HRESULT STDMETHODCALLTYPE detouredPresent1(IDXGISwapChain1* sc, UINT sync
 	if (!g_detP1.resume)
 		return E_FAIL;
 	if (!g_inVtableHook)
+	{
 		notePresent("函数detour1", sc);
+		pocbFrame(sc); // v0.9.3: 同 detouredPresent —— 兜底模式也注入
+	}
 	typedef HRESULT(STDMETHODCALLTYPE* Fn)(IDXGISwapChain1*, UINT, UINT,
 	                                       const DXGI_PRESENT_PARAMETERS*);
 	return reinterpret_cast<Fn>(g_detP1.resume)(sc, sync, flags, params);
@@ -2659,7 +2673,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 {
 	info->infoVersion = PluginInfo::kInfoVersion;
 	info->name = "PocPresenter";
-	info->version = (0u << 16) | (9u << 8) | 2u; // 0.9.2
+	info->version = (0u << 16) | (9u << 8) | 3u; // 0.9.3
 
 	if (skse->isEditor)  // 只进游戏本体, 不进 Creation Kit
 		return false;
@@ -2670,7 +2684,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.9.2 (PoC-A v1.7 验收通过 + PoC-B v0.1: Vulkan 离屏渲染 → 读回 → 注入 backbuffer) ====");
+	logLine("==== poc-presenter v0.9.3 (PoC-A v1.7 验收通过 + PoC-B v0.1: Vulkan 离屏渲染 → 读回 → 注入 backbuffer) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
