@@ -573,3 +573,8 @@ vulkan=0    ← 逃生门：关掉 PoC-B 注入 → 拿同日同机位的无注�
 
 §7.7 的「方案B 独立计数未证」✓ 清零；§7.8.7 遗留 ① 噪声底 ② 方案B 计数 ✓ 双清零；
 仅剩「逃生门运行时验证」一项可选观察（0.9.3 起才有机会走到，见 §7.9.5）。
+
+**实验态已回收**：跑完即删 `D:\...\SKSE\Plugins\poc-presenter.ini`（`vulkan=0`+`vtable=0`），
+恢复默认 = vtable 层挂钩 + PoC-B 注入全开；`capture-helper.dll` 未改名、与 `poc-presenter.dll`
+并列在位。本地 DLL 现为 0.9.2，**0.9.3 artifact 在 CI run `37109051718`**（双 job ✅），
+下次跑局前覆盖即可与文档口径一致。

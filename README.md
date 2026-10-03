@@ -261,4 +261,4 @@ push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从
 `<pluginDir>\poc-presenter.ini` 写 `vulkan=0`（或 `pocb=0`）——**尚未运行时实测**：0.9.2 对照局里
 `pocbFrame()` 根本没被调到（vtable=0 时函数层 detour 只计数不驱动 PoC-B，docs/01 §7.9.5），
 **0.9.3 已修**（`detouredPresent` 补 `pocbFrame`），下次跑局可顺带看那行
-`PoC-B: poc-presenter.ini 关闭了 vulkan 注入 (vulkan=0)`。
+`PoC-B: poc-presenter.ini 关闭了 vulkan 注入 (vulkan=0)`。对照局的 ini 已删除，环境恢复默认。
