@@ -72,9 +72,10 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
 本步**不碰 Vulkan、不改变画面**，只产出日志。
 
-> **状态（2026-10-03 13:44）：v1.7 带 renderdoc 局验收通过**（`第 1 次 Present` 已出现，
-> 计数 7201 / 60 FPS 稳定）→ 待无 renderdoc（GFE 在场）局复跑做双环境闭环 → 进 PoC-B。
-> 判读全档见 `docs/01` §7.6。
+> **状态（2026-10-03 14:01）：v1.7 双环境闭环完成，PoC-A 两局验收均通过** —— 带 renderdoc 局
+> （7201 次 / 60 FPS，判读 §7.6）+ 无 renderdoc/GFE 局（★ 中、6001 次 / 60 FPS，判读 §7.7）。
+> 风险项 #1 第一环「Present 可拦」双环境实证闭合 → **下一步进 PoC-B**。
+> 唯一未证项：方案B 函数层的独立计数（vtable 层恒先命中 + TLS 去重，见 §7.7 末）。
 
 **机制（v1.7，七通道）**：
 1. **同步安装（v1.2 主修正）**——钩子在 `SKSEPlugin_Load` 内同步装完（等模块 ≤5s、等
@@ -163,6 +164,15 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 > 本局**无 ★**（游戏交换链未走我方工厂）但 vtable 同类直接命中 ⇒ 印证「★ 中否不影响计数」；
 > 因 vtable 层先命中 + TLS 去重，**方案B 层的独立有效性本局未证明**（待无 renderdoc/GFE 局
 > 复跑闭环：预期 ★ 中、方案A 跳过、方案B 候选1 即 dxgi+0x19000）。详见 docs/01 §7.6。
+> **v1.7 第二局（13:59，无 capture-helper / GFE 在场）= 双环境闭环**：`renderdoc.dll 未加载` →
+> 交换链回真 dxgi 类（vtable/slot8/slot22/工厂 10/15/16/24 原值全 dxgi）；探针 B 这次打到
+> **真 dxgi Present 存根**（前 14B `48 89 5C 24 10 … 55 57 41 56` + 第 15 字节起 `48 8D 6C 24 90`
+> = 边界 14）⇒ 与 `dxbytes.ps1`、`dxdump3` **三方逐字节闭合**；方案A 按设计跳过（非包装类）；
+> **方案B 候选①（活交换链）→ RAW 已装 14B**（与上局"候选①被跳过、靠候选②"正好互补）；
+> **★ 工厂拦截 CreateSwapChain（4s）+ 阳性确认(★游戏) `vtbl[8]/[22] ==我们的钩子 ✓`** +
+> 探针A 基线/钩子自证；**第 1 次 Present (经 Present): vtable=dxgi 真类**，6001 次 / 60.0 FPS、
+> 无告警无被改写。**未证项**：方案B 函数层的独立计数两局均被 vtable 层 + TLS 去重盖住
+> （它只作 vtable 类挂不上时的兜底，验证止于"字节守卫通过 + RAW 已装"）。详见 docs/01 §7.7。
 
 ### 构建
 push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从 **Actions → Artifacts**

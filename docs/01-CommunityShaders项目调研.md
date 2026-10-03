@@ -329,3 +329,47 @@ v1.6 的 5B `E9` 入口改写、CHAIN 共存、TLS 双层不双计机制不变�
 环境实证成立（此前 v1.0~v1.6 的 0 计数确系槽位错挂，非机制不可行）。下一步进 **PoC-B**：
 在 Present 内创建 Vulkan instance/swapchain → 游戏窗口出清屏/三角形 → F12 抓帧 →
 `rdc_run` 提取链 → `rdc_compare -Base S4 -Cand <候选>`。
+
+### 7.7 v1.7 第二局判读：无 renderdoc 局 + 双环境闭环（2026-10-03 13:59）
+
+**环境切换**：`capture-helper.dll` 暂时改名停用（跑完已恢复到 `Data\SKSE\Plugins\` 与
+`poc-presenter.dll` 并列）⇒ 日志 `等待 renderdoc.dll 2s 未出现 (无 capture-helper 场景)` +
+`renderdoc.dll 未加载`，交换链回到**真 dxgi 类**；GFE 覆盖层在场。**13:59:30 ★ 命中（安装后
+4s）、13:59:32 第 1 次 Present（6s），6001 次 / 近600帧恒 60.0 FPS，无告警、无槽位被改写**。
+
+**本局逐行判读（与 §7.6 上局一一互补）**：
+
+| # | 日志行 | 判读 |
+|---|---|---|
+| 1 | `dummy1(ForHwnd): vtable=dxgi+0xCD688 来自 dxgi.dll`、设备链/工厂 vtable 全 dxgi | **类分叉验证成立**：无 renderdoc 时我方与游戏同持真类（上局全在 renderdoc 包装类） |
+| 2 | `slot8 原值=dxgi+0x19000`、`slot22 原值=dxgi+0x194A0`；`slot10/15/16/24` 原值全 dxgi | 交换链**与工厂**新槽位在真类上全部读对、挂上 |
+| 3 | **`探针: Present(slot8) 原实现前32字节 @ dxgi+0x19000 = 48 89 5C 24 10 48 89 74 24 18 55 57 41 56 48 8D 6C 24 90 …`** | **三方互证闭合**：前 14B 与 `dxbytes.ps1` / §7.5 表逐字节一致，第 15 字节起恰是判据 `48 8D 6C 24 90`（边界 14）；Present1 前 14B 末字节 `54` vs Present `56` 亦吻合 ⇒ 上局探针 B 打到的是 renderdoc 32B 序言存根，**"读到什么取决于类"，这正是字节守卫必须逐候选的原因** |
+| 4 | `方案A(安装期解包): 对象 … vtable 不在 renderdoc 包装类 — 跳过`（安装期两处 + ★处各一次） | 按设计跳过，非包装类不适用偏移 |
+| 5 | **`方案B Present 候选 1/1: dxgi+0x19000 来自 活交换链vtbl[8]` → `RAW 已装 窃取=14B`**（Present1 同理 `候选 1/1` → `RAW`） | **靶子候选①直接命中**（本局候选只有 1 个：方案A 无贡献）——与上局「候选①被守卫跳过、靠候选②（方案A真vtbl）」**正好互补，两条候选路径都被实测走通** |
+| 6 | **`★ 工厂拦截 CreateSwapChain → … title="Skyrim Special Edition"`** + `阳性确认 (★游戏 CreateSwapChain): vtbl[8]/vtbl[22] ==我们的钩子 ✓` | **上局缺的那环补齐**——游戏真实创建路径经我方挂的槽 10 被拦、就地确认槽 8/22 已是我们的钩子 |
+| 7 | `探针: 游戏交换链 vptr=dxgi+0xCD688 (基线)` → `探针: 游戏交换链 slot8=…poc-presenter (我们的钩子 ✓)` | 探针 A 全链生效：基线 + 槽位自证 |
+| 8 | **`第 1 次 Present (经 Present): vtable=0x7FFE994FD688 来自 dxgi.dll \| 1920x1080 … title="Skyrim Special Edition"`** | **验收行**——真 dxgi 类上直接命中 |
+
+**两局通道覆盖矩阵（合起来 = 双环境闭环）**：
+
+| 通道 | 上局（带 renderdoc） | 本局（无 renderdoc / GFE） |
+|---|---|---|
+| 同步安装 / 五口径工厂 / 设备链 GetParent | ✓ | ✓ |
+| 槽 8/22 + 阳性确认 | ✓（renderdoc 类） | ✓（dxgi 类）+ **★ 处再证一次** |
+| 方案A `[obj+0x28]` 解包 | ✓ **成功**（真vtbl=dxgi+0xCD688） | ✓ **按设计跳过**（非包装类） |
+| 方案B 函数级 detour | 候选②方案A真vtbl → `RAW 14B` | **候选①活交换链 → `RAW 14B`** |
+| ★ 工厂拦截 + 探针A | 未触发（游戏交换链由 renderdoc 内部创建，vtable 同类直击） | ✓ 中 + 基线/钩子自证 |
+| 计数 | 7201 次 / 60.0 FPS | 6001 次 / 60.0 FPS |
+| 告警 / 槽位被改写 | 无 / 无 | 无 / 无 |
+
+**一处诚实的未证项**：两局的第 1 次 Present 都是 `经 Present`（vtable 层），**方案B 层的
+"独立计数"始终未被观察到**——只要 vtable 层挂上，它恒先命中、TLS 去重吃掉函数层的计数。
+方案B 的验证止于「**靶 = 真 Present 入口、14B 字节守卫通过、RAW 已装 trampoline**」，
+它作为"某环境 vtable 类挂不上时的兜底"这一角色无法在当前两局内单独计数证明；
+若要实测，需临时停用 vtable 挂钩（或加一条只让函数层计数的开关）——**优先级低，留作 PoC-B
+之后的可选项**。
+
+**总判**：风险项 #1 第一环「Present 可拦」在**双环境（renderdoc 包装类 / 真 dxgi 类）实证闭合**，
+七条通道全部在真实游戏里走通过，v1.0~v1.6 的 0 计数确系槽位错挂。**→ 进 PoC-B**：
+在 Present 内创建 Vulkan instance/swapchain → 游戏窗口出清屏/三角形 → F12 抓帧 →
+`rdc_run` 提取链 → `rdc_compare -Base S4 -Cand <候选>`。
