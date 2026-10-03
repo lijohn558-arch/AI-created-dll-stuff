@@ -180,6 +180,27 @@
  *   修法: detouredPresent/detouredPresent1 在 !g_inVtableHook 分支里也调 pocbFrame
  *   (经 vtable 转来的调用 TLS 置位, 不会二次注入)。
  *
+ * ---- v0.10.0 (2026-10-03): 阶段1 主体 —— 共享纹理通路 + 水体探针升质 ----
+ *   ① 共享纹理 (docs/00 §1.1 决策4): 替掉 6.47ms/帧 的每帧同步读回。
+ *      路径: D3D11 创建 SHARED|NTHANDLE 纹理 → IDXGIResource1::CreateSharedHandle
+ *      → VK 经 VK_KHR_external_memory_win32 导成 VkImage (OPAQUE_WIN32) →
+ *      每帧 renderpass 后 vkCmdCopyImage 离屏图→共享图 → D3D11 CopySubresourceRegion
+ *      直接从共享图拷进 backbuffer (不再 vkCmdCopyImageToBuffer + UpdateSubresource)。
+ *      同步: 仍是 CPU fence 交接 (vkWaitForFences), 另加 D3D11_EVENT 查询闸 —— 上一帧
+ *      D3D11 拷贝没跑完不提交本帧 VK 写, 关掉"帧N读 vs 帧N+1写"跨 API 竞态。
+ *      降级: 扩展缺失 / NT handle 失败 / 导入失败 / ini shared=0 → 自动回退读回路径。
+ *   ② 探针升质 (水体样本第一步, docs/03 §6.1): 拦 ID3D11Device::CreateTexture2D (槽5),
+ *      501 = 6面512² RGBA16F 环境反射 cubemap 探针的描述符命中时升成 1024² (只动创建
+ *      参数, 游戏自己的 pass 照常渲染, 采样端自动变清晰)。
+ *      逃生门: probe=0 不挂槽; vulkan=0 同样不挂 (S4c 基线纯净)。
+ *   关键日志 (新增):
+ *     探针升质: 设备 vtable=... slot5 原值=... 来自 d3d11.dll / renderdoc.dll
+ *     探针升质: 槽5 已挂 (512² cube→1024², 逃生门 probe=0 / vulkan=0)
+ *     探针升质: 512² RGBA16F cube(6面) → 1024² 第 N 次, hr=0
+ *     PoC-B init: 共享纹理 NT handle OK / 共享图导入 OK (D3D11 NT handle → VkImage)
+ *     PoC-B init 完成: ... → 共享纹理 (NT handle+event闸, 无读回) → ...
+ *     PoC-B 第 1 帧注入: 渲染+共享拷贝 x.xx ms (fence x.xx / 闸 x.xx) → ...
+ *
  * 构建: GitHub Actions (build.yml job "poc-presenter"), 本地不编译
  * 安装: poc-presenter.dll 放入 <游戏>/Data/SKSE/Plugins/
  */
@@ -205,6 +226,9 @@
 
 // PoC-B: Vulkan 注入用 (本机/CI 都没有 Vulkan SDK → 不链 vulkan-1.lib, 只要头文件 +
 // 运行时 GetProcAddress 自己装; 头由 build.yml 额外 checkout KhronosGroup/Vulkan-Headers 提供)
+// VK_USE_PLATFORM_WIN32_KHR: 共享纹理导入 (VkImportMemoryWin32HandleInfoKHR) 需要
+// vulkan_win32.h; windows.h 已在上面包含, 顺序没问题。
+#define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 // SPIR-V 字节 (由 tools\make_shaders.ps1 从 shaders\pocb.vert/.frag 生成, 随源码入库)
 #include "pocb_shaders.h"
@@ -457,10 +481,147 @@ static bool iniFlag(const char* key, bool def)
 	return out;
 }
 
+// ---------- 探针升质 hook (v0.10.0): 拦 ID3D11Device::CreateTexture2D (槽5) ----------
+// 水体样本第一步 (docs/00 §1.1 / docs/03 §6.1): 501 = 6面512² RGBA16F 环境反射 cubemap
+// 探针, "只动创建参数" —— 命中描述符时把宽高翻倍 (512²→1024²), 其余字段原样透传。
+// 游戏自己的 pass 照常渲染 (viewport/RTV 从我们返回的对象 GetDesc 拿, 自动适配)。
+// 挂法与交换链同款: vtable 槽改写, 原值必须落在 d3d11.dll / renderdoc.dll 才挂 (防错槽位)。
+//   probe=0 (ini) → 完全不挂槽; vulkan=0 → 同样不挂 (S4c 基线口径, 由 pocbEnabled 把关)。
+static bool pocbEnabled();
+
+struct DevEntry
+{
+	void** vtbl;
+	void*  orig5; // CreateTexture2D (ID3D11Device vtable 槽5)
+};
+static DevEntry g_dev[4];
+static int      g_devN = 0;
+static std::atomic<bool> g_probeOn{false};
+static std::atomic<long> g_probeLogN{0};
+
+void* lookupDevTex2D(void** vtbl)
+{
+	if (!vtbl)
+		return nullptr;
+	for (int i = 0; i < g_devN; ++i)
+		if (g_dev[i].vtbl == vtbl)
+			return g_dev[i].orig5;
+	return nullptr;
+}
+
+// 安全阀: 原值必须落在 d3d11.dll 或 renderdoc.dll 内才允许挂 (与 isDxgiFamily 同思路)
+bool isD3D11Family(const void* p)
+{
+	const std::string m = lowerCopy(modulePathOf(p));
+	return m.find("d3d11.dll") != std::string::npos || m.find("renderdoc.dll") != std::string::npos;
+}
+
+// 501 探针的创建描述符 (RenderDoc 实测: 512² mips=1 arraysize=6 RGBA16F
+// TextureCubeArray, Usage ColorTarget|ShaderRead)
+static bool probeDesc(const D3D11_TEXTURE2D_DESC* d)
+{
+	return d->Width == 512 && d->Height == 512 && d->MipLevels == 1 && d->ArraySize == 6 &&
+	       d->Format == DXGI_FORMAT_R16G16B16A16_FLOAT && d->SampleDesc.Count == 1 &&
+	       d->Usage == D3D11_USAGE_DEFAULT &&
+	       (d->MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0 &&
+	       (d->BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE)) ==
+	           (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+}
+
+HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC* desc,
+                                                const D3D11_SUBRESOURCE_DATA* init,
+                                                ID3D11Texture2D** out)
+{
+	using CT2D_t = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, const D3D11_TEXTURE2D_DESC*,
+	                                           const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D**);
+	const CT2D_t real = reinterpret_cast<CT2D_t>(
+	    lookupDevTex2D(dev ? *reinterpret_cast<void***>(dev) : nullptr));
+	if (!real) // 理论不可达: 只有被我们改过的槽才会进本函数
+		return E_INVALIDARG;
+	// 带初始数据的不换 (探针是 RT 不该有, 有的话宁可不升)
+	if (g_probeOn.load(std::memory_order_relaxed) && desc && !init && probeDesc(desc))
+	{
+		D3D11_TEXTURE2D_DESC d = *desc;
+		d.Width *= 2;
+		d.Height *= 2;
+		const HRESULT hr = real(dev, &d, init, out);
+		const long n = g_probeLogN.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (n <= 16 || (n % 64) == 0)
+			logLine("探针升质: 512² RGBA16F cube(6面) → " + std::to_string(d.Width) + "² 第 " +
+			        std::to_string(n) + " 次, hr=" + std::to_string(hr));
+		return hr;
+	}
+	return real(dev, desc, init, out);
+}
+
+// 挂设备 vtable 槽5 —— 幂等 (按 vtable 去重), 首次调用读 ini
+static void installProbeOn(ID3D11Device* dev)
+{
+	if (!dev || !pocbEnabled())
+		return;
+	void** vtbl = *reinterpret_cast<void***>(dev);
+	EnterCriticalSection(&g_cs);
+	static bool probeIniRead = false;
+	if (!probeIniRead)
+	{
+		probeIniRead = true;
+		g_probeOn.store(iniFlag("probe", true), std::memory_order_relaxed);
+		if (!g_probeOn.load(std::memory_order_relaxed))
+			logLine("探针升质: ini probe=0 → 不挂 CreateTexture2D (探针保持 512²)");
+	}
+	if (!g_probeOn.load(std::memory_order_relaxed))
+	{
+		LeaveCriticalSection(&g_cs);
+		return;
+	}
+	for (int i = 0; i < g_devN; ++i)
+		if (g_dev[i].vtbl == vtbl)
+		{
+			LeaveCriticalSection(&g_cs);
+			return;
+		}
+	void* o5 = vtbl[5];
+	logLine("探针升质: 设备 vtable=" + hexOf(vtbl) + " slot5(CreateTexture2D) 原值=" + hexOf(o5) +
+	        " 来自 " + modulePathOf(o5));
+	if (!isD3D11Family(o5))
+	{
+		logLine("探针升质: slot5 原值不在 d3d11/renderdoc — 跳过该 vtable (防错槽位)");
+		LeaveCriticalSection(&g_cs);
+		return;
+	}
+	if (g_devN >= (int)(sizeof(g_dev) / sizeof(g_dev[0])))
+	{
+		logLine("探针升质: 设备登记表已满 — 跳过 (防越界)");
+		LeaveCriticalSection(&g_cs);
+		return;
+	}
+	g_dev[g_devN].vtbl = vtbl;
+	g_dev[g_devN].orig5 = o5;
+	++g_devN;
+	patchSlotLocked(&vtbl[5], reinterpret_cast<void*>(&hookedCreateTexture2D));
+	logLine("探针升质: 槽5 已挂 (512² cube→1024², 逃生门 probe=0 / vulkan=0)");
+	LeaveCriticalSection(&g_cs);
+}
+
+// 由 registerSwp (交换链一出现) / pocbInit (双保险) 调 —— 必须早于游戏创建探针
+static void installProbeHook(void* swpObj)
+{
+	if (!swpObj)
+		return;
+	ID3D11Device* dev = nullptr;
+	reinterpret_cast<IDXGISwapChain*>(swpObj)->GetDevice(__uuidof(ID3D11Device),
+	                                                     reinterpret_cast<void**>(&dev));
+	if (!dev)
+		return;
+	installProbeOn(dev);
+	dev->Release();
+}
+
 void registerSwp(void* obj, bool plus, const char* tag)
 {
 	if (!obj)
 		return;
+	installProbeHook(obj); // 探针升质 (v0.10.0): 交换链一登记就抓设备 —— 必须早于游戏创建探针
 	EnterCriticalSection(&g_cs);
 	void** vtbl = *reinterpret_cast<void***>(obj);
 	int idx = -1;
@@ -1018,7 +1179,7 @@ static HRESULT STDMETHODCALLTYPE detouredPresent1(IDXGISwapChain1* sc, UINT sync
 	X(vkGetPhysicalDeviceMemoryProperties)
 
 #define POCB_INST_FNS(X) \
-	POCB_INST_REQ_FNS(X) X(vkGetPhysicalDeviceProperties2)
+	POCB_INST_REQ_FNS(X) X(vkGetPhysicalDeviceProperties2) X(vkEnumerateDeviceExtensionProperties)
 
 #define POCB_DEV_FNS(X) \
 	X(vkDestroyDevice) X(vkGetDeviceQueue) X(vkDeviceWaitIdle) \
@@ -1032,6 +1193,7 @@ static HRESULT STDMETHODCALLTYPE detouredPresent1(IDXGISwapChain1* sc, UINT sync
 	X(vkCreateCommandPool) X(vkDestroyCommandPool) X(vkAllocateCommandBuffers) X(vkResetCommandPool) \
 	X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) \
 	X(vkCmdBindPipeline) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw) X(vkCmdCopyImageToBuffer) \
+	X(vkCmdCopyImage) X(vkCmdPipelineBarrier) \
 	X(vkCreateFence) X(vkDestroyFence) X(vkResetFences) X(vkWaitForFences) X(vkQueueSubmit)
 
 #define POCB_DECL_FN(n) PFN_##n n = nullptr;
@@ -1073,9 +1235,20 @@ struct PocbCtx
 	VkDeviceMemory   rbufMem = VK_NULL_HANDLE;
 	void*            mapped = nullptr;
 	VkFence          fence = VK_NULL_HANDLE;
+	// 共享纹理通路 (v0.10.0): D3D11 NT handle → VK 导入, 替掉读回
+	ID3D11Texture2D* stex = nullptr;    // D3D11 共享纹理 (渲染结果的落点)
+	HANDLE           shandle = nullptr; // stex 的 NT 句柄 (VK 导入用, 进程存活期不关)
+	ID3D11Query*     copyQ = nullptr;   // EVENT 查询: 等上一帧 D3D11 拷贝跑完 (跨 API 竞态闸)
+	bool             copyQLive = false; // copyQ 已 End、还没等到
+	bool             useShared = false; // 本局走共享路径 (任一步失败即回退读回)
+	VkImage          simg = VK_NULL_HANDLE;    // 从 stex 导入的 VkImage
+	VkDeviceMemory   simgMem = VK_NULL_HANDLE;
+	VkCommandBuffer  cmdS = VK_NULL_HANDLE;    // 共享路径命令 (renderpass + 拷进共享图)
 	// 统计
 	uint64_t frames = 0;
 	double   accMs = 0.0;
+	double   accFenceMs = 0.0; // vkQueueSubmit+vkWaitForFences 耗时累计 (与读回路径可比)
+	double   accGateMs = 0.0;  // event 闸等待累计 (共享路径专有)
 };
 static PocbCtx g_pocb;
 
@@ -1185,6 +1358,7 @@ static bool pocbInit(IDXGISwapChain* sc)
 		pocbFail("ID3D11Device::GetImmediateContext");
 		return false;
 	}
+	installProbeOn(c.dev); // 探针升质双保险: registerSwp 没抓到的话这里补一次 (幂等)
 	ID3D11Texture2D* bb = nullptr;
 	hr = sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb));
 	if (FAILED(hr) || !bb)
@@ -1228,6 +1402,72 @@ static bool pocbInit(IDXGISwapChain* sc)
 		pocbFail("ID3D11Device::CreateTexture2D (注入用 512×512)", hr);
 		return false;
 	}
+
+	// --- 共享纹理 (v0.10.0): D3D11 NT handle —— VK 导入的另一半 ---
+	// 任一步失败都只是"本局回退读回路径", 不是 init 失败 (注入照常, 只是没提速)。
+	if (iniFlag("shared", true))
+	{
+		D3D11_TEXTURE2D_DESC sd{};
+		sd.Width = POCB_W;
+		sd.Height = POCB_H;
+		sd.MipLevels = 1;
+		sd.ArraySize = 1;
+		sd.Format = bd.Format; // 已校验 = R8G8B8A8_UNORM
+		sd.SampleDesc.Count = 1;
+		sd.Usage = D3D11_USAGE_DEFAULT;
+		sd.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+		sd.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+		hr = c.dev->CreateTexture2D(&sd, nullptr, &c.stex);
+		IDXGIResource1* res1 = nullptr;
+		if (SUCCEEDED(hr) && c.stex)
+			hr = c.stex->QueryInterface(__uuidof(IDXGIResource1), reinterpret_cast<void**>(&res1));
+		HANDLE h = nullptr;
+		if (SUCCEEDED(hr) && res1)
+		{
+			// 访问掩码各家文档口径不一 (GENERIC_* vs 0) —— 三种依次试, 第一个成的算
+			const DWORD acc[3] = { GENERIC_READ | GENERIC_WRITE, GENERIC_ALL, 0 };
+			for (int ai = 0; ai < 3; ++ai)
+			{
+				h = nullptr;
+				hr = res1->CreateSharedHandle(nullptr, acc[ai], nullptr, &h);
+				if (h)
+					break;
+			}
+		}
+		if (res1)
+			res1->Release();
+		if (SUCCEEDED(hr) && h)
+		{
+			c.shandle = h;
+			// EVENT 查询: 共享路径的跨 API 竞态闸 (见 pocbInject), 建不出来就不敢走共享
+			D3D11_QUERY_DESC qd{};
+			qd.Query = D3D11_QUERY_EVENT;
+			if (SUCCEEDED(c.dev->CreateQuery(&qd, &c.copyQ)) && c.copyQ)
+			{
+				c.useShared = true;
+				logLine("PoC-B init: 共享纹理 NT handle OK (D3D11 EVENT 闸 OK)");
+			}
+			else
+			{
+				logLine("PoC-B init: D3D11 EVENT 查询创建失败 → 回退读回路径");
+				CloseHandle(h);
+				c.shandle = nullptr;
+				c.stex->Release();
+				c.stex = nullptr;
+			}
+		}
+		else
+		{
+			logLine("PoC-B init: 共享纹理 NT handle 失败 hr=" + pocbCode(hr) + " → 回退读回路径");
+			if (c.stex)
+			{
+				c.stex->Release();
+				c.stex = nullptr;
+			}
+		}
+	}
+	else
+		logLine("PoC-B init: ini shared=0 → 读回路径 (6.47ms 基线口径)");
 
 	// --- Vulkan loader ---
 	HMODULE hvk = LoadLibraryW(L"vulkan-1.dll");
@@ -1381,6 +1621,47 @@ static bool pocbInit(IDXGISwapChain* sc)
 	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 	dci.queueCreateInfoCount = 1;
 	dci.pQueueCreateInfos = &qci;
+	// --- 共享纹理设备扩展 (v0.10.0): VK_KHR_external_memory_win32 (+1.0 老设备的 base) ---
+	// 查不到 / 上面共享没建成 ⇒ c.useShared=0 走读回兜底, vkCreateDevice 不带扩展照常过。
+	const char* devExt[2] = {};
+	uint32_t    devExtN = 0;
+	if (c.useShared)
+	{
+		bool hasWin32 = false, hasBase = false;
+		uint32_t ne = 0;
+		if (fns.vkEnumerateDeviceExtensionProperties)
+			fns.vkEnumerateDeviceExtensionProperties(chosen, nullptr, &ne, nullptr);
+		static VkExtensionProperties eps[192]; // static: 别吃 Present 线程的栈
+		if (ne > 192)
+			ne = 192;
+		if (ne != 0 && fns.vkEnumerateDeviceExtensionProperties)
+			fns.vkEnumerateDeviceExtensionProperties(chosen, nullptr, &ne, eps);
+		for (uint32_t i = 0; i < ne; ++i)
+		{
+			if (std::strcmp(eps[i].extensionName, VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME) == 0)
+				hasWin32 = true;
+			else if (std::strcmp(eps[i].extensionName, VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME) == 0)
+				hasBase = true;
+		}
+		const bool api11 = props.apiVersion >= VK_API_VERSION_1_1;
+		if (hasWin32 && (hasBase || api11))
+		{
+			devExt[devExtN++] = VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME;
+			if (!api11)
+				devExt[devExtN++] = VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME;
+			dci.enabledExtensionCount = devExtN;
+			dci.ppEnabledExtensionNames = devExt;
+			logLine("PoC-B init: 共享纹理设备扩展已列 (win32" +
+			        std::string(!api11 ? ", base" : ", api1.1核内") + ")");
+		}
+		else
+		{
+			c.useShared = false;
+			logLine(std::string("PoC-B init: ") +
+			        (hasWin32 ? "缺 VK_KHR_external_memory base" : "缺 VK_KHR_external_memory_win32") +
+			        " → 共享纹理关, 回退读回路径");
+		}
+	}
 	vr = fns.vkCreateDevice(chosen, &dci, nullptr, &c.vdev);
 	if (vr != VK_SUCCESS || !c.vdev)
 	{
@@ -1390,7 +1671,8 @@ static bool pocbInit(IDXGISwapChain* sc)
 #define POCB_LOAD_D(n) fns.n = reinterpret_cast<PFN_##n>(fns.vkGetDeviceProcAddr(c.vdev, #n));
 	POCB_DEV_FNS(POCB_LOAD_D)
 #undef POCB_LOAD_D
-	// 设备级全表校验 (46 个我们真会调的) —— 空的按名字列出来, 不再只报"不完整"
+	// 设备级全表校验 (POCB_DEV_FNS 全部, 含 v0.10.0 新增的 vkCmdCopyImage/vkCmdPipelineBarrier)
+	// —— 空的按名字列出来, 不再只报"不完整"
 	{
 		std::string nul;
 #define POCB_CHECK_D(n) if (!fns.n) { if (!nul.empty()) nul += ","; nul += #n; }
@@ -1438,6 +1720,73 @@ static bool pocbInit(IDXGISwapChain* sc)
 	{
 		pocbFail("vkBindImageMemory (离屏图)");
 		return false;
+	}
+
+	// --- 共享图导入 (v0.10.0): 把 stex 的 NT 句柄导成 VkImage ---
+	// 之后每帧 renderpass 的产物 vkCmdCopyImage 拷进来, D3D11 直接从 stex 拷进 backbuffer
+	// (GPU→GPU, 不再有 1MB 读回 + UpdateSubresource 上传)。失败 ⇒ 本局读回兜底。
+	if (c.useShared)
+	{
+		VkExternalMemoryImageCreateInfo emi{};
+		emi.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+		emi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+		VkImageCreateInfo simci{};
+		simci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		simci.pNext = &emi;
+		simci.imageType = VK_IMAGE_TYPE_2D;
+		simci.format = VK_FORMAT_R8G8B8A8_UNORM; // 与离屏图同字节序, 拷贝不换序
+		simci.extent = VkExtent3D{POCB_W, POCB_H, 1};
+		simci.mipLevels = 1;
+		simci.arrayLayers = 1;
+		simci.samples = VK_SAMPLE_COUNT_1_BIT;
+		simci.tiling = VK_IMAGE_TILING_OPTIMAL;
+		simci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		simci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		simci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		vr = fns.vkCreateImage(c.vdev, &simci, nullptr, &c.simg);
+		if (vr != VK_SUCCESS)
+			logLine("PoC-B init: 共享图 vkCreateImage = " + pocbCode(vr));
+		if (vr == VK_SUCCESS)
+		{
+			VkMemoryRequirements sreq{};
+			fns.vkGetImageMemoryRequirements(c.vdev, c.simg, &sreq);
+			int t = pocbMemType(mem, sreq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+			if (t < 0)
+				t = pocbMemType(mem, sreq.memoryTypeBits, 0);
+			if (t < 0)
+			{
+				logLine("PoC-B init: 共享图无可用内存类型 (memoryTypeBits=" +
+				        std::to_string(sreq.memoryTypeBits) + ")");
+				vr = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+			}
+			else
+			{
+				VkImportMemoryWin32HandleInfoKHR imp{};
+				imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+				imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+				imp.handle = c.shandle; // 分配即导入 (链进 VkMemoryAllocateInfo)
+				VkMemoryAllocateInfo mai{};
+				mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+				mai.pNext = &imp;
+				mai.allocationSize = sreq.size;
+				mai.memoryTypeIndex = static_cast<uint32_t>(t);
+				vr = fns.vkAllocateMemory(c.vdev, &mai, nullptr, &c.simgMem);
+				if (vr != VK_SUCCESS)
+					logLine("PoC-B init: 共享图导入 vkAllocateMemory(NT handle) = " + pocbCode(vr));
+			}
+		}
+		if (vr == VK_SUCCESS && fns.vkBindImageMemory(c.vdev, c.simg, c.simgMem, 0) != VK_SUCCESS)
+		{
+			logLine("PoC-B init: 共享图 vkBindImageMemory 失败");
+			vr = VK_ERROR_INITIALIZATION_FAILED;
+		}
+		if (vr != VK_SUCCESS)
+		{
+			c.useShared = false;
+			logLine("PoC-B init: 共享纹理导入失败 → 回退读回路径 (注入照常, 无提速)");
+		}
+		else
+			logLine("PoC-B init: 共享图导入 OK (D3D11 NT handle → VkImage, OPAQUE_WIN32)");
 	}
 	VkImageViewCreateInfo vci{};
 	vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -1700,6 +2049,65 @@ static bool pocbInit(IDXGISwapChain* sc)
 		pocbFail("vkEndCommandBuffer");
 		return false;
 	}
+
+	// --- 共享路径命令 (v0.10.0): 同一 renderpass, 尾部把离屏图拷进共享图 ---
+	// 也录一次永久复用。共享图每帧被拷贝全域覆盖 ⇒ 逐帧从 UNDEFINED 起 (丢弃旧内容)合法;
+	// 旧内容已由 pocbInject 的 event 闸保证被 D3D11 拷走, 不存在竞态。
+	if (c.useShared)
+	{
+		cbai.commandBufferCount = 1;
+		if (fns.vkAllocateCommandBuffers(c.vdev, &cbai, &c.cmdS) != VK_SUCCESS)
+		{
+			logLine("PoC-B init: 共享路径 vkAllocateCommandBuffers 失败 → 回退读回");
+			c.useShared = false;
+		}
+		else if (fns.vkBeginCommandBuffer(c.cmdS, &cbBegin) != VK_SUCCESS)
+		{
+			logLine("PoC-B init: 共享路径 vkBeginCommandBuffer 失败 → 回退读回");
+			c.useShared = false;
+		}
+		else
+		{
+			fns.vkCmdBeginRenderPass(c.cmdS, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+			fns.vkCmdBindPipeline(c.cmdS, VK_PIPELINE_BIND_POINT_GRAPHICS, c.pipe);
+			fns.vkCmdSetViewport(c.cmdS, 0, 1, &vp);
+			fns.vkCmdSetScissor(c.cmdS, 0, 1, &sci);
+			fns.vkCmdDraw(c.cmdS, 3, 1, 0, 0);
+			fns.vkCmdEndRenderPass(c.cmdS); // finalLayout = TRANSFER_SRC (离屏图作拷贝源)
+			VkImageMemoryBarrier imb{};
+			imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			imb.srcAccessMask = 0;
+			imb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			imb.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			imb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			imb.image = c.simg;
+			imb.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			fns.vkCmdPipelineBarrier(c.cmdS, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+			                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &imb);
+			VkImageCopy icp{};
+			icp.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			icp.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			icp.extent = VkExtent3D{POCB_W, POCB_H, 1};
+			fns.vkCmdCopyImage(c.cmdS, c.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, c.simg,
+			                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &icp);
+			// TRANSFER_DST → GENERAL: 交给 D3D11 读 (跨 API 口径只认 GENERAL;
+			// dstAccess=MEMORY_READ 让驱动把写做完再放行 —— 真正的交接仍靠 CPU fence)
+			imb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			imb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+			imb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			imb.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+			fns.vkCmdPipelineBarrier(c.cmdS, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &imb);
+			if (fns.vkEndCommandBuffer(c.cmdS) != VK_SUCCESS)
+			{
+				logLine("PoC-B init: 共享路径 vkEndCommandBuffer 失败 → 回退读回");
+				c.useShared = false;
+			}
+		}
+	}
+
 	VkFenceCreateInfo fci2{};
 	fci2.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 	fci2.flags = VK_FENCE_CREATE_SIGNALED_BIT;
@@ -1712,8 +2120,9 @@ static bool pocbInit(IDXGISwapChain* sc)
 
 	char sum[320];
 	std::snprintf(sum, sizeof(sum),
-	    "PoC-B init 完成: 离屏 %dx%d (洋红清屏+三角形) → 读回 → CopySubresourceRegion 到 backbuffer (%d,%d)",
-	    POCB_W, POCB_H, POCB_X, POCB_Y);
+	    "PoC-B init 完成: 离屏 %dx%d (洋红清屏+三角形) → %s → CopySubresourceRegion 到 backbuffer (%d,%d)",
+	    POCB_W, POCB_H, c.useShared ? "共享纹理 (NT handle+event闸, 无读回)" : "读回", POCB_X,
+	    POCB_Y);
 	logLine(sum);
 	return true;
 }
@@ -1743,14 +2152,37 @@ static void pocbInject(PocbCtx& c, IDXGISwapChain* sc)
 		return;
 	}
 
+	// --- 共享路径跨 API 竞态闸 (v0.10.0): 上一帧 D3D11 拷贝没跑完之前不提交本帧 VK 写 ---
+	// 读回路径无此问题 (数据到 CPU 手里才交给 D3D11); 共享路径两边都是 GPU 工作且分属
+	// 两个 API, 无共享同步原语 ⇒ 用 EVENT 查询在下一帧提交前把上一帧的拷贝等掉。
+	if (c.useShared && c.copyQ && c.copyQLive)
+	{
+		const auto g0 = std::chrono::steady_clock::now();
+		while (c.ctx->GetData(c.copyQ, nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_FALSE)
+		{
+			if (std::chrono::steady_clock::now() - g0 > std::chrono::milliseconds(2000))
+			{
+				logLine("PoC-B: 等上一帧共享拷贝超 2000ms → 放行本帧 (可能撕裂一帧)");
+				break;
+			}
+			Sleep(0);
+		}
+		c.copyQLive = false;
+		c.accGateMs += std::chrono::duration<double, std::milli>(
+		    std::chrono::steady_clock::now() - g0).count();
+	}
+
 	c.fns.vkResetFences(c.vdev, 1, &c.fence);
 	VkSubmitInfo si{};
 	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	si.commandBufferCount = 1;
-	si.pCommandBuffers = &c.cmd;
+	si.pCommandBuffers = c.useShared ? &c.cmdS : &c.cmd;
+	const auto f0 = std::chrono::steady_clock::now();
 	VkResult vr = c.fns.vkQueueSubmit(c.queue, 1, &si, c.fence);
 	if (vr == VK_SUCCESS)
 		vr = c.fns.vkWaitForFences(c.vdev, 1, &c.fence, VK_TRUE, UINT64_MAX);
+	c.accFenceMs += std::chrono::duration<double, std::milli>(
+	    std::chrono::steady_clock::now() - f0).count();
 	if (vr != VK_SUCCESS)
 	{
 		bb->Release();
@@ -1758,9 +2190,21 @@ static void pocbInject(PocbCtx& c, IDXGISwapChain* sc)
 		return;
 	}
 
-	c.ctx->UpdateSubresource(c.tex, 0, nullptr, c.mapped, POCB_W * POCB_BPP, 0);
-	D3D11_BOX box{0, 0, 0, static_cast<UINT>(POCB_W), static_cast<UINT>(POCB_H), 1};
-	c.ctx->CopySubresourceRegion(bb, 0, POCB_X, POCB_Y, 0, c.tex, 0, &box);
+	if (c.useShared)
+	{
+		// 共享路径: stex (被 VK 灌满) → backbuffer, 纯 GPU 拷贝; End+Flush 保证 EVENT
+		// 查询连同拷贝真的进了驱动队列 (GetData 带 DONOTFLUSH, 不替我们提交)。
+		c.ctx->CopySubresourceRegion(bb, 0, POCB_X, POCB_Y, 0, c.stex, 0, nullptr);
+		c.ctx->End(c.copyQ);
+		c.ctx->Flush();
+		c.copyQLive = true;
+	}
+	else
+	{
+		c.ctx->UpdateSubresource(c.tex, 0, nullptr, c.mapped, POCB_W * POCB_BPP, 0);
+		D3D11_BOX box{0, 0, 0, static_cast<UINT>(POCB_W), static_cast<UINT>(POCB_H), 1};
+		c.ctx->CopySubresourceRegion(bb, 0, POCB_X, POCB_Y, 0, c.tex, 0, &box);
+	}
 	bb->Release();
 
 	const auto t1 = std::chrono::steady_clock::now();
@@ -1769,17 +2213,22 @@ static void pocbInject(PocbCtx& c, IDXGISwapChain* sc)
 	c.accMs += ms;
 	if (c.frames == 1)
 	{
-		char b[224];
+		char b[256];
 		std::snprintf(b, sizeof(b),
-		    "PoC-B 第 1 帧注入: 渲染+读回+拷贝 %.2f ms → CopySubresourceRegion(%d,%d %dx%d) 已提交",
-		    ms, POCB_X, POCB_Y, POCB_W, POCB_H);
+		    "PoC-B 第 1 帧注入: 渲染+%s %.2f ms (fence %.2f / 闸 %.2f) → CopySubresourceRegion(%d,%d %dx%d) 已提交",
+		    c.useShared ? "共享拷贝" : "读回+上传", ms, c.accFenceMs, c.accGateMs, POCB_X, POCB_Y,
+		    POCB_W, POCB_H);
 		logLine(b);
 	}
 	else if (c.frames % 600 == 0)
 	{
-		char b[160];
-		std::snprintf(b, sizeof(b), "PoC-B 注入 %llu 帧, 累计均值 %.2f ms/帧 (本帧 %.2f ms)",
-		    static_cast<unsigned long long>(c.frames), c.accMs / static_cast<double>(c.frames), ms);
+		char b[256];
+		std::snprintf(b, sizeof(b),
+		    "PoC-B 注入 %llu 帧, 累计均值 %.2f ms/帧 (本帧 %.2f, fence %.2f, 闸 %.2f, %s)",
+		    static_cast<unsigned long long>(c.frames), c.accMs / static_cast<double>(c.frames), ms,
+		    c.accFenceMs / static_cast<double>(c.frames),
+		    c.accGateMs / static_cast<double>(c.frames),
+		    c.useShared ? "共享纹理" : "读回");
 		logLine(b);
 	}
 }
@@ -2673,7 +3122,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 {
 	info->infoVersion = PluginInfo::kInfoVersion;
 	info->name = "PocPresenter";
-	info->version = (0u << 16) | (9u << 8) | 3u; // 0.9.3
+	info->version = (0u << 16) | (10u << 8) | 0u; // 0.10.0
 
 	if (skse->isEditor)  // 只进游戏本体, 不进 Creation Kit
 		return false;
@@ -2684,7 +3133,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.9.3 (PoC-A v1.7 验收通过 + PoC-B v0.1: Vulkan 离屏渲染 → 读回 → 注入 backbuffer) ====");
+	logLine("==== poc-presenter v0.10.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024²) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
