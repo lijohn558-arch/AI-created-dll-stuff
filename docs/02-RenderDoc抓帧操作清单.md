@@ -528,3 +528,158 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_run.ps1 -Script rd
 
 在档产出：`S4{b,c}-extract*.json`、`S4{b,c}-pass7-pixels.json`、`S4{,b,c}-backbuffer.{json,png}`、
 `S4c~S4b-compare.json`（指纹标定）、`S4~S4c-compare.json`（噪声底）。
+
+---
+
+## 14. 阶段1 候选帧判读 —— S4d/S4d2（v0.10.0 共享通路 + 探针升质，2026-10-03）
+
+> 阶段1 的**真·配对门**：同存档同机位连抓两张候选帧，对照 §13 三帧标定按 §13.3 分级收口。
+> 本节新增三工具：`rdc_api_scan.py`（帧内结构化 API 调用扫描——state 类调用非 action、pass5 永远看不见）、
+> `rdc_state_probe.py`（最小 pipe state 对拍）、`rdc_dump_cubefaces.py`（探针面 PNG + md5/统计）、
+> `rdc_chunk_scan.py`（全文件 chunk 普查——视图创建在不在 rdc 里）。
+
+### 14.1 抓帧协议与执行记录
+
+| 帧 | 配置 | 时刻 | 大小 | 备注 |
+|---|---|---|---|---|
+| `captures\S4d.rdc` | v0.10.0 默认态（probe+shared 全开、无 ini） | 10-03 20:59:38 | 792.6 MB（831,106,833 B） | 稳定后 F12 首张 |
+| `captures\S4d2.rdc` | 同上 | 10-03 20:59:55 | 792.0 MB（830,438,313 B） | 隔 17 s 连抓第二张（稳定性核对） |
+
+- **同一游戏进程内连抓**（run2：20:58:20 启动 → 20:59:38/55 抓帧，抓帧间隙注入持续稳态）。
+- 运行日志（run2）关键行全绿：`槽5 已挂 … orig5 … 来自 …\renderdoc.dll` → 升质改写的 desc
+  **经 RenderDoc 序列化**；`512² RGBA16F cube(6面) → 1024² 第 1 次, hr=0`（两 run 各恰 1 次、无第 2 次）；
+  `共享图导入 OK`、`init 完成: 离屏 512x512 (洋红清屏+三角形) → 共享纹理 (NT handle+event闸, 无读回)`；
+  稳态 0.54–0.66 ms/帧（run1 0.40–0.83）；**无降级记录**（grep 0 处）。
+
+### 14.2 提取链（12/12 全绿）
+
+- S4d / S4d2 各 6 步（extract→pass6）全 `errors=0`；pass6 3.6 / 3.7 MB。
+- pass5 尾部注入指纹：`Copy ev46151 / ev47375: 17760(512x512 RGBA8) -> 78(1920x1080)` —— 目标
+  **78 = SwapchainImage**（§13.2 尾验同口径；源 17760 vs S4b 17759 = 跨启动 id 漂移，id-free 必要性再证）。
+
+### 14.3 三道闸门（§13.3 分级判读）
+
+| 比对 | 含义 | 结果 |
+|---|---|---|
+| `-Base S4c -Cand S4d` | 关注入基线 → 候选（唯一配置差 = v0.10.0 两特性） | **pass3 / diff7**（skip0） |
+| `-Base S4b -Cand S4d` | 注入帧 → 注入+升质候选 | **pass4 / diff6**（skip0） |
+| `-Base S4d2 -Cand S4d` | 同配置连抓两张 → 稳定性核对 | **pass9 / diff1**（skip0） |
+
+**闸门1（S4c→S4d）逐条**：
+
+- **A 类硬门槛 3 绿**：`textures.formats` 14=14；`cs.dispatch-profile` 98 次 / 18,786,750 线程、9 组
+  groups 逐值相等；`cs.bytecode-hash` 9=9。
+- **F 类必现 3/3**：`counts.copies` 3→4、`copy.sequence` 尾条 `512²→1920×1080`（基础 3 条逐值同）、
+  `conditional-nodes.copies_total` 3→4。
+- **声明项 ✓**（探针升质提案先声明再跑闸）：`clear.target-profile` base-only
+  `ClearColor 512² R16G16B16A16_FLOAT ×2` ↔ cand-only `ClearColor 1024² R16G16B16A16_FLOAT ×2`。
+- **B 类带内**：draws 3862→3822（−40）、pso 138→137、textures 423→438（+15）、
+  `transparent.draws` 276→267（−9）。
+- **遗留疑点 2 条（同源 → §14.4）**：`clear.bound-profile`（probe 清屏绑定态 `512² D24S8`→`-`）、
+  `pass5.structure`（probe 段签名 rt/dsv `512²+512² D24S8`→全空；`cube512_seg` 2→0 同源）。
+  结构锚里另有 base/cand 各一条 = 2048² R16_TYPELESS 段（§13.3 已知 B 类噪声，两两必 DIFF）。
+
+**闸门2（S4b→S4d）**：PASS 4 = formats / CS×2 / `copy.sequence`（4=4——两注入帧同指纹，F 在同注入对里
+消隐为相等）；diff6 = counts（draws **2846→3822**、pso 126→137、textures **316→438**）、pass5、bound、
+target（声明）、conditional（仅 `cube512_seg`）、transparent（232→267，+35）。判读注意：S4b 是 §13.2
+判过的**会话不稳定帧**（textures 316 显著低于 S4/S4c/S4d 的 418/423/438），差异归 S4b 侧漂移；
+以 S4c 为基线的 textures 差 +15 才是带内口径。
+
+**稳定性闸（S4d2→S4d，pass9/diff1）**：唯一 DIFF = `counts.pass1`（draws 3943→3822 = −121、
+textures 428→438；pso 137=137、clears/copies 全等），B 类 ±1000 带内；**其余 9 锚全绿——含 pipe0 相关的
+`clear.bound-profile`/`pass5.structure` 两侧逐值一致、`clear.target-profile` 两侧同为 1024²×2、
+`copy.sequence` 两侧同指纹 → 异常系统性，非单帧抖动**。
+
+### 14.4 探针段 pipe state 全 0（已归因：升质未同步 depth → OM 非法）
+
+事实链（全部已入档）：
+
+1. **capture 侧调用真实有效**（`S4d-api-scan.txt`，range 0-2700 共 21 条）：ev14、ev35 绑
+   `{view550}+DSV553`，ev399、ev426 绑 `{view548}+DSV553` —— 序列化参数是**非零视图 id**（若视图创建
+   失败，游戏只会持 NULL、绑出 `res:0`）→ 视图对象 capture 侧存在；ev12/ev397
+   `ClearRenderTargetView` 真清 **544（1024² RGBA16F，GetUsage 权威）**、ev13/ev398 清 DSV553→552
+   （512² D24S8——描述符只匹配 RGBA16F cube，depth 未升质 = 预期）。
+2. **回放态解析为 0**（`S4d-state-probe.txt`）：ev118/400/440/900 `RT=[8×res=0] DS=res=0`
+   （seek=True/False 同值）；同事件段 S4b = `RT=544 slice=5/0, DS=552` 正常；两侧 viewport 均 512²。
+3. **无解绑可能**：ev35→ev118 之间 api-scan 无任何 `OMSetRenderTargets*`/`ClearState`（过滤含
+   `OMSetRenderTargetsAndUnorderedAccessViews` 全变体）→ RT 槽不可能被后续调用清掉；且 ev400 的
+   DS=0 发生在 ev399 **重新绑定 DSV553 之后** → 是绑定动作本身没解析出来，不是解绑。
+4. S4d2 同现象（§14.3 稳定性闸逐值一致）= 系统性。
+5. 视图均帧外创建（帧内 0 条 Create*View；`main.cpp` 注入侧无 ClearState/OMSetRenderTargets，grep 实证）。
+6. **归因已落定（2026-10-03 22:46–22:51，`GetDebugMessages` 回放诊断 + 双场景面导出对照）**：
+
+   > **根因：升质 hook 只升了 cube、没升配对 depth → `RT 1024² + DSV 512²` 尺寸不匹配 →
+   > OM 绑定判非法（Invalid output merger）→ 绑定作废（pipe state=0）→ probe draw 零写入。**
+
+   - **回放诊断消息**（`GetDebugMessages()` 无参，8 条，见 `S4d-cubefaces.json` api_probe）：
+     `MessageSeverity.High / State_Setting / IncorrectAPIUse` = `"Invalid output merger -
+     Depth target is different size or MS count to render target(s)"`，命中事件恰为
+     **ev14/ev35/ev118/ev399/ev426/ev440** = probe 段全部绑定点 + 首 draw，与 state-probe 全 0
+     的事件集逐一对应；**S4b 同口径 0 条**（512²=512² 匹配）。
+   - **面内容对照**（`S4{b,d}-cubefaces.json` + 12 张面 PNG，`rdc_dump_cubefaces.py`）：
+
+     | | S4b（基线 512²） | S4d（升质 1024²） |
+     |---|---|---|
+     | 面尺寸 | 512×512 | **1024×1024**（分辨率图证） |
+     | 6 面 md5 | 互不相同（slice 参数有效 ✓） | 全同 `2c14cb93dc77…` |
+     | uniq_rgb8 | 80–118（实渲内容） | **3**（纯清屏色，半浮点 min==max 精确统一） |
+     | head16 | 每面各异 | 全面 `(0.196,0.441,0.598,0)` = 清屏色 |
+     | PNG 大小 | 158–366 KB | 5.3 KB（近纯色） |
+
+   - **机制链自洽**：清屏走 `ClearRenderTargetView` 独立通路（不经 OM）→ 6 面 = 清屏色存活；
+     draw 走 OM → 绑定作废 → 写入全灭。「清屏在、内容无」与 pipe=0、pass5 签名全空三处互证。
+   - **归因判定 = 假设 B（升质缺陷）为主**；取证口径部分成立：非法绑定是**游戏在捕获时真实发出的
+     调用序列**（api-scan 非零视图 id 已证视图创建成功）——升质后 D3D11 语义已非法，回放只是
+     把它显形。
+   - **诚实边界（新增第 5 条）**：真机 release 运行时对该非法 OM 绑定是「照渲（UB）」还是「同
+     回放作废」未定——抓帧不存捕获侧 GPU 内存，无法直读；水面视觉对照（S4b 对照点
+     `(15,22,24)/(16,36,39)` vs S4d `(18,27,30)/(9,34,41)` 同量级、用户报告差异细微）与
+     「探针段产出只影响反射、1080p 下细微」相容，但不能定死。v0.11 修复后重抓可消解。
+
+### 14.5 probe 段 viewport 未随升质适配（capture 侧事实，独立于 pipe0）
+
+- `S4d-api-scan.txt`：probe 段全部 `RSSetViewports … 512.0×512.0` 字面常量
+  （ev17/38/313/402/429/2504/2522；ev2648/2667 的 256² 是阴影段），与 S4b/S4c 同值；pass5 逐 draw
+  vp=512² → 游戏用**自身缓存值**，`main.cpp` 注释「viewport/RTV 从 GetDesc 自动适配」**实测不成立**。
+- capture 侧后果：512² viewport（原点 0,0）渲进 1024² face = **每面仅左上 1/4 有探针内容**、其余 =
+  清屏色；SRV 按全 1024² 归一化采样 → UV 错配（0.5 内双倍缩放、0.5 外清屏色）。
+- 与 §14.4 的关系：**缺陷②**（本条）叠加在**缺陷①**（OM 非法）之上——即使 depth 同步升质修复了
+  绑定，viewport 不适配仍只渲 1/4 面；两条都修，升质才算成立。
+- 图证：`S4d-cube-*-face*.png`（1024²）对照 `S4b-cube-*-face*.png`（512²）——分辨率差与内容差
+  双图证已入档。
+
+### 14.6 过闸判定（2026-10-03 定稿）
+
+**证据闭合链**：提取 12/12 → 三闸判读 → api-scan/state-probe 定位 → 双场景面导出 +
+`GetDebugMessages` 归因 → pass7/backbuffer 四路互证（`S4d/S4d2-pass7` 均 **SENTINEL_FOUND**：
+洋红 4/4、三角 `(86,217,85)`、对照点干净、swapchain `ResourceId::78`）。
+
+按 §13.3 分级收口：
+
+- **A 类硬门槛 3/3 绿**：formats 14=14、CS dispatch 全等、CS 字节码 9=9；
+- **F 类必现 3/3**：copies 3→4、tail `512²→1920×1080`、copies_total 3→4；
+- **声明项 ✓**：`clear.target-profile` probe `512²→1024² RGBA16F ×2`；
+- **B 类带内**：三闸的 draws/pso/textures/transparent 全部在带内；
+- **遗留项全部归因、无不可解释项**：`pass5.structure` / `clear.bound-profile` /
+  `cube512_seg 2→0` 三处 DIFF = 同一根因（缺陷①）；2048² R16 段 = §13.3 已知 B 类噪声。
+
+**特性分级结论**：
+
+| 特性 | 判定 | 依据 |
+|---|---|---|
+| ① 共享纹理通路（NT handle+fence） | **过闸** | A 全绿 + F 3/3 + 双帧哨兵 SENTINEL_FOUND + 稳态 0.40–0.83 ms/帧 + 无降级 |
+| ② 探针升质 512²→1024² | **未过闸（机制缺陷）** | 缺陷①：配对 depth 未升质 → OM 非法（8 条 High 诊断、6 面内容全灭）；缺陷②：viewport 恒 512² → 只渲 1/4 面 |
+
+- **阶段1 判定：主体过闸**——共享通路（阶段1 核心交付）实证成立；探针升质单列缺陷清单，
+  可按 `probe=0` 逃生门降级，不阻塞主线。
+- **v0.11 修复清单（待回码）**：
+  1. hook 同步升质配对 depth（在 CreateTexture2D 过滤逻辑加 D24S8 判据，与 cube 同批升 1024²）；
+  2. viewport 适配——先查 `main.cpp` 升质是否原地改写 `*pDesc`（若游戏用自身常量 512 则需
+     另拦 RSSetViewports 或重新评估升质方案）；
+  3. 修完重抓 S4e/S4e2 双帧 → 同三闸 + 面导出重过。
+- **下一步不被阻塞**：SSR 第二步（或 2048² 探针对照 demo）可先行决策（docs/03 §6.1）。
+
+在档产出：`S4d*-extract*.json`（全套）、`S4c~S4d-compare.json`、`S4b~S4d-compare.json`、
+`S4d2~S4d-compare.json`、`S4d-api-scan.txt`、`S4{b,d}-state-probe.txt`、`S4{b,d}-cubefaces.{json,log}`、
+`S4d-cube-*-face*.png`（6 张 1024²）、`S4b-cube-*-face*.png`（6 张 512² 对照）、
+`S4{d,d2}-pass7-pixels.json`、`S4{d,d2}-backbuffer.{json,png}`。

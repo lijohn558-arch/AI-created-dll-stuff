@@ -1,0 +1,11 @@
+# state-probe scene=S4d events=[118, 400, 440, 900]
+== S4d (S4d.rdc) ==
+ev118 seek=True              RT=[res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0] DS=res=ResourceId::0 vp=512x512
+ev118 seek=False             RT=[res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0] DS=res=ResourceId::0 vp=512x512
+ev400 seek=True              RT=[res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0] DS=res=ResourceId::0 vp=512x512
+ev400 seek=False             RT=[res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0] DS=res=ResourceId::0 vp=512x512
+ev440 seek=True              RT=[res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0] DS=res=ResourceId::0 vp=512x512
+ev440 seek=False             RT=[res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0] DS=res=ResourceId::0 vp=512x512
+ev900 seek=True              RT=[res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0] DS=res=ResourceId::0 vp=512x512
+ev900 seek=False             RT=[res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0, res=ResourceId::0 slice=0] DS=res=ResourceId::0 vp=512x512
+elapsed 2.4s errors=0

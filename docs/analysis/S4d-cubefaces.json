@@ -1,0 +1,385 @@
+{
+ "rdc": "C:\\Users\\joker\\skyrim-vulkan\\captures\\S4d.rdc",
+ "scene": "S4d",
+ "full": "S4d",
+ "errors": [],
+ "api_probe": {
+  "Subresource_doc": "\n\nSubresource()\nSubresource(other: Subresource)\nSubresource(mip: int = 0, slice: int = 0, sample: int = 0)\n\nSpecifies a subresource within a texture.\n\n",
+  "Subresource_inst_dir": [
+   "acquire",
+   "append",
+   "disown",
+   "mip",
+   "next",
+   "own",
+   "sample",
+   "slice",
+   "this",
+   "thisown"
+  ],
+  "ctrl_debug_api": [
+   "ContinueDebug",
+   "DebugMeshThread",
+   "DebugPixel",
+   "DebugThread",
+   "DebugVertex",
+   "GetDebugMessages",
+   "ReloadShaderDebugInformation"
+  ],
+  "GetDebugMessages_args": "()",
+  "debug_messages_n": 8,
+  "debug_messages": [
+   "ev14      MessageSeverity.High MessageCategory.State_Setting MessageSource.IncorrectAPIUse Invalid output merger - Depth target is different size or MS count to render target(s)",
+   "ev35      MessageSeverity.High MessageCategory.State_Setting MessageSource.IncorrectAPIUse Invalid output merger - Depth target is different size or MS count to render target(s)",
+   "ev118     MessageSeverity.High MessageCategory.State_Setting MessageSource.IncorrectAPIUse Invalid output merger - Depth target is different size or MS count to render target(s)",
+   "ev118     MessageSeverity.High MessageCategory.State_Setting MessageSource.IncorrectAPIUse Invalid output merger - Depth target is different size or MS count to render target(s)",
+   "ev399     MessageSeverity.High MessageCategory.State_Setting MessageSource.IncorrectAPIUse Invalid output merger - Depth target is different size or MS count to render target(s)",
+   "ev426     MessageSeverity.High MessageCategory.State_Setting MessageSource.IncorrectAPIUse Invalid output merger - Depth target is different size or MS count to render target(s)",
+   "ev440     MessageSeverity.High MessageCategory.State_Setting MessageSource.IncorrectAPIUse Invalid output merger - Depth target is different size or MS count to render target(s)",
+   "ev440     MessageSeverity.High MessageCategory.State_Setting MessageSource.IncorrectAPIUse Invalid output merger - Depth target is different size or MS count to render target(s)"
+  ]
+ },
+ "candidates": [
+  {
+   "id": "ResourceId::544",
+   "w": 1024,
+   "h": 1024,
+   "arraySize": 6,
+   "mips": 1,
+   "type": "TextureType.TextureCubeArray",
+   "format": "R16G16B16A16_FLOAT"
+  }
+ ],
+ "fetch_notes": [
+  "ResourceId::544/6: mip0_sliceF_sample0 lens=[8388608, 8388608, 8388608, 8388608, 8388608, 8388608] expect=8388608 md5s=['2c14cb93dc77', '2c14cb93dc77', '2c14cb93dc77', '2c14cb93dc77', '2c14cb93dc77', '2c14cb93dc77'] diverse=False",
+  "ResourceId::544/6:   face0 head16=46320f37c838000046320f37c8380000",
+  "ResourceId::544/6:   face1 head16=46320f37c838000046320f37c8380000",
+  "ResourceId::544/6:   face2 head16=46320f37c838000046320f37c8380000",
+  "ResourceId::544/6:   face3 head16=46320f37c838000046320f37c8380000",
+  "ResourceId::544/6:   face4 head16=46320f37c838000046320f37c8380000",
+  "ResourceId::544/6:   face5 head16=46320f37c838000046320f37c8380000",
+  "ResourceId::544/6: mip0_sliceF_sample0: NOT-diverse (faces byte-identical) -> \u56de\u653e\u5185\u5bb9\u771f\u4e00\u81f4\u5047\u8bbe (pipe0 \u751f\u6548\u65f6\u6e05\u5c4f/\u7ed8\u5236\u5168\u5931\u6548, \u9762\u505c\u7559\u521d\u59cb\u503c) \u6216 slice \u672a\u751f\u6548 \u2014\u2014 \u7528 S4b \u5bf9\u7167\u533a\u5206"
+ ],
+ "face_stats": [
+  {
+   "resource": "ResourceId::544",
+   "face": 0,
+   "w": 1024,
+   "h": 1024,
+   "order": "mip0_sliceF_sample0",
+   "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S4d-cube-ResourceId544-face0.png",
+   "png_bytes": 5338,
+   "raw_md5": "2c14cb93dc77422ed97080c3723e9765",
+   "half_min": [
+    12870,
+    14095,
+    14536
+   ],
+   "half_max": [
+    12870,
+    14095,
+    14536
+   ],
+   "mean_float": [
+    0.1639,
+    0.3061,
+    0.3741
+   ],
+   "uniq_rgb8_sampled": 3
+  },
+  {
+   "resource": "ResourceId::544",
+   "face": 1,
+   "w": 1024,
+   "h": 1024,
+   "order": "mip0_sliceF_sample0",
+   "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S4d-cube-ResourceId544-face1.png",
+   "png_bytes": 5338,
+   "raw_md5": "2c14cb93dc77422ed97080c3723e9765",
+   "half_min": [
+    12870,
+    14095,
+    14536
+   ],
+   "half_max": [
+    12870,
+    14095,
+    14536
+   ],
+   "mean_float": [
+    0.1639,
+    0.3061,
+    0.3741
+   ],
+   "uniq_rgb8_sampled": 3
+  },
+  {
+   "resource": "ResourceId::544",
+   "face": 2,
+   "w": 1024,
+   "h": 1024,
+   "order": "mip0_sliceF_sample0",
+   "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S4d-cube-ResourceId544-face2.png",
+   "png_bytes": 5338,
+   "raw_md5": "2c14cb93dc77422ed97080c3723e9765",
+   "half_min": [
+    12870,
+    14095,
+    14536
+   ],
+   "half_max": [
+    12870,
+    14095,
+    14536
+   ],
+   "mean_float": [
+    0.1639,
+    0.3061,
+    0.3741
+   ],
+   "uniq_rgb8_sampled": 3
+  },
+  {
+   "resource": "ResourceId::544",
+   "face": 3,
+   "w": 1024,
+   "h": 1024,
+   "order": "mip0_sliceF_sample0",
+   "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S4d-cube-ResourceId544-face3.png",
+   "png_bytes": 5338,
+   "raw_md5": "2c14cb93dc77422ed97080c3723e9765",
+   "half_min": [
+    12870,
+    14095,
+    14536
+   ],
+   "half_max": [
+    12870,
+    14095,
+    14536
+   ],
+   "mean_float": [
+    0.1639,
+    0.3061,
+    0.3741
+   ],
+   "uniq_rgb8_sampled": 3
+  },
+  {
+   "resource": "ResourceId::544",
+   "face": 4,
+   "w": 1024,
+   "h": 1024,
+   "order": "mip0_sliceF_sample0",
+   "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S4d-cube-ResourceId544-face4.png",
+   "png_bytes": 5338,
+   "raw_md5": "2c14cb93dc77422ed97080c3723e9765",
+   "half_min": [
+    12870,
+    14095,
+    14536
+   ],
+   "half_max": [
+    12870,
+    14095,
+    14536
+   ],
+   "mean_float": [
+    0.1639,
+    0.3061,
+    0.3741
+   ],
+   "uniq_rgb8_sampled": 3
+  },
+  {
+   "resource": "ResourceId::544",
+   "face": 5,
+   "w": 1024,
+   "h": 1024,
+   "order": "mip0_sliceF_sample0",
+   "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S4d-cube-ResourceId544-face5.png",
+   "png_bytes": 5338,
+   "raw_md5": "2c14cb93dc77422ed97080c3723e9765",
+   "half_min": [
+    12870,
+    14095,
+    14536
+   ],
+   "half_max": [
+    12870,
+    14095,
+    14536
+   ],
+   "mean_float": [
+    0.1639,
+    0.3061,
+    0.3741
+   ],
+   "uniq_rgb8_sampled": 3
+  }
+ ],
+ "last_event": 46154,
+ "tex_samples": [
+  {
+   "id": "ResourceId::17646",
+   "w": 4096,
+   "h": 1,
+   "fmt": "R32_FLOAT",
+   "type": "TextureType.Texture1D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::17648",
+   "w": 4096,
+   "h": 1,
+   "fmt": "R32_FLOAT",
+   "type": "TextureType.Texture1D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::78",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R8G8B8A8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::364",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R16G16B16A16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::367",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R16G16B16A16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::369",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R8G8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::372",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R11G11B10_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::379",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R16G16B16A16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::382",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R8G8B8A8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::388",
+   "w": 960,
+   "h": 540,
+   "fmt": "R8G8B8A8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::392",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R16G16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::398",
+   "w": 480,
+   "h": 270,
+   "fmt": "R16G16B16A16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::402",
+   "w": 480,
+   "h": 270,
+   "fmt": "R8G8B8A8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::406",
+   "w": 480,
+   "h": 270,
+   "fmt": "R16G16B16A16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::409",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R8G8B8A8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::433",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R8G8B8A8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::439",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::443",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::447",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::451",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R8G8B8A8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  }
+ ],
+ "elapsed_sec": 19.6
+}

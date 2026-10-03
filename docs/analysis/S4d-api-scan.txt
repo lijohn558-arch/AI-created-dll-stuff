@@ -1,0 +1,25 @@
+# api-scan scene=S4d range=0-2700 filter=OMSetRenderTargets,CreateRenderTargetView,CreateDepthStencilView,CreateShaderResourceView,CreateTexture2D,ClearState,ClearRenderTargetView,ClearDepthStencilView,CopySubresourceRegion,UpdateSubresource,RSSetViewports
+# mapped_events=46154
+# matched=21
+# elapsed_sec=3.5
+ev1       ID3D11DeviceContext::ClearState  Context=res:ResourceId::50
+ev12      ID3D11DeviceContext::ClearRenderTargetView  Context=res:ResourceId::50 pRenderTargetView=res:ResourceId::550 ColorRGBA={0.19607843458652496,0.44117647409439087,0.5980392098426819,0.0}
+ev13      ID3D11DeviceContext::ClearDepthStencilView  Context=res:ResourceId::50 pDepthStencilView=res:ResourceId::553 ClearFlags=3(D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL) Depth=1.0 Stencil=0
+ev14      ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::550} pDepthStencilView=res:ResourceId::553
+ev17      ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=512.0,Height=512.0,MinDepth=0.0,MaxDepth=1.0}}
+ev35      ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::550} pDepthStencilView=res:ResourceId::553
+ev38      ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=512.0,Height=512.0,MinDepth=0.0,MaxDepth=1.0}}
+ev313     ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=512.0,Height=512.0,MinDepth=0.0,MaxDepth=1.0}}
+ev397     ID3D11DeviceContext::ClearRenderTargetView  Context=res:ResourceId::50 pRenderTargetView=res:ResourceId::548 ColorRGBA={0.19607843458652496,0.44117647409439087,0.5980392098426819,0.0}
+ev398     ID3D11DeviceContext::ClearDepthStencilView  Context=res:ResourceId::50 pDepthStencilView=res:ResourceId::553 ClearFlags=3(D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL) Depth=1.0 Stencil=0
+ev399     ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::548} pDepthStencilView=res:ResourceId::553
+ev402     ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=512.0,Height=512.0,MinDepth=0.0,MaxDepth=1.0}}
+ev426     ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::548} pDepthStencilView=res:ResourceId::553
+ev429     ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=512.0,Height=512.0,MinDepth=0.0,MaxDepth=1.0}}
+ev2504    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=512.0,Height=512.0,MinDepth=0.0,MaxDepth=1.0}}
+ev2522    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=512.0,Height=512.0,MinDepth=0.0,MaxDepth=1.0}}
+ev2644    ID3D11DeviceContext::ClearDepthStencilView  Context=res:ResourceId::50 pDepthStencilView=res:ResourceId::521 ClearFlags=1(D3D11_CLEAR_DEPTH) Depth=1.0 Stencil=0
+ev2645    ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::521
+ev2648    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=256.0,Height=256.0,MinDepth=0.0,MaxDepth=1.0}}
+ev2664    ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::521
+ev2667    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=256.0,Height=256.0,MinDepth=0.0,MaxDepth=1.0}}
