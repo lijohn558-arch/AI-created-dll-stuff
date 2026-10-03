@@ -72,9 +72,10 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
 本步**不碰 Vulkan、不改变画面**，只产出日志。
 
-> **状态（2026-10-03 14:01）：v1.7 双环境闭环完成，PoC-A 两局验收均通过** —— 带 renderdoc 局
-> （7201 次 / 60 FPS，判读 §7.6）+ 无 renderdoc/GFE 局（★ 中、6001 次 / 60 FPS，判读 §7.7）。
-> 风险项 #1 第一环「Present 可拦」双环境实证闭合 → **下一步进 PoC-B**。
+> **状态（2026-10-03 14:49）：PoC-A v1.7 双环境闭环完成；PoC-B v0.1（插件 0.9.0）已编译通过，像素探针已就绪**
+> —— 带 renderdoc 局（7201 次 / 60 FPS，判读 §7.6）+ 无 renderdoc/GFE 局（★ 中、6001 次 / 60 FPS，判读 §7.7）
+> 使风险项 #1 第一环「Present 可拦」双环境实证闭合；PoC-B 问的是第二环「**写**」（Vulkan 渲染的像素能否
+> 落进游戏最终呈现的那一帧）。
 > 唯一未证项：方案B 函数层的独立计数（vtable 层恒先命中 + TLS 去重，见 §7.7 末）。
 
 **机制（v1.7，七通道）**：
@@ -216,5 +217,21 @@ push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从
    本体/原值模块、★工厂拦截是否出现、有无「被改写」记录，以及 `告警:` 行自带的三项快照
    （游戏交换链是否取得 / 方案B detour 是否已装 / 登记表规模），贴日志迭代（多通道自证价值）
 
-验收通过后进入 **PoC-B**：在 Present 里创建 Vulkan instance/swapchain → 游戏窗口出
-清屏/三角形 → F12 抓这帧 → `rdc_run` 提取链 → `rdc_compare -Base S4 -Cand <候选>` 首次候选比对。
+验收通过后进入 **PoC-B**：在 Present 里创建 Vulkan instance → 离屏渲 512×512（洋红清屏 +
+三角形）→ 读回 → `CopySubresourceRegion` 拷进 backbuffer `(16,16)` → 调原 Present。
+**刻意不开 Vulkan swapchain**（不与游戏 / RenderDoc / GFE 争 HWND 所有权，且像素落在 D3D11
+帧内 ⇒ F12 抓帧必然记录这次拷贝——配对 harness 只认 D3D11 帧）。
+
+**PoC-B 三步验收（v0.9.0 / PoC-B v0.1）**：
+
+1. **游戏内目视**：左上角出现 512×512 洋红块 + 三角形；日志有
+   `PoC-B init 完成: 离屏 512x512 ... CopySubresourceRegion 到 backbuffer (16,16)`、
+   `PoC-B 第 1 帧注入: 渲染+读回+拷贝 x.xx ms`，此后每 600 帧一行均值。
+2. **机器判定（像素）**：F12 抓帧 → 拷成 `captures\S4b.rdc` →
+   `powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_run.ps1 -Script rdc_pass7_pixels.py -Scene S4b`
+   → 期望 `verdict=SENTINEL_FOUND`（探针定义 `docs/02` §12；基线对照已跑通：`SENTINEL_ABSENT`、errors=0）。
+3. **结构配对**：`rdc_run.ps1 -Script rdc_extract.py -Scene S4b` 等跑完 →
+   `powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_compare.ps1 -Base S4 -Cand S4b`
+   → 十条结构锚点（预期 `counts.pass1` 的 Copy 因注入 +1 而 DIFF，其余与基线同构）。
+
+失败即关注入（日志 `PoC-B 失败: ... 已关闭注入`），逃生门 `<pluginDir>\poc-presenter.ini` 写 `vulkan=0`。

@@ -1,0 +1,115 @@
+{
+ "rdc": "C:\\Users\\joker\\skyrim-vulkan\\captures\\S4-water.rdc",
+ "scene": "S4",
+ "full": "S4-water",
+ "errors": [],
+ "probes": [
+  {
+   "label": "rect-corner-1",
+   "x": 22,
+   "y": 22,
+   "rgb": [
+    53,
+    78,
+    78
+   ],
+   "expect": "magenta",
+   "ok": false
+  },
+  {
+   "label": "rect-corner-2",
+   "x": 521,
+   "y": 22,
+   "rgb": [
+    57,
+    78,
+    77
+   ],
+   "expect": "magenta",
+   "ok": false
+  },
+  {
+   "label": "rect-corner-3",
+   "x": 22,
+   "y": 521,
+   "rgb": [
+    174,
+    201,
+    190
+   ],
+   "expect": "magenta",
+   "ok": false
+  },
+  {
+   "label": "rect-corner-4",
+   "x": 521,
+   "y": 521,
+   "rgb": [
+    24,
+    36,
+    40
+   ],
+   "expect": "magenta",
+   "ok": false
+  },
+  {
+   "label": "triangle-centroid",
+   "x": 272,
+   "y": 313,
+   "rgb": [
+    41,
+    61,
+    61
+   ],
+   "expect": "green(~85,217,85)",
+   "ok": false
+  },
+  {
+   "label": "control-outside-1",
+   "x": 1056,
+   "y": 540,
+   "rgb": [
+    16,
+    25,
+    26
+   ],
+   "expect": "not-magenta",
+   "ok": true
+  },
+  {
+   "label": "control-outside-2",
+   "x": 1900,
+   "y": 1060,
+   "rgb": [
+    41,
+    61,
+    65
+   ],
+   "expect": "not-magenta",
+   "ok": true
+  }
+ ],
+ "verdict": "SENTINEL_ABSENT",
+ "backbuffer": {
+  "resourceId": "ResourceId::35",
+  "name": "",
+  "width": 1920,
+  "height": 1080,
+  "format": "R8G8B8A8_UNORM",
+  "mips": 1,
+  "arraySize": 1,
+  "msSamp": 1,
+  "identified_by": "SwapchainImage"
+ },
+ "data_bytes": 8294400,
+ "row_pitch": 7680,
+ "bytes_per_pixel": 4.0,
+ "corners_magenta": "0/4",
+ "controls_clean": true,
+ "triangle_rgb": [
+  41,
+  61,
+  61
+ ],
+ "elapsed_sec": 2.0
+}
