@@ -292,3 +292,40 @@ vtable）。设备/工厂均创建成功，仅交换链 desc 被拒（`DXGI_ERRO
 
 v1.6 的 5B `E9` 入口改写、CHAIN 共存、TLS 双层不双计机制不变；
 `tools/dxbytes.ps1` 同步新 RVA/字节（旧 0x2E460/0x4EE60 保留为历史条目供解读老日志）。
+
+### 7.6 v1.7 实测判读：PoC-A 验收通过（2026-10-03 13:44，带 renderdoc 局）
+
+**环境**：游戏 1.5.97.0 / SKSE 2.0.20，`renderdoc.dll` 已加载（`D:\...\Data\Renderdoc\`），
+1920x1080 `Skyrim Special Edition`；**13:44:32 触发（安装后 6s），2 分钟 7201 次 Present，
+近600帧恒 60.0 FPS，画面完全正常**；全程无 `告警:` 行、无槽位「被改写」记录。
+
+**验收链逐行对上（`poc-presenter.log` 13:44:25~13:44:33）**：
+
+| # | 日志行 | 判读 |
+|---|---|---|
+| 1 | `工厂口径0..4: OK` | 五口径工厂对象取到 |
+| 2 | `dummy1: slot8 原值=…BE5BD670 来自 renderdoc.dll` / `slot22 原值=…BE5BD700` | v1.7 读的**真槽**（8=Present、22=Present1），原值落在 renderdoc → 挂 |
+| 3 | `登记完成: 交换链 vtable 1 个, 工厂 vtable 1 个 (含创建方法挂钩)` | 槽 10/15/16/24 原值全读到并挂上（renderdoc 包装类工厂） |
+| 4 | **`阳性确认 (dummy1/dummy2 安装完成): vtbl[8]=…poc-presenter A610 ==我们的Present钩子 ✓`**、`vtbl[22]=…A270 ==我们的Present1钩子 ✓` | **槽位修对的铁证**（v1.0~v1.6 只验证过 vtbl[4]=SetPrivateDataInterface） |
+| 5 | `方案A(安装期解包): 真对象=… (经 +0x28) vtbl=dxgi+0xCD688 \| 真vtbl[8]=dxgi+0x19000 \| 真vtbl[22]=dxgi+0x194A0` | **方案A 完全成立**：与 `dxbytes.ps1` 新 RVA、本地 `dxdump3.cs` 实测（BLT/FLIP 同 vtable = `dxgi+0xCD688`）**三方逐位吻合** |
+| 6 | `方案B Present 候选 1/2: 活交换链vtbl[8] (renderdoc)` → `入口字节与预期不符…保守跳过`（前 16B 留档 `48 89 5C 24 08…`）→ `候选 2/2: 方案A真vtbl[8]` → **`RAW 已装 target=dxgi+0x19000 窃取=14B (入口 5B E9)`** | 字节守卫按设计工作：renderdoc 存根是 32B 标准序言 ≠ 14B 守卫 → 跳过留档，改用方案A 给的真靶；Present1 同理装于 `dxgi+0x194A0` |
+| 7 | **`第 1 次 Present (经 Present): vtable=0x7FFDBF0B7018 来自 renderdoc.dll \| 1920x1080 … title="Skyrim Special Edition"`** | **PoC-A 验收行**——游戏交换链的 vtable 与 dummy1 同类 ⇒ 槽 8 直接命中 |
+
+**三个「没出现」的行同样有价值**：
+
+- **无 `★ 工厂拦截`** ⇒ 游戏交换链没走我方五口径工厂创建（仍由 renderdoc 内部路径创建），
+  但其 vtable 与 dummy1 **同类** → vtable 层直接命中 ⇒ 印证 §7.5 结论「**★ 中否不影响计数**」；
+  连带 `探针A` / `g_gameSc` / `阳性确认(★游戏…)` 未触发（不阻断验收）。
+- **无 `告警:` 行** ⇒ 6s 即触发，120s 兜底未走到。
+- **第 1 次 Present 的来源是 `经 Present`（vtable 层）而非 `经 函数detour`** ⇒ 本局 vtable 层
+  先命中、TLS 去重把方案B 层的计数吃掉 ⇒ **方案B 层是否独立有效本局无法证明**（它是
+  renderdoc 未在场 / GFE 绕行时的兜底），属已知而非缺陷。
+
+**待复跑（无 renderdoc / GFE 在场局）的预期**：游戏交换链为真 dxgi 类 ⇒ `★` 应中、
+`方案A` 打 `vtable 不在 renderdoc 包装类 — 跳过`、方案B 候选 1 直接是 `dxgi+0x19000`
+（14B 守卫匹配即 RAW 装上）；两局合起来构成双环境闭环。
+
+**结论**：最高风险项 #1「渲染管线可否 Hook」第一环——**Present 可拦**——在带 renderdoc
+环境实证成立（此前 v1.0~v1.6 的 0 计数确系槽位错挂，非机制不可行）。下一步进 **PoC-B**：
+在 Present 内创建 Vulkan instance/swapchain → 游戏窗口出清屏/三角形 → F12 抓帧 →
+`rdc_run` 提取链 → `rdc_compare -Base S4 -Cand <候选>`。

@@ -72,6 +72,10 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
 本步**不碰 Vulkan、不改变画面**，只产出日志。
 
+> **状态（2026-10-03 13:44）：v1.7 带 renderdoc 局验收通过**（`第 1 次 Present` 已出现，
+> 计数 7201 / 60 FPS 稳定）→ 待无 renderdoc（GFE 在场）局复跑做双环境闭环 → 进 PoC-B。
+> 判读全档见 `docs/01` §7.6。
+
 **机制（v1.7，七通道）**：
 1. **同步安装（v1.2 主修正）**——钩子在 `SKSEPlugin_Load` 内同步装完（等模块 ≤5s、等
    renderdoc ≤2s 兜加载序）；SKSE 主线程加载插件，Load 不返回游戏就无法继续初始化，
@@ -149,6 +153,16 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 > （renderdoc 转发桩 `[obj+0x28]` 存真对象指针）→ ③ dxgi RVA 兜底，每候选过 14B 字节守卫；
 > 旧「交叉验证行」删除。**阳性确认**：安装完成与 ★ 处打印对象 vptr + `vtbl[8]` 是否等于我们的钩子
 > （修槽前只证明过「挂了 SetPrivateDataInterface」= 假阳性根源）；TLS 双层不双计与 CHAIN 不变。
+> **v1.7 实测（2026-10-03 13:44，带 renderdoc 局）= PoC-A 验收通过**：安装后 6s 出
+> `Present 已开始触发 — PoC-A 验收通过`，2 分钟 7201 次、近600帧恒 60.0 FPS 画面正常，
+> 无告警/无被改写；阳性确认 `vtbl[8]/vtbl[22] ==我们的钩子 ✓`（槽位修对铁证）；方案A
+> `[obj+0x28]` 解包得真对象 `vtbl=dxgi+0xCD688`、`真vtbl[8]=dxgi+0x19000`、`真vtbl[22]=dxgi+0x194A0`
+> ——与 `dxbytes.ps1`、`dxdump3.cs` 三方逐位吻合；方案B 候选1（活交换链）读到 renderdoc
+> 32B 序言存根 → 字节不符保守跳过留档 → 候选2（方案A真vtbl）`RAW 已装 窃取14B`；
+> **第 1 次 Present (经 Present): vtable=renderdoc 包装类 … title="Skyrim Special Edition"**。
+> 本局**无 ★**（游戏交换链未走我方工厂）但 vtable 同类直接命中 ⇒ 印证「★ 中否不影响计数」；
+> 因 vtable 层先命中 + TLS 去重，**方案B 层的独立有效性本局未证明**（待无 renderdoc/GFE 局
+> 复跑闭环：预期 ★ 中、方案A 跳过、方案B 候选1 即 dxgi+0x19000）。详见 docs/01 §7.6。
 
 ### 构建
 push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从 **Actions → Artifacts**
