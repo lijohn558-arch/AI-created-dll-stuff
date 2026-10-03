@@ -161,6 +161,18 @@
  *   验收: 游戏画面左上角出现 512×512 洋红块 + 三角形, 且 F12 抓的帧里能查到该像素
  *     (提取链: tools\rdc_pass7_pixels.py 读 backbuffer 探针点)。
  *
+ * ---- v0.9.1 (2026-10-03): 修实例级函数表误查设备级 + 空指针按名落日志 ----
+ *   首局根因: v0.9.0 把设备级 vkGetDeviceQueue 混进 vkGetInstanceProcAddr 之后的必查项
+ *   (规范允许对设备级返回 NULL, renderdoc 包装层更倾向如此) → 卡死在"实例级函数表不完整"。
+ *   修法: 拆 POCB_INST_REQ_FNS 必查 7 项 (全实例级, properties2 降可选), 实例级/设备级都用
+ *   X-macro 全表校验, 空指针按函数名进日志。次局 4200 帧零失败, 均值 6.47 ms/帧。
+ *
+ * ---- v0.9.2 (2026-10-03): ini 开关 vtable=0 → 方案B 独立计数 ----
+ *   遗留(docs/01 §7.7 末): vtable 层恒先命中 + TLS 去重, 方案B 函数层的计数从未被单独观察。
+ *   新增 iniFlag("vtable"): 写 0 → 不挂交换链槽 8/22、看门狗不"打回"、阳性确认改口径、
+ *   登记行明示未挂 ⇒ 游戏 Present 只能从方案B 的函数级 detour 进来, 日志应出现
+ *   "第 1 次 Present (经 函数detour)"。可与 vulkan=0 同用 (一次跑局清两条遗留)。
+ *
  * 构建: GitHub Actions (build.yml job "poc-presenter"), 本地不编译
  * 安装: poc-presenter.dll 放入 <游戏>/Data/SKSE/Plugins/
  */
@@ -405,6 +417,39 @@ void patchSlotLocked(void** slot, void* target)
 
 // ---------- 交换链 vtable 登记 + 挂 Present / Present1 ----------
 
+// v0.9.2 实验开关 —— 同一份 <pluginDir>\poc-presenter.ini (与 pocbEnabled 共用文件):
+//   vulkan=0 → 关 PoC-B 注入 (见 pocbEnabled)
+//   vtable=0 → 停用 vtable 层: 不挂交换链槽 8/22, 看门狗也不打回 ⇒ 游戏 Present 只能
+//              从方案B 的函数级 detour 进来 —— 用于给方案B 做"独立计数"
+//              (docs/01 §7.7 末遗留项: vtable 层恒先命中, TLS 去重吃掉函数层计数)
+static bool g_vtableLayer = true;
+
+static bool iniFlag(const char* key, bool def)
+{
+	std::ifstream f(pluginDir() + "\\poc-presenter.ini");
+	std::string line;
+	bool out = def;
+	while (std::getline(f, line))
+	{
+		const size_t eq = line.find('=');
+		if (eq == std::string::npos)
+			continue;
+		std::string k = lowerCopy(line.substr(0, eq));
+		while (!k.empty() && std::isspace(static_cast<unsigned char>(k.back())))
+			k.pop_back(); // 允许 "vtable = 0" 写法
+		if (k != key)
+			continue;
+		for (const char ch : line.substr(eq + 1))
+		{
+			if (std::isspace(static_cast<unsigned char>(ch)))
+				continue;
+			out = !(ch == '0' || ch == 'f' || ch == 'F' || ch == 'n' || ch == 'N');
+			break;
+		}
+	}
+	return out;
+}
+
 void registerSwp(void* obj, bool plus, const char* tag)
 {
 	if (!obj)
@@ -462,9 +507,17 @@ void registerSwp(void* obj, bool plus, const char* tag)
 			logLine(std::string(tag) + ": slot22 原值不在 dxgi/renderdoc — 不挂 Present1");
 		}
 	}
-	patchSlotLocked(&vtbl[8], reinterpret_cast<void*>(&hookedPresent));
-	if (g_swp[idx].has22)
-		patchSlotLocked(&vtbl[22], reinterpret_cast<void*>(&hookedPresent1));
+	if (!g_vtableLayer)
+	{
+		// v0.9.2 vtable=0: 只登记不挂槽 —— 让 Present 只能经方案B 的函数级 detour 进来
+		logLine(std::string(tag) + ": vtable=0 (ini) → 不挂槽 8/22, 本 vtable 交由方案B 覆盖");
+	}
+	else
+	{
+		patchSlotLocked(&vtbl[8], reinterpret_cast<void*>(&hookedPresent));
+		if (g_swp[idx].has22)
+			patchSlotLocked(&vtbl[22], reinterpret_cast<void*>(&hookedPresent1));
+	}
 	LeaveCriticalSection(&g_cs);
 }
 
@@ -1806,12 +1859,14 @@ void confirmPositive(void* obj, const char* nm)
 	        " | vtbl[8]=" + hexOf(gv[8]) + " 来自 " + modulePathOf(gv[8]) +
 	        (gv[8] == reinterpret_cast<void*>(&hookedPresent)
 	             ? " ==我们的Present钩子 ✓"
-	             : " ≠我们的Present钩子 (尚未挂钩 → 随后就地挂)"));
+	             : (g_vtableLayer ? " ≠我们的Present钩子 (尚未挂钩 → 随后就地挂)"
+	                              : " ≠我们的Present钩子 (vtable=0 预期内: 本局不挂槽, 由方案B detour 覆盖)")));
 	if (memReadable(gv, 23 * sizeof(void*)))
 		logLine(tg + "vtbl[22]=" + hexOf(gv[22]) + " 来自 " + modulePathOf(gv[22]) +
 		        (gv[22] == reinterpret_cast<void*>(&hookedPresent1)
 		             ? " ==我们的Present1钩子 ✓"
-		             : " ≠我们的Present1钩子"));
+		             : (g_vtableLayer ? " ≠我们的Present1钩子"
+		                              : " ≠我们的Present1钩子 (vtable=0 预期内)")));
 }
 
 // v1.7: 判定对象 vtable 是否含槽 22 (SwapChain1 布局) — 用 QI 实测而非猜布局,
@@ -2321,7 +2376,8 @@ bool doInstall(HMODULE hd3d11, HMODULE hdxgi)
 			if (g_swp[i].orig8)
 				++swpPatched;
 		LeaveCriticalSection(&g_cs);
-		logLine("登记完成: 交换链 vtable " + std::to_string(swpPatched) + " 个 (含 Present 挂钩), " +
+		logLine("登记完成: 交换链 vtable " + std::to_string(swpPatched) + " 个 (" +
+		        (g_vtableLayer ? "含 Present 挂钩" : "vtable=0 未挂 Present") + "), " +
 		        "工厂 vtable " + std::to_string(g_facN) + " 个 (含创建方法挂钩); Present 钩子=" +
 		        hexOf(reinterpret_cast<const void*>(&hookedPresent)));
 		// v1.7 阳性确认: 槽位修对后, dummy 对象的 vtbl[8] 必须就是我们挂的 Present 钩子
@@ -2457,7 +2513,8 @@ bool installHook(int waitMs)
 void verifyAndRepair()
 {
 	EnterCriticalSection(&g_cs);
-	for (int i = 0; i < g_swpN; ++i)
+	// v0.9.2 vtable=0: 交换链槽不挂也不"打回" (否则看门狗 5s 后会把钩子又装回去)
+	for (int i = 0; g_vtableLayer && i < g_swpN; ++i)
 	{
 		SwpEntry& e = g_swp[i];
 		if (e.vtbl[8] != reinterpret_cast<void*>(&hookedPresent))
@@ -2602,7 +2659,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 {
 	info->infoVersion = PluginInfo::kInfoVersion;
 	info->name = "PocPresenter";
-	info->version = (0u << 16) | (9u << 8) | 1u; // 0.9.1
+	info->version = (0u << 16) | (9u << 8) | 2u; // 0.9.2
 
 	if (skse->isEditor)  // 只进游戏本体, 不进 Creation Kit
 		return false;
@@ -2613,7 +2670,11 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.9.1 (PoC-A v1.7 验收通过 + PoC-B v0.1: Vulkan 离屏渲染 → 读回 → 注入 backbuffer) ====");
+	logLine("==== poc-presenter v0.9.2 (PoC-A v1.7 验收通过 + PoC-B v0.1: Vulkan 离屏渲染 → 读回 → 注入 backbuffer) ====");
+
+	g_vtableLayer = iniFlag("vtable", true);
+	if (!g_vtableLayer)
+		logLine("PoC-A: ini vtable=0 → vtable 层停用 (不挂槽 8/22, 看门狗不打回), 只留方案B 函数级 detour —— 方案B 独立计数实验");
 
 	InitializeCriticalSection(&g_cs);
 
