@@ -369,6 +369,10 @@ v1.6 的 5B `E9` 入口改写、CHAIN 共存、TLS 双层不双计机制不变�
 若要实测，需临时停用 vtable 挂钩（或加一条只让函数层计数的开关）——**优先级低，留作 PoC-B
 之后的可选项**。
 
+> **→ 已清（2026-10-03 15:56 局，插件 0.9.2，见 §7.9）**：`poc-presenter.ini` 写
+> `vtable=0` 实测——第 1 次 Present 变成 **`经 函数detour`**、3001 次计数全在函数层、
+> ~60 FPS 无告警。上面这段按原貌保留，作为"当时确实没证"的记录。
+
 **总判**：风险项 #1 第一环「Present 可拦」在**双环境（renderdoc 包装类 / 真 dxgi 类）实证闭合**，
 七条通道全部在真实游戏里走通过，v1.0~v1.6 的 0 计数确系槽位错挂。**→ 进 PoC-B**：
 在 Present 内创建 Vulkan instance/swapchain → 游戏窗口出清屏/三角形 → F12 抓帧 →
@@ -487,3 +491,85 @@ D3D11 `CopySubresourceRegion` 落进游戏 backbuffer，被游戏 Present 呈现
    可跑一次对照局：`<pluginDir>\poc-presenter.ini` 写 `vulkan=0`（逃生门，**至今未实测**）→
    同机位 F12 → `rdc_compare -Base S5c -Cand S5b`。预期只剩 Copy +1，顺带首测逃生门。
 2. **方案B 函数层独立计数**仍未被观察（沿用 §7.7 末的说明）。
+
+> **→ 两条均已于 2026-10-03 15:56 对照局清零，实测见 §7.9**：
+> ① `S5c.rdc` 探针 `SENTINEL_ABSENT` + 整帧 PNG 无洋红 + pass5 只有 3 条 Copy ⇒ 干净对照帧
+> 落袋，`rdc_compare -Base S5c -Cand S5b`（同日同机位、唯一差别=注入）pass6/diff4，
+> copy 两锚点是**唯一**可归因注入的差异；
+> ② `vtable=0` 下第 1 次 Present = **`经 函数detour`**、3001 次计数、~60 FPS 无告警。
+> 唯一没证到的是逃生门那一行日志（`vulkan=0` 分支没被执行到，原因见 §7.9.5 的缺口），
+> 已在 0.9.3 修掉并留作可选项——这两条遗留本身已不复存在。
+
+### 7.9 对照局 + 方案B 独立计数实测（2026-10-03 15:56–15:57，插件 0.9.2）
+
+#### 7.9.1 实验设置：一条跑局清两条遗留
+
+`poc-presenter.dll` 换 0.9.2（CI run `37107784970`），`<pluginDir>\poc-presenter.ini` 同时写两键：
+
+```
+vtable=0    ← 停用 vtable 层（不挂交换链槽 8/22、看门狗不"打回"），Present 只能从方案B 的
+              函数级 detour 进来 → 观察方案B 独立计数
+vulkan=0    ← 逃生门：关掉 PoC-B 注入 → 拿同日同机位的无注入对照帧
+```
+
+进 S5 夜战精准机位 → F12 → `captures\S5c.rdc`（846.9 MB，15:57:09）。
+
+#### 7.9.2 日志判读（0.9.2 段，log 行 215–331）
+
+| 行 | 日志原文（节选） | 判读 |
+|---|---|---|
+| 216 | `PoC-A: ini vtable=0 → vtable 层停用 (不挂槽 8/22, 看门狗不打回), 只留方案B 函数级 detour —— 方案B 独立计数实验` | 开关被读到并生效 |
+| 232 起 ×N | `vtable=0 (ini) → 不挂槽 8/22, 本 vtable 交由方案B 覆盖` | 每个登记点（dummy1/2、QI、设备链、工厂入口）都不挂 |
+| 293 | `登记完成: 交换链 vtable 1 个 (vtable=0 未挂 Present), 工厂 vtable 1 个 (含创建方法挂钩); Present 钩子=00007FFE716DA920` | 工厂钩子（喂方案B 候选）按设计保留 |
+| 294 | `阳性确认 … vtbl[8]=00007FFDBE5BD670 来自 …renderdoc.dll ≠我们的Present钩子 (vtable=0 预期内: 本局不挂槽, 由方案B detour 覆盖)` | 槽位确实**没**被挂上——不是开关没生效 |
+| 305/306 | `方案B Present 候选 1/2: … 活交换链vtbl[8] (renderdoc.dll)` → `入口字节与预期不符且非可识别跳板, 保守跳过; 前16字节=48 89 5C 24 08 …` | **14B 字节守卫照常工作**：第一候选是 renderdoc 的 32B 存根序言，与我方 14B 预期不符 → 正确放弃 |
+| 307/308 | `候选 2/2: 方案A真vtbl[8] (dxgi.dll)` → **`方案B Present: RAW 已装 target=00007FFE99449000 … 窃取=14B (入口 5B E9)`**（Present1 同理） | 靶 = `dxgi+0x19000` / `+0x194A0`，与 §7.5 表一致 |
+| **318** | **`第 1 次 Present (经 函数detour): vtable=00007FFE994FD688 来自 C:\WINDOWS\SYSTEM32\dxgi.dll \| 1920x1080 … title="Skyrim Special Edition"`** | **验收行**——口径从 `经 Present` 变成 `经 函数detour`，方案B 函数层成为唯一 Present 入口 |
+| 327–331 | `Present 计数 601/1201/1801/2401/3001`，近600帧 `49.8/59.9/60.0/58.8/48.0 FPS` | 3001 次全由函数层计数，~60 FPS，**无 `120s 仍 0 次 Present` 告警**、无槽位被改写 |
+| 全段 | **无任何 `PoC-B` 行** | 见 §7.9.5——这正是发现的缺口 |
+
+#### 7.9.3 对照帧 `S5c.rdc` 四路互证：确实无注入
+
+| 证据 | 结果 |
+|---|---|
+| 像素探针 `rdc_pass7_pixels.py -Scene S5c` | **`SENTINEL_ABSENT`**、errors=0：四角 `(49,96,114)`/`(9,35,47)`/`(14,39,49)`/`(21,49,58)`、重心 `(49,92,112)`、对照点 `(0,10,16)`/`(12,30,28)` |
+| 整帧图 `docs/analysis/S5c-backbuffer.png` | 直接解 PNG 字节逐点核对：与探针**逐点一致**、无洋红（S5b 同法核对 = `(255,0,255)`×2 + 重心 `(86,217,85)`，两文件 SHA1 不同——**图证以字节为准**，曾出现展示图串档） |
+| pass5 提取 | 只有 3 条 Copy（`ev33083`/`ev46607`/`ev50673`，全是游戏自有的 1920x1080 内部拷贝），**无 `512x512 → backbuffer`** |
+| 日志 | 无 `PoC-B init` / `PoC-B 注入` 行 |
+
+#### 7.9.4 三对结构配对：噪声底 vs 唯一差别=注入
+
+| 配对 | 口径 | copy 两锚点 | 其余 DIFF（归因） |
+|---|---|---|---|
+| `S5 → S5b`（跨日，含注入） | pass3 / diff7 | **DIFF**：copies 3→4、sequence 追加、copies_total 3→4 | draws 3809→4218 (+409)、clears 23→22、段 42→41、透明 122→161 |
+| `S5 → S5c`（跨日，**双无注入**） | pass5 / diff5 | **PASS**（copies 3=3、sequence 全等） | draws 3809→4273 (**+464**)、clears 23→22、pso 157→149、textures 538→567、段 42→41、透明 122→161、clear 两档 DIFF |
+| **`S5c → S5b`（同日同机位，唯一差别=注入）** | **pass6 / diff4** | **DIFF**：copies **3→4**、sequence 尾部追加 `512x512 R8G8B8A8_UNORM -> 1920x1080 R8G8B8A8_UNORM`、copies_total **3→4** | draws 4273→4218 (**−55**)、pso 149→151、textures 567→538、段 41=41；**clear.bound / clear.target / transparent.draws (161=161) 三项由跨日的 DIFF 转为 PASS** |
+
+**结论**（把三行并排读）：
+
+1. 注入的净效应 = **恰好 +1 条 Copy**，且只在这一个口径上 DIFF——无注入对照对里它 PASS，
+   两条锚点 + pass5 日志三口径互证；
+2. 跨日噪声（双无注入）里 draws **+464**、clear/透明段全 DIFF → 这些在 S5~S5b 里出现过的
+   DIFF **全部在对照对里同样出现**，因此不可能归因注入；同日配对后 draws 差收到 **−55**、
+   clear/透明转 PASS，噪声随"同时刻"收敛；
+3. 注入侧零 Draw/Dispatch/Clear（代码只有 `UpdateSubresource`+`CopySubresourceRegion`+调原
+   Present），与上述归因一致。
+
+#### 7.9.5 顺带发现的缺口：函数层 detour 没驱动 PoC-B（0.9.3 已修）
+
+- **现象**：0.9.2 段没有一行 `PoC-B`，连预期的 `PoC-B: poc-presenter.ini 关闭了 vulkan 注入
+  (vulkan=0)` 都没打——说明 `pocbEnabled()` 根本没被调用过。
+- **根因**：`pocbFrame()` 只在 `hookedPresent` / `hookedPresent1`（vtable 层）里调用；
+  `vtable=0` 时 Present 走函数层 detour，它只 `notePresent` 就转发 → **兜底模式下 PoC-B 永远
+  不会注入**（哪怕 `vulkan=1`），逃生门也永远走不到。
+- **对本局结论的影响**：无，反而更稳——S5c 的"无注入"由两重保险共同达成（ini 关 + 该层压根
+  不调 `pocbFrame`）；但**逃生门 `vulkan=0` 至此仍未被运行时执行过**，须诚实标注。
+- **修复（0.9.3，commit `2fba20b`）**：`detouredPresent` / `detouredPresent1` 在
+  `!g_inVtableHook` 分支里补 `pocbFrame(sc)`；经 vtable 转来的调用 TLS 置位，不会二次注入。
+  CI run `37109051718` 编译中，**未跑局验证**——下次跑局可顺带看
+  `关闭了 vulkan 注入` 那行（可选项，不阻塞任何结论）。
+
+#### 7.9.6 本节状态
+
+§7.7 的「方案B 独立计数未证」✓ 清零；§7.8.7 遗留 ① 噪声底 ② 方案B 计数 ✓ 双清零；
+仅剩「逃生门运行时验证」一项可选观察（0.9.3 起才有机会走到，见 §7.9.5）。

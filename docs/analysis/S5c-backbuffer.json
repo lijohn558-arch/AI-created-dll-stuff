@@ -1,0 +1,32 @@
+{
+ "rdc": "C:\\Users\\joker\\skyrim-vulkan\\captures\\S5c.rdc",
+ "scene": "S5c",
+ "full": "S5c",
+ "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S5c-backbuffer.png",
+ "errors": [],
+ "identified_by": "SwapchainImage",
+ "resourceId": "ResourceId::78",
+ "width": 1920,
+ "height": 1080,
+ "data_bytes": 8294400,
+ "row_pitch": 7680,
+ "png_bytes": 4655204,
+ "spotcheck": {
+  "rect-corner-1(16+6,16+6)": [
+   49,
+   96,
+   114
+  ],
+  "triangle-centroid(272,313)": [
+   49,
+   92,
+   112
+  ],
+  "control(1056,540)": [
+   0,
+   10,
+   16
+  ]
+ },
+ "elapsed_sec": 7.3
+}

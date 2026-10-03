@@ -72,13 +72,17 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
 本步**不碰 Vulkan、不改变画面**，只产出日志。
 
-> **状态（2026-10-03 15:40）：风险项 #1 双环闭合 —— PoC-A（可拦）+ PoC-B（可写）均实测通过，插件 0.9.1**
+> **状态（2026-10-03 16:0x）：风险项 #1 双环闭合，且两条遗留清零 —— 插件 0.9.3**
 > —— 带 renderdoc 局（7201 次 / 60 FPS，判读 §7.6）+ 无 renderdoc/GFE 局（★ 中、6001 次 / 60 FPS，判读 §7.7）
 > 闭合第一环「Present 可拦」；**PoC-B v0.1 于 0.9.1 局闭合第二环「写」**：Vulkan 离屏 512×512 → 读回 →
 > `CopySubresourceRegion` 进 backbuffer (16,16)，4200 帧零失败、均值 **6.47 ms/帧**、近 600 帧恒 60 FPS；
 > 验收三步 = 两场景目视 ✓ + 像素探针 `SENTINEL_FOUND` ×2 ✓ + 结构配对 `+1 Copy` 指纹（三口径互证）✓，
 > 详见 docs/01 **§7.8**（含整帧 PNG 图证与差异归因）。
-> 遗留低优先级项：① 同日同场景噪声底（`vulkan=0` 对照局，顺带首测逃生门）② 方案B 函数层独立计数（§7.7 末）。
+> **遗留双清零（0.9.2 对照局，docs/01 §7.9）**：① 同日同机位无注入对照帧 `S5c.rdc`
+> → `rdc_compare -Base S5c -Cand S5b` = **pass6/diff4**（`clear` 两档 + `transparent 161=161` 转 PASS，
+> 余下 DIFF 只剩注入指纹 `copies 3→4` 与 draws −55 的连带）；② 方案B 独立计数 = **`第 1 次 Present
+> (经 函数detour)`**、3001 次、~60 FPS 无告警。**0.9.3** 修掉本局发现的缺口（函数层 detour 此前不驱动
+> PoC-B），逃生门 `vulkan=0` 的运行时验证留作可选项。
 
 **机制（v1.7，七通道）**：
 1. **同步安装（v1.2 主修正）**——钩子在 `SKSEPlugin_Load` 内同步装完（等模块 ≤5s、等
@@ -241,8 +245,20 @@ push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从
    纹理格式 / CS dispatch / CS 字节码三项 PASS；draws 等其余 DIFF 由**整帧 PNG 图证**归因游戏状态
    （同机位不同时刻：基线=火焰战斗、候选=对话状态；注入侧零 Draw）。
 
+**对照局 / 噪声底（2026-10-03 0.9.2 局实测，docs/01 §7.9）**：`poc-presenter.ini` 写
+`vtable=0`+`vulkan=0` → 同机位 F12 得 **`S5c.rdc`**（无注入）→ 探针 `SENTINEL_ABSENT` ✓ +
+整帧 PNG 无洋红 ✓ + pass5 只有 3 条 Copy ✓ 四路互证 →
+`rdc_compare.ps1 -Base S5c -Cand S5b` = **pass6 / diff4**（同日同机位、唯一差别=注入）：
+`clear.bound`/`clear.target`/`transparent.draws(161=161)` 三项**转 PASS**，copy 两锚点是唯一可归因
+注入的差异；跨日噪声底（`S5 → S5c`，双无注入）= pass5/diff5、draws +464 → 同日收到 −55。
+同局还拿到 **方案B 函数层独立计数**：`第 1 次 Present (经 函数detour)`、3001 次、~60 FPS。
+
 整帧图证（新工具，约 7 s/张）：`powershell ... -File tools\rdc_run.ps1 -Script rdc_dump_backbuffer.py -Scene S5b`
-→ `docs\analysis\<场景>-backbuffer.png`（已在库：`S5` / `S5b` / `S6` 三张，`S5b` 图上肉眼可见洋红块）。
+→ `docs\analysis\<场景>-backbuffer.png`（已在库：`S5` / `S5b` / `S6` / `S5c` 四张，`S5b` 图上肉眼可见
+洋红块、`S5c` 图无；**图证以字节为准**——曾出现看图工具串档，用 `.json` 的 `spotcheck` 与 pass7 探针点互证）。
 
 失败即关注入（日志 `PoC-B 失败: <步骤> code=... — 已关闭注入, 游戏照常呈现`），逃生门
-`<pluginDir>\poc-presenter.ini` 写 `vulkan=0`（或 `pocb=0`）——**尚未实测**，跑对照局时顺带验。
+`<pluginDir>\poc-presenter.ini` 写 `vulkan=0`（或 `pocb=0`）——**尚未运行时实测**：0.9.2 对照局里
+`pocbFrame()` 根本没被调到（vtable=0 时函数层 detour 只计数不驱动 PoC-B，docs/01 §7.9.5），
+**0.9.3 已修**（`detouredPresent` 补 `pocbFrame`），下次跑局可顺带看那行
+`PoC-B: poc-presenter.ini 关闭了 vulkan 注入 (vulkan=0)`。

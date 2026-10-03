@@ -367,6 +367,7 @@ backbuffer 的正式类型），找不到才退回「同尺寸 RGBA8 纹理」�
 | `PoC-B.rdc`（首局候选帧，插件 0.9.0 初始化失败 → 注入未启用） | `SENTINEL_ABSENT` | 0/4 洋红、对照点干净、2.2s | **0** |
 | `S5b.rdc`（0.9.1 注入局，S5 夜战） | **`SENTINEL_FOUND`** | 四角全 `(255,0,255)`、重心 `(86,217,85)`、对照点 `(47,63,58)`/`(13,31,29)`、2.2s | **0** |
 | `S6-pool.rdc`（0.9.1 注入局，白漫水池） | **`SENTINEL_FOUND`** | 四角全 `(255,0,255)`、重心 `(86,217,85)`、对照点 `(65,87,85)`/`(45,69,69)`、2.0s | **0** |
+| `S5c.rdc`（0.9.2 对照局，`vulkan=0`+`vtable=0`，S5 夜战） | **`SENTINEL_ABSENT`** | 0/4 洋红（四角 `(49,96,114)`/`(9,35,47)`/`(14,39,49)`/`(21,49,58)`）、重心 `(49,92,112)`、对照点 `(0,10,16)`/`(12,30,28)`、2.2s | **0** |
 
 第 2 行是**候选文件上的首次实跑**：探针能正常打开该抓帧、按 `SwapchainImage` 找到
 backbuffer，并如实报「没注入」——与当局日志一致（PoC-B 初始化在实例级函数表就失败了，注入
@@ -397,11 +398,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_run.ps1 -Script rd
 | 输出 | `docs\analysis\<场景前缀>-backbuffer.png` + 同名 `.json`（含 `spotcheck` 三个抽检点，可与 pass7 互证） |
 | 耗时 | **约 7 s/张**（1920×1080，Python 逐像素转 RGB） |
 
-**已在库的三张**：`S5-backbuffer.png`（10/2 基线：火焰战斗中）、`S5b-backbuffer.png`（注入局：
-同机位对话状态 + **左上角洋红块与渐变三角形肉眼可见**）、`S6-backbuffer.png`（白漫水池注入局）。
+**已在库的四张**：`S5-backbuffer.png`（10/2 基线：火焰战斗中）、`S5b-backbuffer.png`（注入局：
+同机位对话状态 + **左上角洋红块与渐变三角形肉眼可见**）、`S6-backbuffer.png`（白漫水池注入局）、
+`S5c-backbuffer.png`（0.9.2 对照局：同机位、**无**洋红块）。
 
 用法要点：把基线与候选两图**并排打开**，能一眼判断两帧是否处于同一游戏状态——这直接决定
 `rdc_compare` 的差异该归因注入还是归因场景（见 §12.6）。
+
+> ⚠️ **图证要落到字节**：2026-10-03 曾出现「看图工具把 S5b 的图当成 S5c 显示」的串档，
+> 与 pass7 探针、dump 自己的 `spotcheck` 当场矛盾。判图别只凭肉眼——用图里 `spotcheck`
+> 抽检点、或直接解 PNG 字节核对（`.json` 的 `spotcheck` 与 pass7 探针点同坐标可互证），
+> 四路（探针 json / dump json / PNG 字节 / pass5 Copy 数）一致才算数。
 
 ### 12.6 结构配对的判读口径（`rdc_compare` 的 DIFF 怎么归因）
 
@@ -419,6 +426,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\rdc_run.ps1 -Script rd
    2026-10-03 实测（`S5 ~ S5b`）：pass3 / diff7——纹理格式 16=16、CS dispatch 98 次
    18786750 线程全等、CS 字节码 9 块全等 **PASS**；`copies 3→4` 指纹 ✓；draws 3809→4218
    (+409) 与分段 42→41、PSO 157→151 经图证确认为**同机位不同时刻**（基线=火焰战斗、候选=对话）。
-4. **要「唯一差别=注入」的严格数字**，需同日同场景的无注入对照帧：
-   `<pluginDir>\poc-presenter.ini` 写 `vulkan=0`（逃生门，**尚未实测**）→ 同机位 F12 →
-   `rdc_compare -Base S5c -Cand S5b`。预期**只剩 Copy +1**；这是遗留项，不阻塞当前结论。
+4. **「唯一差别=注入」的严格数字（2026-10-03 已实测，遗留清零）**：同日同机位的无注入对照帧
+   `S5c.rdc`（`poc-presenter.ini` 写 `vulkan=0`+`vtable=0`，0.9.2 局）→
+   `rdc_compare -Base S5c -Cand S5b` = **pass6 / diff4**——`clear.bound-profile`、
+   `clear.target-profile`、`transparent.draws (161=161)` 三项**由跨日配对的 DIFF 转 PASS**，
+   余下 4 条 DIFF 里 `counts.pass1`（copies **3→4**）、`copy.sequence`、
+   `conditional-nodes`（copies_total **3→4**）正是注入指纹，`pass5.structure` 的
+   draws_sum 差只是 draws 4273→4218（−55）的连带。
+   **噪声底参考**：同为无注入的 `S5 → S5c` 是 pass5 / diff5，draws +464、clear 两档 DIFF、
+   透明段 122→161——即跨日那批"场景动态"DIFF **在对照对里原样出现**，copy 两锚点则是 **PASS**。
+   （详见 docs/01 §7.9；注意本局 `vulkan=0` 分支其实没被执行到，见 §7.9.5 的缺口。）
