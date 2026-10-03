@@ -189,6 +189,9 @@ Community Shaders 内置了完整的 RenderDoc 程序化集成，其中**踩坑�
   vtable 并转发**，不缓存函数指针 ⇒ 只要真类 slot4 是我们的钩子，包装层 Present 最终必落
   入我方钩子（这决定了加载序方案下 ★ 中否不再影响计数）。CreateSwapChain 原实现为真函数
   序言，到 `sub rsp,0xA0` 共 15 字节全位置无关，可安全窃取做 trampoline。
+  〔v1.7 勘误：slot4/slot18 实为 `SetPrivateDataInterface`/`GetDesc1`，上面"槽 4 是我们的
+  钩子 ⇒ Present 必落钩"的推论不成立——真条件是**槽 8**；同款 thunk 图案在槽 8 上的字节
+  由 v1.7 探针 B 重新打出（见 §7.5）。〕
 - 共同点：**两者都不修补多方共用的共享类 vtable**——要么拥有对象（包装），要么拥有函数
   入口（MinHook 导出级/函数级 detour）。
 
@@ -210,7 +213,7 @@ Community Shaders 内置了完整的 RenderDoc 程序化集成，其中**踩坑�
 
 | 方案 | 外部建议 | 裁决 | 依据 |
 |---|---|---|---|
-| A | 从 renderdoc 包装对象 `+0x10` 掏真对象挂真 vtable（偏移由存根 `48 8B 49 XX` 自动提取） | **正确，暂缓为 v1.7 备选** | 存根字节实测吻合（Present 存根 disp=0x10、Present1 存根 disp=0x30，两条存根自曝偏移）；但 A 仍只覆盖"走类 vtable"的路径，GFE 绕行时与 vtable 补丁同病；B 通了之后 A 仅剩诊断增益 |
+| A | 从 renderdoc 包装对象 `+0x10` 掏真对象挂真 vtable（偏移由存根 `48 8B 49 XX` 自动提取） | **正确，v1.7 落地为方案A** | 存根字节实测吻合（当时读到的"Present/Present1 存根"实为槽 4/槽 18 桩，见 §7.5 勘误）；v1.7 按同好复核改用 **v0 系方法桩偏移 `+0x28`**（idx4 桩 `+0x10` 作备选），解包得真对象后取其 `vtbl[8]` 当方案B 候选靶；A 单独用仍只覆盖"走类 vtable"的路径，故定位为候选/诊断，主漏斗仍是 B |
 | B | 对真 Present 打函数级 detour | **采纳，落地为 v1.6 主体** | 唯一能覆盖"一切调用路径"的漏斗；窃取长度与前导字节本机已实测取齐（见下），无需猜 |
 | C | 不必追真工厂 vtable，★ 仅诊断 | **采纳** | PoC-A 的目标是 Present 拦截而非创建路径 |
 | D | 加载序改名（与我方原计划相同） | **半采纳**：外部称"SKSE 加载序不可控"过强——NTFS 目录枚举近似字母序、实测 c<p 与之一致，改名 `z-capture-helper` 是零成本实证；但 B 落地后 D 降级为可选验证项 | 与 B 正交，可同跑，日志可分辨谁起的作用 |
@@ -225,8 +228,8 @@ vtable）。设备/工厂均创建成功，仅交换链 desc 被拒（`DXGI_ERRO
 
 | 函数 | 地址 | 前导字节（实测转储） | 指令边界 | 结论 |
 |---|---|---|---|---|
-| Present 存根 | `dxgi+0x2E460` | `48 83 EC 38 4C 89 44 24 50 4C 8D 4C 24 50` | **14B 恰为边界**、零地址依赖 | 窃取 14B，trampoline 安全 |
-| Present1 存根 | `dxgi+0x4EE60` | `48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20` | **15B 边界** | 窃取 15B |
+| 「Present」存根〔v1.7 勘误：实为槽 4 `SetPrivateDataInterface` 存根，非 Present〕 | `dxgi+0x2E460` | `48 83 EC 38 4C 89 44 24 50 4C 8D 4C 24 50` | **14B 恰为边界**、零地址依赖 | 历史条目；真 Present = 槽8 `dxgi+0x19000`，见 §7.5 |
+| 「Present1」存根〔v1.7 勘误：实为槽 18 `GetDesc1` 存根，非 Present1〕 | `dxgi+0x4EE60` | `48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20` | **15B 边界** | 历史条目；真 Present1 = 槽22 `dxgi+0x194A0`，见 §7.5 |
 | CreateSwapChain | `dxgi+0x2C4D0` | 序言 25B 起含 `mov rax,[rip+X]`（RIP 相对） | 18B（25 前） | 按方案 C 不挂工厂，仅留档 |
 
 **v1.6 实现要点**（`src/poc-presenter/main.cpp`）：
@@ -241,3 +244,51 @@ vtable）。设备/工厂均创建成功，仅交换链 desc 被拒（`DXGI_ERRO
    虚调用 / GFE 包装绕行 / renderdoc 动态转发，任何单一路径必被其一计到。
    有 renderdoc 时即便游戏对象在包装层，`renderdoc 存根 → 真对象 slot4 → dxgi 存根`
    的动态转发也必落同一入口。
+   〔v1.7 勘误：此链按槽 4（SetPrivateDataInterface）叙述是错的——真链是
+   `renderdoc 存根(slot8) → 真对象 slot8 → dxgi+0x19000`，见 §7.5。〕
+
+### 7.5 槽位勘误与 v1.7 定型（2026-10-03，根因定案）
+
+**根因（v1.0~v1.6 全链 0 计数的真凶）**：我们挂的"槽 4 / 槽 18"按 MS dxgi.h 实为
+`SetPrivateDataInterface`（IDXGIObject 第 4 项）与 `GetDesc1`（IDXGISwapChain1 第 18 项）
+——**从未挂到 Present**。连带两处假证据同时作废：
+
+- v1.6 的字节守卫 `dxgi+0x2E460 / 0x4EE60` 就是槽 4 / 槽 18 存根的本体，探针 B 打的
+  "Present 原实现" 与守卫永远一致 → **自证循环**（守卫与被验对象是同一段字节）；
+- §7.4 表中 "Present 存根 disp=0x10 / Present1 存根 disp=0x30" 实为槽 4 / 槽 18 桩
+  自曝的取对象偏移，不是 Present/Present1 的。
+
+**正确 ABI**（MS SDK 头镜像 `tpn/winsdk-10` + mingw WIDL 两源一致，且与本地
+`dxdump3.cs` 实测互证）：
+
+| 方法 | 槽位 | 本机地址 / 前导 14B | 备注 |
+|---|---|---|---|
+| `IDXGISwapChain::Present` | **8** | `dxgi+0x19000` = `48 89 5C 24 10 48 89 74 24 18 55 57 41 56` | 恰为指令边界（其后 `48 8D 6C 24 90`），窃取 14B |
+| `IDXGISwapChain1::Present1` | **22** | `dxgi+0x194A0` = `... 55 57 41 54` | 第 14 字节 `54` vs Present `56` 可区分；边界 14/16，窃取 14B |
+| `IDXGIFactory::CreateSwapChain` | 10 | 运行时读（日志 `探针: CreateSwapChain 原实现` 行） | run2 ★ 实证不变 |
+| `IDXGIFactory2::CreateSwapChainForHwnd` | **15** | 旧代码 14/15/17 → 仅 15 名字对、但被挂了 CoreWindow 钩子（签名错位） | 14 实为 `IsWindowedStereoEnabled` |
+| `IDXGIFactory2::CreateSwapChainForCoreWindow` | **16** | 旧代码未挂 | |
+| `IDXGIFactory2::CreateSwapChainForComposition` | **24** | 旧代码 17 实为 `GetSharedResourceAdapterLuid` | 潜在崩溃点，v1.7 改正 |
+
+- 推导链：`IUnknown(0-2) → IDXGIObject(3-6) → IDXGIFactory(7-11) → Factory1(12-13)
+  → Factory2(14-24)` ⇒ ForHwnd=15、ForCoreWindow=16、GetSharedResourceAdapterLuid=17、
+  ForComposition=24（Factory2 末项，也是"QI Factory2 成功才挂 15/16/24"的越界防线）；
+- 外部建议的工厂槽 `13/14/22` 与 ABI 不符（13=`IsCurrent`、14=`IsWindowedStereoEnabled`、
+  22=`RegisterOcclusionStatusEvent`，均非创建路径）→ 方向（保留 10、删改 15/17）采纳，
+  具体槽按 dxgi.h 落为 **10/15/16/24**；
+- `GetDesc=槽 12`（未挂钩 → `swapDesc()` 直调安全）。
+
+**v1.7 四项落地**（`src/poc-presenter/main.cpp`，插件版本 0.8.0）：
+
+1. 交换链全量改号 4→8、18→22（登记 / 查原值 / 挂钩 / 看门狗 / 探针 A / 探针 B）；
+2. **方案B 靶子运行时取**：① 活交换链 `vtbl[8]/[22]` 直读 → ② 方案A 解包真对象的
+   `vtbl[8]/[22]` → ③ dxgi RVA `0x19000/0x194A0` 兜底；逐候选过 14B 字节守卫，
+   旧"交叉验证行"删除，硬编码 RVA 降为兜底；
+3. **方案A 落地**：renderdoc 转发桩自曝偏移（v0 系方法 `[obj+0x28]`，idx4 桩 `[obj+0x10]`）
+   → 解包得真 `IDXGISwapChain*` → 其 `vtbl[8]` 即 dxgi 真 Present（版本无关、覆盖真类）；
+   仅包装类对象尝试、全程 `memReadable` 兜底、结果只作候选（可执行页 + 字节守卫把关）；
+4. **阳性确认**：安装完成与 ★ 处打印对象 vptr + `vtbl[8]` 是否等于我们的钩子；120s 告警行
+   附 `g_gameSc` 是否取得与方案B detour 状态——杜绝 v1.0~v1.6 "只证明挂了错槽"的假阳性。
+
+v1.6 的 5B `E9` 入口改写、CHAIN 共存、TLS 双层不双计机制不变；
+`tools/dxbytes.ps1` 同步新 RVA/字节（旧 0x2E460/0x4EE60 保留为历史条目供解读老日志）。

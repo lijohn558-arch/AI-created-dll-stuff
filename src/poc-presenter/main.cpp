@@ -1,5 +1,5 @@
 /*
- * poc-presenter — PoC-A v1.6 (插件版本 0.7.0): SKSE 插件载体的 Present Hook 验证
+ * poc-presenter — PoC-A v1.7 (插件版本 0.8.0): SKSE 插件载体的 Present Hook 验证
  *
  * 目的 (docs/00 首周行动项 #4 / 最高风险项 #1 的第一环):
  *   证明能在真实游戏进程内拦截 IDXGISwapChain::Present —— 这是 PoC-B (在 Present 里
@@ -15,10 +15,12 @@
  * v1.1 对策 (四通道 + 自证):
  *   1. 多 vtable 收集: dummy1 (ForHwnd, SwapChain1 口径) + dummy2 (工厂 v0 CreateSwapChain
  *      口径) + 两者各自 QI SwapChain / SwapChain1 / SwapChain2 / SwapChain3 —— 收集到的
- *      每张不同 vtable 都挂槽 4 (Present); 经 1 口径见过的 vtable 额外挂槽 18 (Present1,
- *      越界保护: 只有 QI 上 1 的 vtable 才读 18);
- *   2. 工厂拦截: 挂我们工厂 vtable 的槽 10 (CreateSwapChain)、槽 14/15/17 (ForHwnd /
- *      ForCoreWindow / ForComposition) —— 游戏经同款工厂创建交换链时, 拿到游戏自己的
+ *      每张不同 vtable 都挂槽 4 (当时标为 Present — v1.7 勘误: 实为 SetPrivateDataInterface,
+ *      真 Present=槽8); 经 1 口径见过的 vtable 额外挂槽 18 (当时标为 Present1, 勘误:
+ *      实为 GetDesc1, 真 Present1=槽22; 越界保护: 只有 QI 上 1 的 vtable 才读 18/22);
+ *   2. 工厂拦截: 挂我们工厂 vtable 的槽 10 (CreateSwapChain ✓)、槽 14/15/17 (当时标为
+ *      ForHwnd / ForCoreWindow / ForComposition — v1.7 勘误: 实为 IsWindowedStereoEnabled /
+ *      ForHwnd / GetSharedResourceAdapterLuid, 真槽为 15/16/24) —— 游戏经同款工厂创建交换链时, 拿到游戏自己的
  *      对象引用并就地打它的 vtable (兜住"每实例一张 vtable"的情形), 日志带 ★ 标记;
  *   3. 挂钩原值安全阀: 只有原值落在 dxgi.dll 或 renderdoc.dll 内才挂 (防错槽位);
  *   4. 看门狗: 每 5s 复查所有已挂槽位, 被第三方改写则记录并打回; 120s 仍 0 次 Present
@@ -33,7 +35,8 @@
  *      Load 不返回主线程就无法继续初始化 → 保证先于游戏交换链创建;
  *   2. [保险 P2 口径] 五个工厂口径全取: CreateDXGIFactory 与 CreateDXGIFactory1 各配
  *      IID0/1/2, 加 CreateDXGIFactory2 —— RenderDoc 包装类若按"所请求接口"分化,
- *      游戏要的那张类也在登记之列; QI 向上 Factory2 成功即布局含槽14/15/17 (安全升级)。
+ *      游戏要的那张类也在登记之列; QI 向上 Factory2 成功即布局含槽14/15/17 (安全升级;
+ *      v1.7 勘误: 真槽应为 15/16/24, 见 v1.7 段)。
  *
  * v1.3 对策 (v1.2 双跑实测 2026-10-02 — 同步安装 P1 已修: 两跑均"同步安装完成"):
  *   - 有 capture-helper: 五口径工厂全 OK 但同为 renderdoc.dll 一张类, 120s 仍无 ★、
@@ -78,6 +81,8 @@
  *   - 本机同 boot 只读转储取齐 dxgi 真存根字节 (与游戏同 dxgi 基址):
  *     Present  @dxgi+0x2E460 前14B 恰为指令边界且零地址依赖;
  *     Present1 @dxgi+0x4EE60 边界在 15B — 窃取长度与字节守卫由此定死。
+ *     〔v1.7 勘误: 这两处实为 slot4/slot18 存根本体 = 自证循环; 真 Present/Present1
+ *       是 dxgi+0x19000 / 0x194A0, 见 v1.7 段。〕
  *   → 方案B (函数级 detour, 覆盖一切调用路径 — v1.4 计数恒 0 的破局点):
  *     1) 目标 = dxgi 存根 (RVA + 前导字节双校验; 字节不符 → 保守跳过并留档);
  *     2) 入口只改 5 字节 E9 → 近端跳板 (±2GB 内 VirtualAlloc, 存 FF25 绝对跳到钩子)
@@ -91,6 +96,35 @@
  *         方案D (capture-helper 改名 z- 先加载) 零成本可顺手验证; 按建议不再追真
  *         工厂 vtable (★ 仅诊断, 目标是 Present 而非创建路径)。
  *
+ * v1.7 根因勘误 + 全量槽位修正 (v1.5/v1.6 实测 + 本地 ABI/字节实证 2026-10-03):
+ *   [根因] v1.0~v1.6 挂的"槽4/槽18"按 MS dxgi.h 实为 SetPrivateDataInterface (IDXGIObject
+ *     第4项) 与 GetDesc1 (SwapChain1 第18项) — 从未挂到 Present, 旧 0 计数恒真;
+ *     旧字节守卫 dxgi+0x2E460/0x4EE60 就是这两槽的存根本体 (探针B 与守卫互相自证循环)。
+ *     正确 ABI (dxgi.h + 本地 dxdump3 双证): Present=槽8, Present1=槽22;
+ *     GetDesc=槽12 (swapDesc 直调安全)。上述历史段落中的 槽4/槽18 一律按 8/22 读。
+ *   1. 交换链全量改号: 登记/挂钩/查原值/看门狗/探针A/探针B 全部 vtbl[8] (Present) +
+ *     vtbl[22] (Present1, 仅 QI 上 1+ 的 vtable 才读);
+ *   2. 方案B 靶子改运行时取: 优先直读活交换链 vtbl[8]/vtbl[22] (彻底摆脱硬编码 RVA),
+ *     其次方案A 解包出的真对象 vtbl[8]/[22], 最后回退本机 dxgi RVA 0x19000/0x194A0;
+ *     前导 14B 守卫 (末字节 56=Present / 54=Present1 可区分), 旧"交叉验证行"删除,
+ *     0x2E460/0x4EE60 作废 (那是 slot4/slot18 存根, 不是 Present);
+ *   3. 工厂槽位按 MS dxgi.h 重排: 保留 10 (CreateSwapChain, run2 ★ 实证),
+ *     ForHwnd 14→15、ForCoreWindow 15→16、ForComposition 17→24 —
+ *     旧 14 实为 IsWindowedStereoEnabled、旧 17 实为 GetSharedResourceAdapterLuid,
+ *     签名不符属潜在崩溃点 (旧 15 虽是 ForHwnd 却被挂了 CoreWindow 钩子, 同样错位);
+ *     15/16/24 仍仅在 QI Factory2 成功后才挂 (Factory2 布局末项=24, 防越界)。
+ *     (外部建议的 13/14/22 与 MS ABI 不符: 13=IsCurrent、14=IsWindowedStereoEnabled、
+ *      22=RegisterOcclusionStatusEvent, 均非创建路径 — 以 dxgi.h 为准。)
+ *   4. 阳性确认: ★ 拦到游戏交换链与安装完成时, 都打印对象 vptr + vtbl[8] 是否等于我们的
+ *     钩子 (并区分"已是钩子 / 尚未挂钩→就地挂"); 120s 告警行附 g_gameSc 是否取得 —
+ *     摆脱 v1.0~v1.6 "只证明挂了错槽"的假阳性 (旧 ★0 / g_gameSc 空即此类);
+ *   5. 方案A 落地 (renderdoc 转发桩解包): 桩自曝偏移 — v0 系方法读 [obj+0x28] 取真对象 →
+ *     *(void**)(wrapper+0x28) = 真 IDXGISwapChain*, 其 vtbl[8] 即 dxgi 真 Present
+ *     (版本无关且覆盖真类); 仅对 renderdoc 包装类对象尝试 (读内存恒安全), 结果只作
+ *     方案B 的一个候选 (可执行页 + 14B 字节守卫双重兜底);
+ *   6. 兜底不变: 函数级 detour 是唯一与对象无关的漏斗 (vtable 层到不到, 它都到),
+ *     TLS 双层不双计逻辑原样保留。
+ *
  * 钩子转调: 按"调用方 vtable 地址"查登记表取原函数 —— 多张 vtable 各存各的原值。
  * 线程安全: 登记表/槽位写入全部走同一把 CRITICAL_SECTION (可重入)。
  *
@@ -98,9 +132,11 @@
  *   [..] renderdoc.dll = ...            (in-app 加载状态)
  *   [..] dummy1 ... / dummy2 swapchain ...
  *   [..] dummy1(ForHwnd): vtable=0x... 来自 ...      (vtable 本体所在模块, 判包装类)
- *   [..] ...: slot4 原值=0x... 来自 ...
+ *   [..] ...: slot8 原值=0x... 来自 ...               (槽8=Present, 槽22=Present1)
  *   [..] 登记完成: 交换链 vtable N 个, 工厂 vtable M 个
+ *   [..] 阳性确认 (dummy1 安装完成): obj=... vptr=... vtbl[8]=... ==我们的Present钩子 ✓  ← 槽位修对的铁证
  *   [..] ★ 工厂拦截 CreateSwapChain... → swapchain=0x...   (可选, 视游戏创建路径)
+ *   [..] 阳性确认 (★游戏 CreateSwapChain): obj=... vptr=... vtbl[8]=... (已是钩子 / 尚未挂钩→就地挂)
  *   [..] 第 1 次 Present (经 Present): ... ← 关键行 (证明拦到游戏 Present)
  *   [..] Present 已开始触发 — PoC-A 验收通过
  *   [..] Present 计数 600  近600帧 xx.x FPS          (周期行)
@@ -264,18 +300,18 @@ void registerFac(void* obj, bool plus2, const char* tag);
 struct SwpEntry
 {
 	void** vtbl;
-	void*  orig4;   // Present
-	void*  orig18;  // Present1 (仅经 1+ 口径见过的 vtable 才有)
-	bool   has18;
+	void*  orig8;   // Present  (槽8)
+	void*  orig22;  // Present1 (槽22, 仅经 1+ 口径见过的 vtable 才有)
+	bool   has22;
 };
 
 struct FacEntry
 {
 	void** vtbl;
-	void*  o10;  // CreateSwapChain
-	void*  o14;  // CreateSwapChainForHwnd
-	void*  o15;  // CreateSwapChainForCoreWindow
-	void*  o17;  // CreateSwapChainForComposition
+	void*  o10;  // CreateSwapChain (槽10)
+	void*  o15;  // CreateSwapChainForHwnd (槽15)
+	void*  o16;  // CreateSwapChainForCoreWindow (槽16)
+	void*  o24;  // CreateSwapChainForComposition (槽24)
 };
 
 SwpEntry g_swp[8];
@@ -290,19 +326,19 @@ std::chrono::steady_clock::time_point g_lastLog{};
 uint64_t g_lastLogCount = 0;
 std::atomic<void*> g_gameSc{nullptr}; // ★ 拦到的游戏交换链对象 (对象级探针用)
 
-void* lookupPresentOrig4(void** vtbl)
+void* lookupPresentOrig8(void** vtbl)
 {
 	for (int i = 0; i < g_swpN; ++i)
 		if (g_swp[i].vtbl == vtbl)
-			return g_swp[i].orig4;
+			return g_swp[i].orig8;
 	return nullptr;
 }
 
-void* lookupPresentOrig18(void** vtbl)
+void* lookupPresentOrig22(void** vtbl)
 {
 	for (int i = 0; i < g_swpN; ++i)
-		if (g_swp[i].vtbl == vtbl && g_swp[i].has18)
-			return g_swp[i].orig18;
+		if (g_swp[i].vtbl == vtbl && g_swp[i].has22)
+			return g_swp[i].orig22;
 	return nullptr;
 }
 
@@ -315,9 +351,9 @@ void* lookupFacOrig(void** vtbl, int slot)
 		switch (slot)
 		{
 		case 10: return g_fac[i].o10;
-		case 14: return g_fac[i].o14;
 		case 15: return g_fac[i].o15;
-		case 17: return g_fac[i].o17;
+		case 16: return g_fac[i].o16;
+		case 24: return g_fac[i].o24;
 		default: return nullptr;
 		}
 	}
@@ -358,44 +394,51 @@ void registerSwp(void* obj, bool plus, const char* tag)
 		}
 	if (idx < 0)
 	{
-		void* o4 = vtbl[4];
+		void* o8 = vtbl[8];
 		logLine(std::string(tag) + ": vtable=" + hexOf(vtbl) + " 来自 " + modulePathOf(vtbl));
-		logLine(std::string(tag) + ": slot4 原值=" + hexOf(o4) + " 来自 " + modulePathOf(o4));
-		if (!isDxgiFamily(o4))
+		logLine(std::string(tag) + ": slot8 原值=" + hexOf(o8) + " 来自 " + modulePathOf(o8));
+		if (!isDxgiFamily(o8))
 		{
-			logLine(std::string(tag) + ": slot4 原值不在 dxgi/renderdoc — 跳过该 vtable");
+			logLine(std::string(tag) + ": slot8 原值不在 dxgi/renderdoc — 跳过该 vtable");
+			LeaveCriticalSection(&g_cs);
+			return;
+		}
+		if (g_swpN >= (int)(sizeof(g_swp) / sizeof(g_swp[0])))
+		{
+			logLine(std::string(tag) + ": 交换链登记表已满 (" + std::to_string(g_swpN) +
+			        ") — 跳过该 vtable (防越界)");
 			LeaveCriticalSection(&g_cs);
 			return;
 		}
 		idx = g_swpN++;
 		g_swp[idx].vtbl = vtbl;
-		g_swp[idx].orig4 = o4;
-		g_swp[idx].orig18 = nullptr;
-		g_swp[idx].has18 = false;
+		g_swp[idx].orig8 = o8;
+		g_swp[idx].orig22 = nullptr;
+		g_swp[idx].has22 = false;
 	}
 	else
 	{
 		// 匹配路径原先是静默的 — v1.4 补日志: 游戏交换链若与 dummy 同类, 此行即证据
 		logLine(std::string(tag) + ": vtable 已登记 (与既有同类) " + hexOf(vtbl));
 	}
-	if (plus && !g_swp[idx].has18)
+	if (plus && !g_swp[idx].has22)
 	{
-		// 只有确认实现 1 及以上接口的 vtable 才安全读槽 18 (布局至少 19 项)
-		void* o18 = vtbl[18];
-		logLine(std::string(tag) + ": slot18 原值=" + hexOf(o18) + " 来自 " + modulePathOf(o18));
-		if (isDxgiFamily(o18))
+		// 只有确认实现 1 及以上接口的 vtable 才安全读槽 22 (布局至少 23 项)
+		void* o22 = vtbl[22];
+		logLine(std::string(tag) + ": slot22 原值=" + hexOf(o22) + " 来自 " + modulePathOf(o22));
+		if (isDxgiFamily(o22))
 		{
-			g_swp[idx].orig18 = o18;
-			g_swp[idx].has18 = true;
+			g_swp[idx].orig22 = o22;
+			g_swp[idx].has22 = true;
 		}
 		else
 		{
-			logLine(std::string(tag) + ": slot18 原值不在 dxgi/renderdoc — 不挂 Present1");
+			logLine(std::string(tag) + ": slot22 原值不在 dxgi/renderdoc — 不挂 Present1");
 		}
 	}
-	patchSlotLocked(&vtbl[4], reinterpret_cast<void*>(&hookedPresent));
-	if (g_swp[idx].has18)
-		patchSlotLocked(&vtbl[18], reinterpret_cast<void*>(&hookedPresent1));
+	patchSlotLocked(&vtbl[8], reinterpret_cast<void*>(&hookedPresent));
+	if (g_swp[idx].has22)
+		patchSlotLocked(&vtbl[22], reinterpret_cast<void*>(&hookedPresent1));
 	LeaveCriticalSection(&g_cs);
 }
 
@@ -432,23 +475,30 @@ void registerFac(void* obj, bool plus2, const char* tag)
 		}
 	if (idx < 0)
 	{
+		if (g_facN >= (int)(sizeof(g_fac) / sizeof(g_fac[0])))
+		{
+			logLine(std::string(tag) + ": 工厂登记表已满 (" + std::to_string(g_facN) +
+			        ") — 跳过该 vtable (防越界)");
+			LeaveCriticalSection(&g_cs);
+			return;
+		}
 		idx = g_facN++;
 		g_fac[idx].vtbl = vtbl;
 		g_fac[idx].o10 = nullptr;
-		g_fac[idx].o14 = nullptr;
 		g_fac[idx].o15 = nullptr;
-		g_fac[idx].o17 = nullptr;
+		g_fac[idx].o16 = nullptr;
+		g_fac[idx].o24 = nullptr;
 		logLine(std::string(tag) + ": factory vtable=" + hexOf(vtbl) + " 来自 " + modulePathOf(vtbl));
 	}
 	FacEntry& e = g_fac[idx];
 	tryFacSlot(vtbl, 10, &e.o10, reinterpret_cast<void*>(&hookedCreateSwapChain), "CreateSwapChain", tag);
-	if (plus2)  // 槽 14/15/17 只存在于 Factory2 布局, 防越界
+	if (plus2)  // 槽 15/16/24 只存在于 Factory2 布局 (末项=24), 防越界
 	{
-		tryFacSlot(vtbl, 14, &e.o14, reinterpret_cast<void*>(&hookedCreateSwapChainForHwnd),
+		tryFacSlot(vtbl, 15, &e.o15, reinterpret_cast<void*>(&hookedCreateSwapChainForHwnd),
 		           "CreateSwapChainForHwnd", tag);
-		tryFacSlot(vtbl, 15, &e.o15, reinterpret_cast<void*>(&hookedCreateSwapChainForCoreWindow),
+		tryFacSlot(vtbl, 16, &e.o16, reinterpret_cast<void*>(&hookedCreateSwapChainForCoreWindow),
 		           "CreateSwapChainForCoreWindow", tag);
-		tryFacSlot(vtbl, 17, &e.o17, reinterpret_cast<void*>(&hookedCreateSwapChainForComposition),
+		tryFacSlot(vtbl, 24, &e.o24, reinterpret_cast<void*>(&hookedCreateSwapChainForComposition),
 		           "CreateSwapChainForComposition", tag);
 	}
 	LeaveCriticalSection(&g_cs);
@@ -527,7 +577,7 @@ void logProcessWindows(const std::string& tag)
 std::string swapDesc(IDXGISwapChain* sc)
 {
 	DXGI_SWAP_CHAIN_DESC d{};
-	if (FAILED(sc->GetDesc(&d)))   // 槽 8 未挂钩, 可安全直调
+	if (FAILED(sc->GetDesc(&d)))   // GetDesc=槽12 未挂钩, 可安全直调
 		return "GetDesc 失败";
 	char title[128]{};
 	if (d.OutputWindow)
@@ -566,9 +616,65 @@ void notePresent(const char* via, IDXGISwapChain* sc)
 	}
 }
 
+// ---------- v1.7 方案A: renderdoc 转发桩解包取真交换链 ----------
+// renderdoc 包装桩是动态转发存根 (v1.6 实测 48 8B 49 10 / 48 8B 01 / 48 FF 60 20 =
+// 每次调用重取真对象, 不缓存 FP)。同好静态分析: 包装桩取真对象的偏移 — v0 系方法
+// (GetDesc/ResizeTarget/GetFrameStatistics/GetLastPresent) 为 [obj+0x28],
+// idx4 桩为 [obj+0x10] ⇒ 包装对象 +0x28 (首选) / +0x10 (备选) 处存着真对象指针。
+// 解出真对象后读它的 vtbl[8]/vtbl[22] 就是 dxgi 真 Present/Present1 (版本无关且覆盖真类)。
+// 安全性: 只对 vtable 落在 renderdoc.dll 的包装类对象尝试 (真 dxgi 对象上这些偏移是
+// 内部字段, 直接跳过); 全程 memReadable 兜底; 解出的值只作方案B 的候选靶, 最终由
+// 可执行页 + 14B 前导字节守卫把关 — 解错也不会写任何东西。
+// 返回真对象指针 (由调用方读 vtbl[8]/[22]), 失败返回 nullptr。
+void* unwrapRealSwapChain(void* obj, const char* tag)
+{
+	const std::string tg = std::string("方案A(") + tag + ")";
+	if (!obj || !memReadable(obj, 0x30 + sizeof(void*)))
+	{
+		logLine(tg + ": 对象不可读 — 跳过");
+		return nullptr;
+	}
+	void** vtbl = *reinterpret_cast<void***>(obj);
+	if (!memReadable(vtbl, sizeof(void*)))
+		return nullptr;
+	if (lowerCopy(modulePathOf(vtbl)).find("renderdoc.dll") == std::string::npos)
+	{
+		logLine(tg + ": 对象 " + hexOf(obj) + " vtable 不在 renderdoc 包装类 — 这些偏移不适用, 跳过");
+		return nullptr;
+	}
+	// 桩自曝偏移: 0x28 (v0 系方法) 首选, 0x10 (idx4 桩) 备选
+	static const int kOffsets[2] = { 0x28, 0x10 };
+	for (int k = 0; k < 2; ++k)
+	{
+		void* real = nullptr;
+		memcpy(&real, static_cast<char*>(obj) + kOffsets[k], sizeof(void*));
+		logLine(tg + ": 包装对象 " + hexOf(obj) + " vtbl=" + hexOf(vtbl) +
+		        " [obj+0x" + (kOffsets[k] == 0x28 ? "28" : "10") + "]=" + hexOf(real));
+		if (!real || !memReadable(real, sizeof(void*)))
+		{
+			logLine(tg + ": 该偏移不是可读指针 — 换下一偏移");
+			continue;
+		}
+		void** rvt = *reinterpret_cast<void***>(real);
+		if (!memReadable(rvt, 23 * sizeof(void*)))  // 至少 SwapChain1 布局 (槽22) 才完整
+		{
+			logLine(tg + ": 该偏移处对象的 vtable 不可读/不足 23 项 — 换下一偏移");
+			continue;
+		}
+		logLine(tg + ": 真对象=" + hexOf(real) + " (经 +0x" + (kOffsets[k] == 0x28 ? "28" : "10") +
+		        ") vtbl=" + hexOf(rvt) + " 来自 " + modulePathOf(rvt) +
+		        " | 真vtbl[8]=" + hexOf(rvt[8]) + " 来自 " + modulePathOf(rvt[8]) +
+		        " | 真vtbl[22]=" + hexOf(rvt[22]) + " 来自 " + modulePathOf(rvt[22]));
+		return real;
+	}
+	logLine(tg + ": 两个候选偏移都解不出可用真对象 — 放弃");
+	return nullptr;
+}
+
 // ---------- v1.6 方案B: 真 Present/Present1 函数级 detour ----------
-// 目标 = dxgi 里 vtable slot4/18 直指的存根函数 (RVA 对本机 dxgi.dll 文件版本恒定,
-// 前导字节双校验防漂移)。任何调用路径 — 类 vtable 虚调用、GFE 包装直调、renderdoc
+// 目标 = 真 Present/Present1 函数入口 (v1.7: 优先活交换链 vtbl[8]/vtbl[22] 运行时直读,
+// 其次方案A 解包真对象的 vtbl[8]/[22], 最后回退本机 dxgi RVA 0x19000/0x194A0;
+// 前导 14B 字节双校验防漂移)。任何调用路径 — 类 vtable 虚调用、GFE 包装直调、renderdoc
 // 包装层动态转发 — 最终都落进这个函数入口, 计数必然发生。
 //
 // 入口只写 5 字节 E9 rel32 → 近端跳板 (±2GB 内分配, 存 FF25 绝对跳转到钩子):
@@ -790,7 +896,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* sc, UINT sync, UINT flag
 	void** vtbl = *reinterpret_cast<void***>(sc);
 	void* orig = nullptr;
 	EnterCriticalSection(&g_cs);
-	orig = lookupPresentOrig4(vtbl);
+	orig = lookupPresentOrig8(vtbl);
 	LeaveCriticalSection(&g_cs);
 	if (!orig)
 	{
@@ -810,7 +916,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent1(IDXGISwapChain1* sc, UINT sync, UINT fl
 	void** vtbl = *reinterpret_cast<void***>(sc);
 	void* orig = nullptr;
 	EnterCriticalSection(&g_cs);
-	orig = lookupPresentOrig18(vtbl);
+	orig = lookupPresentOrig22(vtbl);
 	LeaveCriticalSection(&g_cs);
 	if (!orig)
 	{
@@ -818,9 +924,50 @@ HRESULT STDMETHODCALLTYPE hookedPresent1(IDXGISwapChain1* sc, UINT sync, UINT fl
 		return E_FAIL;
 	}
 	g_inVtableHook = true;
-	const HRESULT hr18 = reinterpret_cast<Present1_t>(orig)(sc, sync, flags, params);
+	const HRESULT hr22 = reinterpret_cast<Present1_t>(orig)(sc, sync, flags, params);
 	g_inVtableHook = false;
-	return hr18;
+	return hr22;
+}
+
+// v1.7 阳性确认: 打印对象 vptr 与 vtbl[8] (Present) / vtbl[22] (Present1) 是否等于我们的
+// 钩子 — 修槽之前 v1.0~v1.6 只证明过"挂了 SetPrivateDataInterface", 这行才是槽位修对的铁证
+void confirmPositive(void* obj, const char* nm)
+{
+	const std::string tg = std::string("阳性确认 (") + nm + "): ";
+	if (!obj || !memReadable(obj, sizeof(void*)))
+	{
+		logLine(tg + "对象不可读");
+		return;
+	}
+	void** gv = *reinterpret_cast<void***>(obj);
+	if (!memReadable(gv, 9 * sizeof(void*)))
+	{
+		logLine(tg + "vptr 不可读");
+		return;
+	}
+	logLine(tg + "obj=" + hexOf(obj) + " vptr=" + hexOf(gv) + " 来自 " + modulePathOf(gv) +
+	        " | vtbl[8]=" + hexOf(gv[8]) + " 来自 " + modulePathOf(gv[8]) +
+	        (gv[8] == reinterpret_cast<void*>(&hookedPresent)
+	             ? " ==我们的Present钩子 ✓"
+	             : " ≠我们的Present钩子 (尚未挂钩 → 随后就地挂)"));
+	if (memReadable(gv, 23 * sizeof(void*)))
+		logLine(tg + "vtbl[22]=" + hexOf(gv[22]) + " 来自 " + modulePathOf(gv[22]) +
+		        (gv[22] == reinterpret_cast<void*>(&hookedPresent1)
+		             ? " ==我们的Present1钩子 ✓"
+		             : " ≠我们的Present1钩子"));
+}
+
+// v1.7: 判定对象 vtable 是否含槽 22 (SwapChain1 布局) — 用 QI 实测而非猜布局,
+// 免得 v0 口径创建的 ★ 游戏交换链漏挂 Present1 (也不会越界读短 vtable)
+static bool qiuHasSwapChain1(void* sc)
+{
+	if (!sc)
+		return false;
+	void* p = nullptr;
+	if (FAILED(reinterpret_cast<IUnknown*>(sc)->QueryInterface(__uuidof(IDXGISwapChain1), &p)) || !p)
+		return false;
+	reinterpret_cast<IUnknown*>(p)->Release();
+	return true;
 }
 
 HRESULT STDMETHODCALLTYPE hookedCreateSwapChain(IDXGIFactory* self, IUnknown* dev,
@@ -837,8 +984,10 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChain(IDXGIFactory* self, IUnknown* de
 	if (SUCCEEDED(hr) && out && *out)
 	{
 		logLine("★ 工厂拦截 CreateSwapChain → swapchain=" + hexOf(*out) + " | " + swapDesc(*out));
+		confirmPositive(*out, "★游戏 CreateSwapChain");
 		g_gameSc.store(*out);
-		registerSwp(*out, false, "★游戏 CreateSwapChain");
+		registerSwp(*out, qiuHasSwapChain1(*out), "★游戏 CreateSwapChain");
+		unwrapRealSwapChain(*out, "★游戏 CreateSwapChain");
 	}
 	return hr;
 }
@@ -851,7 +1000,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(IDXGIFactory2* self, IUnk
 	void** vtbl = *reinterpret_cast<void***>(self);
 	void* orig = nullptr;
 	EnterCriticalSection(&g_cs);
-	orig = lookupFacOrig(vtbl, 14);
+	orig = lookupFacOrig(vtbl, 15);
 	LeaveCriticalSection(&g_cs);
 	if (!orig)
 		return E_FAIL;
@@ -859,8 +1008,10 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(IDXGIFactory2* self, IUnk
 	if (SUCCEEDED(hr) && out && *out)
 	{
 		logLine("★ 工厂拦截 CreateSwapChainForHwnd → swapchain=" + hexOf(*out) + " | " + swapDesc(*out));
+		confirmPositive(*out, "★游戏 CreateSwapChainForHwnd");
 		g_gameSc.store(*out);
 		registerSwp(*out, true, "★游戏 CreateSwapChainForHwnd");
+		unwrapRealSwapChain(*out, "★游戏 CreateSwapChainForHwnd");
 	}
 	return hr;
 }
@@ -872,7 +1023,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForCoreWindow(IDXGIFactory2* self
 	void** vtbl = *reinterpret_cast<void***>(self);
 	void* orig = nullptr;
 	EnterCriticalSection(&g_cs);
-	orig = lookupFacOrig(vtbl, 15);
+	orig = lookupFacOrig(vtbl, 16);
 	LeaveCriticalSection(&g_cs);
 	if (!orig)
 		return E_FAIL;
@@ -880,8 +1031,10 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForCoreWindow(IDXGIFactory2* self
 	if (SUCCEEDED(hr) && out && *out)
 	{
 		logLine("★ 工厂拦截 CreateSwapChainForCoreWindow → swapchain=" + hexOf(*out) + " | " + swapDesc(*out));
+		confirmPositive(*out, "★游戏 CreateSwapChainForCoreWindow");
 		g_gameSc.store(*out);
 		registerSwp(*out, true, "★游戏 CreateSwapChainForCoreWindow");
+		unwrapRealSwapChain(*out, "★游戏 CreateSwapChainForCoreWindow");
 	}
 	return hr;
 }
@@ -893,7 +1046,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForComposition(IDXGIFactory2* sel
 	void** vtbl = *reinterpret_cast<void***>(self);
 	void* orig = nullptr;
 	EnterCriticalSection(&g_cs);
-	orig = lookupFacOrig(vtbl, 17);
+	orig = lookupFacOrig(vtbl, 24);
 	LeaveCriticalSection(&g_cs);
 	if (!orig)
 		return E_FAIL;
@@ -901,8 +1054,10 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForComposition(IDXGIFactory2* sel
 	if (SUCCEEDED(hr) && out && *out)
 	{
 		logLine("★ 工厂拦截 CreateSwapChainForComposition → swapchain=" + hexOf(*out) + " | " + swapDesc(*out));
+		confirmPositive(*out, "★游戏 CreateSwapChainForComposition");
 		g_gameSc.store(*out);
 		registerSwp(*out, true, "★游戏 CreateSwapChainForComposition");
+		unwrapRealSwapChain(*out, "★游戏 CreateSwapChainForComposition");
 	}
 	return hr;
 }
@@ -947,7 +1102,7 @@ void collectFacVariants(void* obj, bool plus2, const char* tag)
 			reinterpret_cast<IUnknown*>(p)->Release();
 		}
 	}
-	// QI 向上 Factory2: QI 成功即该指针布局保证含槽 14/15/17, 升级安全
+	// QI 向上 Factory2: QI 成功即该指针布局保证含槽 15/16/24 (Factory2 末项=24), 升级安全
 	if (!plus2)
 	{
 		void* p = nullptr;
@@ -1183,7 +1338,7 @@ bool doInstall(HMODULE hd3d11, HMODULE hdxgi)
 		}
 	}
 
-	// 7) 收集并挂所有交换链 vtable 变体 (槽 4 与安全的槽 18)
+	// 7) 收集并挂所有交换链 vtable 变体 (槽 8 与安全的槽 22)
 	collectSwpVariants(sc1, true, "dummy1(ForHwnd)");
 	if (sc0)
 		collectSwpVariants(sc0, false, "dummy2(v0)");
@@ -1290,7 +1445,7 @@ bool doInstall(HMODULE hd3d11, HMODULE hdxgi)
 	}
 
 	// 8) 挂五个口径工厂的交换链创建方法 — 游戏创建交换链时就地打它的 vtable;
-	//    plus2 仅对 IID2 口径为 true (该布局保证含槽14/15/17, 防越界)
+	//    plus2 仅对 IID2 口径为 true (该布局保证含槽15/16/24, 防越界)
 	{
 		const char* facTags[5] = {
 			"工厂口径0(Factory导出+IID0)", "工厂口径1(Factory1导出+IID0)",
@@ -1304,58 +1459,125 @@ bool doInstall(HMODULE hd3d11, HMODULE hdxgi)
 	// 9) 汇总 (sc0/sc1/factory/dev 故意不释放: 对象驻留 = 钩子常驻)
 	{
 		int swpPatched = 0;
+		EnterCriticalSection(&g_cs);
 		for (int i = 0; i < g_swpN; ++i)
-			if (g_swp[i].orig4)
+			if (g_swp[i].orig8)
 				++swpPatched;
+		LeaveCriticalSection(&g_cs);
 		logLine("登记完成: 交换链 vtable " + std::to_string(swpPatched) + " 个 (含 Present 挂钩), " +
 		        "工厂 vtable " + std::to_string(g_facN) + " 个 (含创建方法挂钩); Present 钩子=" +
 		        hexOf(reinterpret_cast<const void*>(&hookedPresent)));
+		// v1.7 阳性确认: 槽位修对后, dummy 对象的 vtbl[8] 必须就是我们挂的 Present 钩子
+		// (v1.0~v1.6 只验证过 vtbl[4] — 那是 SetPrivateDataInterface, 假阳性根源)
+		confirmPositive(sc1, "dummy1 安装完成");
+		if (sc0)
+			confirmPositive(sc0, "dummy2 安装完成");
+		if (scF)
+			confirmPositive(scF, "dummy3 安装完成");
 	}
 
-	// v1.5 探针 B: 原实现前 32 字节 — 为函数级 detour 选安全窃取长度
-	if (g_swpN > 0)
+	// v1.5 探针 B: 原实现前 32 字节 — 为函数级 detour 选安全窃取长度 (v1.7: 真槽 8/22)
 	{
-		if (g_swp[0].orig4)
-			logLine("探针: Present 原实现前32字节 @ " + hexOf(g_swp[0].orig4) + " = " +
-			        hexBytes(g_swp[0].orig4, 32));
-		if (g_swp[0].orig18)
-			logLine("探针: Present1 原实现前32字节 @ " + hexOf(g_swp[0].orig18) + " = " +
-			        hexBytes(g_swp[0].orig18, 32));
+		void* o8 = nullptr;
+		void* o22 = nullptr;
+		EnterCriticalSection(&g_cs);
+		if (g_swpN > 0)
+		{
+			o8 = g_swp[0].orig8;
+			if (g_swp[0].has22)
+				o22 = g_swp[0].orig22;
+		}
+		LeaveCriticalSection(&g_cs);
+		if (o8)
+			logLine("探针: Present(slot8) 原实现前32字节 @ " + hexOf(o8) + " = " + hexBytes(o8, 32));
+		if (o22)
+			logLine("探针: Present1(slot22) 原实现前32字节 @ " + hexOf(o22) + " = " + hexBytes(o22, 32));
 	}
 	if (g_facN > 0 && g_fac[0].o10)
 		logLine("探针: CreateSwapChain 原实现前32字节 @ " + hexOf(g_fac[0].o10) + " = " +
 		        hexBytes(g_fac[0].o10, 32));
 
-	// v1.6 方案B: 对 dxgi 真 Present/Present1 存根打函数级 detour
-	// RVA 对本机 dxgi.dll 文件版本恒定; 前导字节双校验, 版本漂移即保守跳过
+	// v1.7 方案B: 对真 Present/Present1 打函数级 detour — 靶子按优先级运行时取:
+	//   ① 活交换链 vtbl[8]/vtbl[22] 直读 (硬编码零依赖, 调用方真正会走的入口);
+	//   ② 方案A 解包 (renderdoc 包装对象 [obj+0x28] → 真对象) 的 vtbl[8]/vtbl[22];
+	//   ③ 本机 dxgi RVA 0x19000/0x194A0 兜底 (文件版本恒定; 旧 0x2E460/0x4EE60 已作废)。
+	// 每个候选都过 可执行页 + 14B 前导字节双校验 (末字节 56=Present / 54=Present1);
+	// 字节不符 → 保守跳过并留档, 换下一候选; 全部失败只丢函数层, vtable 层仍在。
 	{
-		HMODULE hdx = GetModuleHandleA("dxgi.dll");
-		static const unsigned char kPresent[14] = {
-			0x48, 0x83, 0xEC, 0x38, 0x4C, 0x89, 0x44, 0x24, 0x50, 0x4C, 0x8D, 0x4C, 0x24, 0x50 };
-		static const unsigned char kPresent1[15] = {
-			0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10,
-			0x57, 0x48, 0x83, 0xEC, 0x20 };
-		if (hdx)
+		// 14B 前导字节守卫 (本机 dxgi 实测): 前 12B 两函数相同, 第 14B 56=Present / 54=Present1
+		static const unsigned char kPresentBytes[14] = {
+			0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x55, 0x57, 0x41, 0x56 };
+		static const unsigned char kPresent1Bytes[14] = {
+			0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x55, 0x57, 0x41, 0x54 };
+		struct Cand { void* t; std::string src; };
+		Cand cp[8];
+		Cand cp1[8];
+		int np = 0, np1 = 0;
+		auto add = [](Cand* arr, int& n, void* t, const char* src) {
+			if (!t || n >= 8)
+				return;
+			for (int i = 0; i < n; ++i)
+				if (arr[i].t == t)
+					return;
+			arr[n].t = t;
+			arr[n].src = src;
+			++n;
+		};
+		// ① 活交换链 vtbl[8]/[22] (登记表原值 = 钩子换掉前的真实入口)
+		EnterCriticalSection(&g_cs);
+		for (int i = 0; i < g_swpN; ++i)
 		{
-			void* p = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(hdx) + 0x2E460);
-			void* p1 = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(hdx) + 0x4EE60);
-			// 交叉验证: 无 renderdoc 时 dummy 登记的 orig4 应等于 dxgi 存根本体
-			void* orig4 = nullptr;
-			EnterCriticalSection(&g_cs);
-			if (g_swpN > 0)
-				orig4 = g_swp[0].orig4;
-			LeaveCriticalSection(&g_cs);
-			if (orig4)
-				logLine("方案B 交叉: dummy slot4 orig4=" + hexOf(orig4) +
-				        (orig4 == p ? " == dxgi+0x2E460 (真类直验 ✓)"
-				                    : " ≠ dxgi+0x2E460 (包装类, 属预期, 方案B 不受影响)"));
-			installCodeDetour(g_detP, p, reinterpret_cast<void*>(&detouredPresent),
-			                  kPresent, 14, 14, "Present");
-			installCodeDetour(g_detP1, p1, reinterpret_cast<void*>(&detouredPresent1),
-			                  kPresent1, 15, 15, "Present1");
+			add(cp, np, g_swp[i].orig8, "活交换链vtbl[8]");
+			if (g_swp[i].has22)
+				add(cp1, np1, g_swp[i].orig22, "活交换链vtbl[22]");
 		}
-		else
-			logLine("方案B: dxgi.dll 未加载 — 跳过函数级 detour");
+		LeaveCriticalSection(&g_cs);
+		// ② 方案A 解包 (仅 renderdoc 包装对象产生候选, 其余对象在函数内自行跳过)
+		{
+			void* srcs[3] = { sc1, sc0, scF };
+			for (int i = 0; i < 3; ++i)
+			{
+				if (!srcs[i])
+					continue;
+				void* real = unwrapRealSwapChain(srcs[i], "安装期解包");
+				if (!real)
+					continue;
+				void** rvt = *reinterpret_cast<void***>(real);
+				if (memReadable(rvt, 9 * sizeof(void*)))
+					add(cp, np, rvt[8], "方案A真vtbl[8]");
+				if (memReadable(rvt, 23 * sizeof(void*)))
+					add(cp1, np1, rvt[22], "方案A真vtbl[22]");
+			}
+		}
+		// ③ 本机 dxgi RVA 兜底
+		if (HMODULE hdx = GetModuleHandleA("dxgi.dll"))
+		{
+			add(cp, np, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(hdx) + 0x19000),
+			    "dxgi+0x19000 兜底");
+			add(cp1, np1, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(hdx) + 0x194A0),
+			    "dxgi+0x194A0 兜底");
+		}
+		// 逐候选安装 (第一个通过字节守卫的胜出)
+		bool okP = false;
+		for (int i = 0; i < np && !okP; ++i)
+		{
+			logLine("方案B Present 候选 " + std::to_string(i + 1) + "/" + std::to_string(np) + ": " +
+			        hexOf(cp[i].t) + " 来自 " + cp[i].src + " (" + modulePathOf(cp[i].t) + ")");
+			okP = installCodeDetour(g_detP, cp[i].t, reinterpret_cast<void*>(&detouredPresent),
+			                        kPresentBytes, 14, 14, "Present");
+		}
+		if (!okP)
+			logLine("方案B Present: " + std::to_string(np) + " 个候选全部未装 (或无候选) — 函数层缺失, vtable 层仍覆盖");
+		bool okP1 = false;
+		for (int i = 0; i < np1 && !okP1; ++i)
+		{
+			logLine("方案B Present1 候选 " + std::to_string(i + 1) + "/" + std::to_string(np1) + ": " +
+			        hexOf(cp1[i].t) + " 来自 " + cp1[i].src + " (" + modulePathOf(cp1[i].t) + ")");
+			okP1 = installCodeDetour(g_detP1, cp1[i].t, reinterpret_cast<void*>(&detouredPresent1),
+			                         kPresent1Bytes, 14, 14, "Present1");
+		}
+		if (!okP1)
+			logLine("方案B Present1: " + std::to_string(np1) + " 个候选全部未装 (或无候选) — 函数层缺失, vtable 层仍覆盖");
 	}
 
 	// v1.5 探针 W: 本进程顶层窗口 — 找可能漏钩的第二个交换链的宿主窗口
@@ -1381,30 +1603,30 @@ void verifyAndRepair()
 	for (int i = 0; i < g_swpN; ++i)
 	{
 		SwpEntry& e = g_swp[i];
-		if (e.vtbl[4] != reinterpret_cast<void*>(&hookedPresent))
+		if (e.vtbl[8] != reinterpret_cast<void*>(&hookedPresent))
 		{
-			logLine("!! vtable " + hexOf(e.vtbl) + " slot4 被改写: 现=" + hexOf(e.vtbl[4]) +
-			        " 来自 " + modulePathOf(e.vtbl[4]) + " → 打回我们的钩子");
-			patchSlotLocked(&e.vtbl[4], reinterpret_cast<void*>(&hookedPresent));
+			logLine("!! vtable " + hexOf(e.vtbl) + " slot8 被改写: 现=" + hexOf(e.vtbl[8]) +
+			        " 来自 " + modulePathOf(e.vtbl[8]) + " → 打回我们的钩子");
+			patchSlotLocked(&e.vtbl[8], reinterpret_cast<void*>(&hookedPresent));
 		}
-		if (e.has18 && e.vtbl[18] != reinterpret_cast<void*>(&hookedPresent1))
+		if (e.has22 && e.vtbl[22] != reinterpret_cast<void*>(&hookedPresent1))
 		{
-			logLine("!! vtable " + hexOf(e.vtbl) + " slot18 被改写: 现=" + hexOf(e.vtbl[18]) +
-			        " 来自 " + modulePathOf(e.vtbl[18]) + " → 打回我们的钩子");
-			patchSlotLocked(&e.vtbl[18], reinterpret_cast<void*>(&hookedPresent1));
+			logLine("!! vtable " + hexOf(e.vtbl) + " slot22 被改写: 现=" + hexOf(e.vtbl[22]) +
+			        " 来自 " + modulePathOf(e.vtbl[22]) + " → 打回我们的钩子");
+			patchSlotLocked(&e.vtbl[22], reinterpret_cast<void*>(&hookedPresent1));
 		}
 	}
 	for (int i = 0; i < g_facN; ++i)
 	{
 		FacEntry& e = g_fac[i];
-		const int   slots[4] = { 10, 14, 15, 17 };
+		const int   slots[4] = { 10, 15, 16, 24 };
 		void* const hooks[4] = {
 			reinterpret_cast<void*>(&hookedCreateSwapChain),
 			reinterpret_cast<void*>(&hookedCreateSwapChainForHwnd),
 			reinterpret_cast<void*>(&hookedCreateSwapChainForCoreWindow),
 			reinterpret_cast<void*>(&hookedCreateSwapChainForComposition)
 		};
-		void* const origs[4] = { e.o10, e.o14, e.o15, e.o17 };
+		void* const origs[4] = { e.o10, e.o15, e.o16, e.o24 };
 		for (int k = 0; k < 4; ++k)
 		{
 			if (!origs[k])
@@ -1426,7 +1648,7 @@ void watchdogThread()
 	bool reported = false, alarmed = false;
 	int ticks = 0;
 	void** lastGV = nullptr;
-	void* lastS4 = nullptr;
+	void* lastS8 = nullptr;
 	for (;;)
 	{
 		Sleep(1000);
@@ -1435,28 +1657,29 @@ void watchdogThread()
 		{
 			verifyAndRepair();
 
-			// v1.5 探针 A: 对象级监视 — 类 vtable 稳不代表游戏对象的 vptr/槽位没变
+			// v1.7 探针 A (改读真槽 8): 对象级监视 — 类 vtable 稳不代表游戏对象的 vptr/槽位没变
 			void* gsc = g_gameSc.load();
 			if (gsc && memReadable(gsc, sizeof(void*)))
 			{
 				void** gv = *reinterpret_cast<void***>(gsc);
-				if (memReadable(gv, 5 * sizeof(void*)))
+				if (memReadable(gv, 9 * sizeof(void*)))
 				{
 					if (gv != lastGV)
 					{
 						logLine("探针: 游戏交换链 vptr=" + hexOf(gv) + " 来自 " + modulePathOf(gv) +
 						        (lastGV ? " (变更! 旧=" + hexOf(lastGV) + ")" : " (基线)"));
+						confirmPositive(gsc, "探针A vptr基线/变更");  // v1.7 阳性确认: vptr + vtbl[8] 全量打
 						lastGV = gv;
-						lastS4 = nullptr;
+						lastS8 = nullptr;
 					}
-					void* s4 = gv[4];
-					if (s4 != lastS4)
+					void* s8 = gv[8];
+					if (s8 != lastS8)
 					{
-						logLine("探针: 游戏交换链 slot4=" + hexOf(s4) + " 来自 " + modulePathOf(s4) +
-					                (s4 == reinterpret_cast<void*>(&hookedPresent)
+						logLine("探针: 游戏交换链 slot8=" + hexOf(s8) + " 来自 " + modulePathOf(s8) +
+					                (s8 == reinterpret_cast<void*>(&hookedPresent)
 					                     ? " (我们的钩子 ✓)"
 					                     : " (≠我们的钩子 !!)"));
-						lastS4 = s4;
+						lastS8 = s8;
 					}
 				}
 			}
@@ -1478,9 +1701,13 @@ void watchdogThread()
 			swpN = g_swpN;
 			facN = g_facN;
 			LeaveCriticalSection(&g_cs);
+			void* gsc = g_gameSc.load();
 			logLine("告警: 安装成功但 120s 内 0 次 Present — 已登记 交换链vtable=" +
 			        std::to_string(swpN) + " 工厂vtable=" + std::to_string(facN) +
-			        "; 按日志中 vtable 模块 / ★工厂拦截 / 被改写记录迭代");
+			        "; 游戏交换链=" +
+			        (gsc ? hexOf(gsc) + " (★ 已取得, 见探针A)" : std::string("未取得 (★=0 / g_gameSc 空)")) +
+			        "; 方案B Present detour=" + std::string(g_detP.active ? "已装" : "未装") +
+			        "; 按日志中 vtable 模块 / 阳性确认 / ★工厂拦截 / 被改写记录迭代");
 		}
 	}
 }
@@ -1518,7 +1745,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 {
 	info->infoVersion = PluginInfo::kInfoVersion;
 	info->name = "PocPresenter";
-	info->version = (0u << 16) | (7u << 8) | 0u; // 0.7.0
+	info->version = (0u << 16) | (8u << 8) | 0u; // 0.8.0
 
 	if (skse->isEditor)  // 只进游戏本体, 不进 Creation Kit
 		return false;
@@ -1529,7 +1756,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.7.0 (PoC-A v1.6: 同步安装 + 五口径 + 设备链 + 三探针 + 方案B函数级detour) ====");
+	logLine("==== poc-presenter v0.8.0 (PoC-A v1.7: 槽位勘误 8/22 + 工厂 10/15/16/24 + 方案B运行时靶 + 方案A解包 + 阳性确认) ====");
 
 	InitializeCriticalSection(&g_cs);
 

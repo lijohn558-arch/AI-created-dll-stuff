@@ -72,21 +72,28 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
 本步**不碰 Vulkan、不改变画面**，只产出日志。
 
-**机制（v1.3，六通道）**：
+**机制（v1.7，七通道）**：
 1. **同步安装（v1.2 主修正）**——钩子在 `SKSEPlugin_Load` 内同步装完（等模块 ≤5s、等
    renderdoc ≤2s 兜加载序）；SKSE 主线程加载插件，Load 不返回游戏就无法继续初始化，
    由此**保证先于游戏交换链创建**（v1.1 后台线程安装曾输给渲染器初始化的竞态）；
 2. **多 vtable 收集**——dummy1（ForHwnd→SwapChain1 口径）+ dummy2（工厂 v0 CreateSwapChain 口径）
-   + 两者各自 QI SwapChain/1/2/3，每张不同 vtable 挂槽 4（Present），经 1 口径见过的加挂槽 18（Present1）；
+   + 两者各自 QI SwapChain/1/2/3，每张不同 vtable 挂槽 8（Present），经 1 口径见过的加挂槽 22（Present1）；
+   （v1.7 勘误：v1.0~v1.6 挂的槽 4/18 按 MS dxgi.h 实为 SetPrivateDataInterface/GetDesc1，
+   从未挂到 Present——这就是历次 0 计数的根因，真槽为 8/22）
 3. **五口径工厂拦截**——CreateDXGIFactory 与 CreateDXGIFactory1 各配 IID0/1/2，加
    CreateDXGIFactory2：RenderDoc 包装类若按「所请求接口」分化，游戏要的那张也在登记之列；
-   挂槽 10/14/15/17 四个交换链创建方法，游戏创建交换链时拿到其对象就地打 vtable，日志带 ★；
+   挂槽 10/15/16/24 四个交换链创建方法（CreateSwapChain / ForHwnd / ForCoreWindow /
+   ForComposition，MS dxgi.h 定位；旧 14/17 实为 IsWindowedStereoEnabled/GetSharedResourceAdapterLuid
+   = 潜在崩溃点，v1.7 改正），游戏创建交换链时拿到其对象就地打 vtable，日志带 ★；
 4. **设备链通道（v1.3 新增）**——device → QI `IDXGIDevice` → `GetAdapter` → `GetParent`
    三 IID 取工厂（游戏常见拿工厂路径，非导出）；每个新工厂先建辅助 v0 dummy（拿它所属类的
-   交换链 vtable——若是真 dxgi 类，游戏 Present 即被槽 4 截住），再挂其创建方法；
-5. **安全阀**——原值须落在 dxgi.dll / renderdoc.dll 内才挂（防错槽位）；14/15/17 仅对
-   IID2 口径读（防越界）；
-6. **看门狗**——每 5s 复查已挂槽位，被第三方改写则记录并打回；120s 仍 0 次 Present 给汇总告警。
+   交换链 vtable——若是真 dxgi 类，游戏 Present 即被槽 8 截住），再挂其创建方法；
+5. **安全阀**——原值须落在 dxgi.dll / renderdoc.dll 内才挂（防错槽位）；15/16/24 仅对
+   IID2 口径读（Factory2 布局末项=24，防越界）；
+6. **看门狗**——每 5s 复查已挂槽位，被第三方改写则记录并打回；120s 仍 0 次 Present 给汇总告警
+   （附：游戏交换链是否取得、方案B detour 是否已装）；
+7. **阳性确认（v1.7 新增）**——安装完成与 ★ 拦到游戏交换链时，都打印对象 vptr 与 vtbl[8]
+   是否等于我们的钩子；方案A（renderdoc 转发桩 `[obj+0x28]` 解包真对象）作为方案B 的候选靶来源。
 
 钩子按「调用方 vtable 地址」查表转调原函数；原函数若来自 RenderDoc 包装层则抓帧链路不受影响。
 > 实测链：v1.0 单挂槽4 → 0 触发（类不匹配）；v1.1 四通道 → 0 触发、无 ★，overlay 暴露
@@ -109,7 +116,8 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 > dxgi 类**（无 renderdoc 时我方导出=真类故 ★ 中；有 renderdoc 时我方只能拿到包装类而游戏
 > 仍持真类故 ★ 不中）；探针 B 实锤 renderdoc 的 Present 桩 = 11 字节三指令**动态转发 thunk**
 > （`mov rcx,[rcx+10]; mov rax,[rcx]; jmp [rax+20]` → 转发到真对象**当前** slot4）⇒ 只要握有
-> 真类 slot4，包装层最终必落我方钩子（★ 中否不再影响计数）；CreateSwapChain 序言 15 字节
+> 真类 slot4，包装层最终必落我方钩子（★ 中否不再影响计数）——〔**v1.7 勘误**：被转发的槽 4
+> 实为 `SetPrivateDataInterface`，此推论不成立，真条件是槽 8，见下方 v1.7 段〕；CreateSwapChain 序言 15 字节
 > 全位置无关（可安全窃取）；探针 W 仅唯一游戏窗口（+Steam `DIEmWin`），无第二宿主；
 > dummy3 FLIP 被系统拒 0x80070005（低优先级）。**修法 = 加载序**：`capture-helper.dll` 改名
 > `z-capture-helper.dll` 让 poc-presenter 先装真类 → 待双跑验证（无 helper 取证 GFE / 改名后
@@ -128,6 +136,19 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 > 函数钩子据此跳过计数（双层不双计）——**任何调用路径（类 vtable 虚调用 / GFE 包装绕行 /
 > renderdoc 动态转发）最终都落进同一函数入口，计数必然发生**（v1.4「计数恒 0」的破局点）。
 > 方案A 暂缓为 v1.7 备选（B 若通则 A 仅诊断增益）。
+> **v1.7 = 根因勘误 + 全量槽位修正（2026-10-03，外部同好指正 + MS dxgi.h 与本地实证）**：
+> 上面 v1.0~v1.6 全链「挂槽 4/18」按 MS ABI 实为 `SetPrivateDataInterface`（IDXGIObject 第 4 项）
+> 与 `GetDesc1`（SwapChain1 第 18 项），**从未挂到 Present ⇒ 历次 0 计数恒真**；v1.6 的
+> `0x2E460/0x4EE60` 双守卫就是这两槽的存根本体 = 探针 B 与守卫**互相自证循环**（两者恒一致）。
+> 真 ABI：`Present=槽8 → dxgi+0x19000`（前 14B `48 89 5C 24 10 48 89 74 24 18 55 57 41 56`，
+> 恰为指令边界）、`Present1=槽22 → dxgi+0x194A0`（前 14B 末字节 `54` 与 Present 的 `56` 可区分，
+> 边界 14/16）——`tools\dxbytes.ps1` 已同步（旧两址保留为历史条目）。工厂按 dxgi.h 重排：
+> 保留 10、`ForHwnd 14→15`、`ForCoreWindow 15→16`、`ForComposition 17→24`（外部建议 13/14/22
+> 与 ABI 不符：13=IsCurrent、14=IsWindowedStereoEnabled、22=RegisterOcclusionStatusEvent，均非创建路径）。
+> 方案B 靶子改**运行时取**：① 活交换链 `vtbl[8]/[22]` 直读 → ② 方案A 解包真对象 `vtbl[8]/[22]`
+> （renderdoc 转发桩 `[obj+0x28]` 存真对象指针）→ ③ dxgi RVA 兜底，每候选过 14B 字节守卫；
+> 旧「交叉验证行」删除。**阳性确认**：安装完成与 ★ 处打印对象 vptr + `vtbl[8]` 是否等于我们的钩子
+> （修槽前只证明过「挂了 SetPrivateDataInterface」= 假阳性根源）；TLS 双层不双计与 CHAIN 不变。
 
 ### 构建
 push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从 **Actions → Artifacts**
@@ -143,21 +164,33 @@ push 代码 → GitHub Actions `build` 工作流（`poc-presenter` job）→ 从
      （v1.4 关键行——若「来自」落在 **dxgi.dll** 即拿到真类，双类覆盖成立；
      若 GetParent 失败会显式打 `GetParent 失败 hr=...`）
    - `设备链辅助 dummy IID...: ...`（该类交换链 vtable 也被收集的证据）
+   - `...: slot8 原值=0x... 来自 dxgi.dll` + `...: slot22 原值=0x... 来自 ...`
+     （v1.7 起读的是**真槽**：槽8=Present、槽22=Present1，且原值须落在 dxgi/renderdoc 才挂）
    - `...: vtable 已登记 (与既有同类) 0x...`（游戏交换链与 dummy 同类的证据——
-     此时槽 4 已挂，下一行就该是 Present）
+     此时槽 8 已挂，下一行就该是 Present）
    - `登记完成: 交换链 vtable N 个 (含 Present 挂钩), 工厂 vtable M 个 (含创建方法挂钩)`
-   - `方案B 交叉: dummy slot4 orig4=... == dxgi+0x2E460 (真类直验 ✓)`（无 renderdoc）或
-     `≠ ... (包装类, 属预期, 方案B 不受影响)`（有 renderdoc）
-   - `方案B Present: RAW 已装 target=... trampoline=... 窃取14B (入口 5B E9)`；
-     若入口已被 GFE/renderdoc 先占则为 `CHAIN 已装 (入口原为 ...)`——两者都是成功
-     （v1.6 关键行——函数级 detour 生效，绕过 vtable 的 Present 也被计数；前导字节
-     守卫失败会打 `入口字节与预期不符 ... 保守跳过` 并附前 16 字节留档）
+   - `阳性确认 (dummy1 安装完成): obj=... vptr=... vtbl[8]=... ==我们的Present钩子 ✓`
+     （**v1.7 关键行——槽位修对的铁证**：v1.0~v1.6 只验证过 vtbl[4]，那是
+     SetPrivateDataInterface，属假阳性；此行若 ≠钩子即槽位又错了）
+   - `方案B Present 候选 1/3: 0x... 来自 活交换链vtbl[8] (dxgi.dll)` → 紧接
+     `方案B Present: RAW 已装 target=... trampoline=... 窃取14B (入口 5B E9)`；
+     活交换链读到的若是 renderdoc 存根会先打 `入口字节与预期不符 ... 保守跳过`（附前
+     16 字节留档），再按 `方案A真vtbl[8]` → `dxgi+0x19000 兜底` 逐候选试——**v1.7 关键行：
+     靶子来源（活交换链 / 方案A解包 / dxgi RVA 兜底）一目了然**；
+     入口若已被 GFE/renderdoc 先占则为 `CHAIN 已装 (入口原为 ...)`——两者都是成功
+     （函数级 detour 生效，绕过 vtable 的 Present 也被计数）
+   - `方案A(安装期解包): 包装对象 0x... vtbl=0x... [obj+0x28]=0x...` → 紧接
+     `方案A(安装期解包): 真对象=0x... (经 +0x28) vtbl=0x... 来自 dxgi.dll | 真vtbl[8]=... `
+     （仅 renderdoc 包装类对象出现——方案A 解包是否成立看这两行；非包装类打
+     `vtable 不在 renderdoc 包装类 — 这些偏移不适用, 跳过`）
    - `★ 工厂拦截 ...`（游戏创建交换链时——出现即证明时机+口径都已覆盖）
+   - `阳性确认 (★游戏 ...): obj=... vptr=... vtbl[8]=... （已是钩子 / 尚未挂钩→就地挂）`
    - **`第 1 次 Present (经 Present / 函数detour): ... 1920x1080 ... title="..."`**
      （关键行——证明拦到游戏 Present；经 `函数detour` 即方案B 独立命中）
    - `Present 已开始触发 ... — PoC-A 验收通过`，之后每 600 帧一行 `近600帧 xx.x FPS`
 4. 游戏画面应完全正常（本 PoC 不改变呈现）。若 120s 后仍 0 次触发，看日志里各 vtable 的
-   本体/原值模块、★工厂拦截是否出现、有无「被改写」记录，贴日志迭代（多通道自证价值）
+   本体/原值模块、★工厂拦截是否出现、有无「被改写」记录，以及 `告警:` 行自带的三项快照
+   （游戏交换链是否取得 / 方案B detour 是否已装 / 登记表规模），贴日志迭代（多通道自证价值）
 
 验收通过后进入 **PoC-B**：在 Present 里创建 Vulkan instance/swapchain → 游戏窗口出
 清屏/三角形 → F12 抓这帧 → `rdc_run` 提取链 → `rdc_compare -Base S4 -Cand <候选>` 首次候选比对。
