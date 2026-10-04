@@ -220,6 +220,24 @@
  *     探针升质: 游戏描述符页只读 … — 放弃回写 (仅异常内存布局出现, 出现即 §14.5 plan-B)
  *     探针配对depth: 带初始数据 — 不升 (升了会越界读), 配对失败告警
  *
+ * ---- v0.12.0 (2026-10-04): plan-B —— 绑定感知拦 RSSetViewports/RSSetScissorRects ----
+ *   S4e/S4e2 双帧实测 (docs/02 §14.7): v0.11 回写两行全 ok (depth 552 实升 1024², 判据①
+ *   0 诊断 + RT/DS 配对 PASS) 但 probe 段 RSSetViewports 恒 512² (全帧无 1024² 字面量)
+ *   → 游戏 viewport 来源不在被回写的那份 desc → 回写改不到, 六面只渲 TL 1/4 象限。
+ *   plan-B (§14.6 预declared 分支): context vtable 层拦 —— RSSetViewports(槽44) /
+ *   RSSetScissorRects(槽45) 调用时, ① 视口/裁剪恰 512² 且 ② 当前 OM RT0 解析回 probe
+ *   cube (OMGetRenderTargets→GetResource 对象身份) → 翻 1024² 再下传; 否则原样下传。
+ *   绑定感知, 不做无条件 512² 全拦 (防误伤其他 512² pass)。槽号双证: 官方 d3d11.h MIDL
+ *   声明序 (IUnknown 0-2 + DeviceChild 3-6 + 接口偏移 7+37/7+38) 与 xosh vtable 表吻合。
+ *   逃生门不变: probe=0 / vulkan=0 → 槽44/45 同样不挂 (与槽5 同门)。
+ *   验证闭环 (抓 S4f 后): rdc_api_scan 看 probe 段 RSSetViewports=1024² / rdc_dump_cubefaces
+ *      看六面全幅内容 (四象限互异) + 0 条 OM 诊断, 对照 S4e 的 TL 1/4 象限。
+ *   关键日志 (新增):
+ *     探针升质: ctx vtable=… slot44(RSSetViewports) 原值=… 来自 …; slot45(RSSetScissorRects) …
+ *     探针升质: ctx槽44/45 已挂 — probe cube 绑定中 512²→1024² (v0.12 plan-B)
+ *     探针升质: RSSetViewports 512²→1024² (probe cube 绑定中) 第 N 次
+ *     探针升质: GetImmediateContext 空 / ctx slot44/45 原值不在 d3d11/renderdoc — 跳过
+ *
  * 构建: GitHub Actions (build.yml job "poc-presenter"), 本地不编译
  * 安装: poc-presenter.dll 放入 <游戏>/Data/SKSE/Plugins/
  */
@@ -500,9 +518,10 @@ static bool iniFlag(const char* key, bool def)
 	return out;
 }
 
-// ---------- 探针升质 hook (v0.11.0): 拦 ID3D11Device::CreateTexture2D (槽5) ----------
+// ---------- 探针升质 hook (v0.11.0 + v0.12.0 plan-B): CreateTexture2D 槽5 + context 槽44/45 ----------
 // 水体样本第一步 (docs/00 §1.1 / docs/03 §6.1): 501 = 6面512² RGBA16F 环境反射 cubemap
-// 探针, 命中描述符时把宽高翻倍 (512²→1024²)。
+// 探针, 命中描述符时把宽高翻倍 (512²→1024²)。v0.12 再补: 绑定感知拦 RSSetViewports/
+// RSSetScissorRects (plan-B, 见下 installCtxProbe)。
 // v0.11 (docs/02 §14 判读定案) 两处修正, 缺一不可:
 //   ① 配对 depth 同步升质 —— v0.10.0 只翻 cube → OM = RT1024²+DSV512² 尺寸不匹配 →
 //      绑定判非法作废 (回放 8 条 High 诊断, 真机 draw 同样未落地, 反射平铺清屏色)。
@@ -510,6 +529,8 @@ static bool iniFlag(const char* key, bool def)
 //      实测不成立 (v0.10.0 局 probe 段 RSSetViewports 恒 512² 字面量 = 游戏用创建时
 //      缓存值)。RTV/DSV/SRV 的 desc 结构不带宽高 (随纹理对象派生), 只有游戏侧 viewport/
 //      scissors 这类缓存值依赖 desc 宽高 → 回写精准命中要修的东西。
+//      v0.12 勘误 (S4e 判据②): 回写两行全 ok 但 viewport 仍 512² —— 游戏 viewport 来源
+//      不在被回写的那份 desc → 转 plan-B: 绑定感知拦槽44/45 (见 installCtxProbe)。
 // 挂法与交换链同款: vtable 槽改写, 原值必须落在 d3d11.dll / renderdoc.dll 才挂 (防错槽位)。
 //   probe=0 (ini) → 完全不挂槽; vulkan=0 → 同样不挂 (S4c 基线口径, 由 pocbEnabled 把关)。
 static bool pocbEnabled();
@@ -526,6 +547,23 @@ static std::atomic<long> g_probeLogN{0};
 static std::atomic<bool> g_probeDepthArmed{false}; // v0.11: cube 命中后开窗, 等配对 depth
 static std::atomic<long> g_probeDepthN{0};
 static std::atomic<unsigned long long> g_probeArmTick{0}; // v0.11: 开窗时刻, 10s 过窗即收
+// v0.12.0 plan-B (S4e 验证判据② 未达成, docs/02 §14.7): pokeDescSize 实测改不到游戏
+// viewport 来源 (probe 段 RSSetViewports 恒 512², 全帧无 1024² 字面量) → 改在 context
+// vtable 层拦: 当前 OM RT0 解析回 probe cube 且视口/裁剪恰 512² 时翻 1024² 再下传。
+// 绑定感知 (OMGetRenderTargets→GetResource 对象身份) 而非无条件 512² 全拦 —— 防误伤其他
+// 512² pass。槽号双证 (官方 d3d11.h MIDL 声明序: IUnknown 0-2 + DeviceChild 3-6 + 接口
+// 偏移 7+37/7+38; 与 xosh vtable 表 44/45 吻合)。
+struct CtxEntry
+{
+	void** vtbl;
+	void*  orig44; // RSSetViewports   (ID3D11DeviceContext vtable 槽44)
+	void*  orig45; // RSSetScissorRects (槽45)
+};
+static CtxEntry g_ctx[4];
+static int      g_ctxN = 0;
+static std::atomic<ID3D11Texture2D*> g_probeCube{nullptr}; // cube 升质成功后记住对象 (绑定判据)
+static std::atomic<long> g_vpRewriteN{0};
+static std::atomic<long> g_scRewriteN{0};
 
 void* lookupDevTex2D(void** vtbl)
 {
@@ -630,6 +668,9 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* dev, const D3D11_T
 				// v0.11 ①: 开窗等配对 depth (cube 544 先于 depth 552 创建, 同一突发)
 				g_probeArmTick.store(GetTickCount64(), std::memory_order_relaxed);
 				g_probeDepthArmed.store(true, std::memory_order_release);
+				// v0.12 plan-B: 记住升质后的 cube 对象 —— viewport/scissor 拦截的绑定判据
+				if (out && *out)
+					g_probeCube.store(*out, std::memory_order_release);
 			}
 			if (n <= 16 || (n % 64) == 0)
 				logLine("探针升质: 512² RGBA16F cube(6面) → " + std::to_string(d.Width) + "² 第 " +
@@ -669,6 +710,138 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* dev, const D3D11_T
 		}
 	}
 	return real(dev, desc, init, out);
+}
+
+static CtxEntry* lookupCtx(void** vtbl)
+{
+	if (!vtbl)
+		return nullptr;
+	for (int i = 0; i < g_ctxN; ++i)
+		if (g_ctx[i].vtbl == vtbl)
+			return &g_ctx[i];
+	return nullptr;
+}
+
+// v0.12 plan-B 绑定感知: 当前 OM RT0 是否即探针 cube (拿真实绑定 —— OMGetRenderTargets
+// 走真槽33, 未被我们改, 不递归)
+static bool omBoundToProbeCube(ID3D11DeviceContext* ctx)
+{
+	ID3D11Texture2D* cube = g_probeCube.load(std::memory_order_acquire);
+	if (!ctx || !cube)
+		return false;
+	ID3D11RenderTargetView* rtv = nullptr;
+	ctx->OMGetRenderTargets(1, &rtv, nullptr);
+	if (!rtv)
+		return false;
+	ID3D11Resource* res = nullptr;
+	rtv->GetResource(&res);
+	// RTV 由该游戏纹理创建 → GetResource 回同一对象身份 (renderdoc wrapper 亦保持)
+	const bool hit = (res == static_cast<ID3D11Resource*>(cube));
+	if (res)
+		res->Release();
+	rtv->Release();
+	return hit;
+}
+
+// v0.12 plan-B: probe 段视口 512²→1024² —— 只在 probe cube 绑定中改写, 其余原样下传
+static void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* ctx, UINT n,
+                                                   const D3D11_VIEWPORT* vp)
+{
+	using Fn_t = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, const D3D11_VIEWPORT*);
+	CtxEntry* e = lookupCtx(ctx ? *reinterpret_cast<void***>(ctx) : nullptr);
+	const Fn_t real = e ? reinterpret_cast<Fn_t>(e->orig44) : nullptr;
+	if (!real) // 理论不可达: 只有被我们改过的槽才会进本函数
+		return;
+	if (n == 1 && vp && vp[0].Width == 512.0f && vp[0].Height == 512.0f &&
+	    g_probeCube.load(std::memory_order_relaxed) && omBoundToProbeCube(ctx))
+	{
+		D3D11_VIEWPORT v2 = vp[0];
+		v2.Width = 1024.0f;
+		v2.Height = 1024.0f;
+		const long c = g_vpRewriteN.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (c == 1 || (c % 256) == 0)
+			logLine("探针升质: RSSetViewports 512²→1024² (probe cube 绑定中) 第 " +
+			        std::to_string(c) + " 次");
+		real(ctx, 1, &v2);
+		return;
+	}
+	real(ctx, n, vp);
+}
+
+// v0.12 plan-B: 同款拦裁剪矩形 (若游戏开 scissor 测, viewport 翻了不翻裁剪会照旧只渲 1/4)
+static void STDMETHODCALLTYPE hookedRSSetScissorRects(ID3D11DeviceContext* ctx, UINT n,
+                                                      const D3D11_RECT* rc)
+{
+	using Fn_t = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, const D3D11_RECT*);
+	CtxEntry* e = lookupCtx(ctx ? *reinterpret_cast<void***>(ctx) : nullptr);
+	const Fn_t real = e ? reinterpret_cast<Fn_t>(e->orig45) : nullptr;
+	if (!real)
+		return;
+	if (n == 1 && rc && (rc[0].right - rc[0].left) == 512 && (rc[0].bottom - rc[0].top) == 512 &&
+	    g_probeCube.load(std::memory_order_relaxed) && omBoundToProbeCube(ctx))
+	{
+		D3D11_RECT r2 = rc[0];
+		r2.right = r2.left + 1024;
+		r2.bottom = r2.top + 1024;
+		const long c = g_scRewriteN.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (c == 1 || (c % 256) == 0)
+			logLine("探针升质: RSSetScissorRects 512²→1024² (probe cube 绑定中) 第 " +
+			        std::to_string(c) + " 次");
+		real(ctx, 1, &r2);
+		return;
+	}
+	real(ctx, n, rc);
+}
+
+// v0.12 plan-B: 挂 immediate context vtable 槽44/45 —— 幂等 (按 vtable 去重), 与槽5 同款
+// 安全阀 (原值须在 d3d11.dll/renderdoc.dll)。GetImmediateContext 是类型化调用, 不依赖槽号。
+static void installCtxProbe(ID3D11Device* dev)
+{
+	if (!dev || !g_probeOn.load(std::memory_order_relaxed))
+		return;
+	ID3D11DeviceContext* ctx = nullptr;
+	dev->GetImmediateContext(&ctx);
+	if (!ctx)
+	{
+		logLine("探针升质: GetImmediateContext 空 — plan-B viewport 拦截未挂 (判据② 仍会失败)");
+		return;
+	}
+	void** vtbl = *reinterpret_cast<void***>(ctx);
+	EnterCriticalSection(&g_cs);
+	if (lookupCtx(vtbl))
+	{
+		LeaveCriticalSection(&g_cs);
+		ctx->Release();
+		return;
+	}
+	void* o44 = vtbl[44];
+	void* o45 = vtbl[45];
+	logLine("探针升质: ctx vtable=" + hexOf(vtbl) + " slot44(RSSetViewports) 原值=" + hexOf(o44) +
+	        " 来自 " + modulePathOf(o44) + "; slot45(RSSetScissorRects) 原值=" + hexOf(o45) +
+	        " 来自 " + modulePathOf(o45));
+	if (!isD3D11Family(o44) || !isD3D11Family(o45))
+	{
+		logLine("探针升质: ctx slot44/45 原值不在 d3d11/renderdoc — 跳过 (防错槽位, plan-B 失效)");
+		LeaveCriticalSection(&g_cs);
+		ctx->Release();
+		return;
+	}
+	if (g_ctxN >= (int)(sizeof(g_ctx) / sizeof(g_ctx[0])))
+	{
+		logLine("探针升质: ctx 登记表已满 — 跳过 (防越界)");
+		LeaveCriticalSection(&g_cs);
+		ctx->Release();
+		return;
+	}
+	g_ctx[g_ctxN].vtbl = vtbl;
+	g_ctx[g_ctxN].orig44 = o44;
+	g_ctx[g_ctxN].orig45 = o45;
+	++g_ctxN;
+	patchSlotLocked(&vtbl[44], reinterpret_cast<void*>(&hookedRSSetViewports));
+	patchSlotLocked(&vtbl[45], reinterpret_cast<void*>(&hookedRSSetScissorRects));
+	logLine("探针升质: ctx槽44/45 已挂 — probe cube 绑定中 512²→1024² (v0.12 plan-B)");
+	LeaveCriticalSection(&g_cs);
+	ctx->Release();
 }
 
 // 挂设备 vtable 槽5 —— 幂等 (按 vtable 去重), 首次调用读 ini
@@ -718,6 +891,7 @@ static void installProbeOn(ID3D11Device* dev)
 	patchSlotLocked(&vtbl[5], reinterpret_cast<void*>(&hookedCreateTexture2D));
 	logLine("探针升质: 槽5 已挂 (512² cube+配对depth→1024² + 回写desc, 逃生门 probe=0 / vulkan=0)");
 	LeaveCriticalSection(&g_cs);
+	installCtxProbe(dev); // v0.12 plan-B: 同设备 immediate context 槽44/45 (自身幂等)
 }
 
 // 由 registerSwp (交换链一出现) / pocbInit (双保险) 调 —— 必须早于游戏创建探针
@@ -3250,7 +3424,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.11.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc) ====");
+	logLine("==== poc-presenter v0.12.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

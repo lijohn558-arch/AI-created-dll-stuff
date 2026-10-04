@@ -789,3 +789,21 @@ pass7/backbuffer 四路互证（双帧均 `SENTINEL_FOUND`、洋红 4/4、swapch
 （6×2 张 1024²）、`S4e-tex-desc.txt`（544/552 = 1024² 配对取证）、`S4{e,e2}-pass7-pixels.json`、
 `S4{e,e2}-backbuffer.{json,png}`、`S4d~S4e-compare.json`、`S4e2~S4e-compare.json`、
 `S4b~S4e-compare.json`。
+
+**v0.12.0 回码（2026-10-04，plan-B 已入码）**：`src/poc-presenter/main.cpp` —— context
+vtable **槽44（RSSetViewports）/ 槽45（RSSetScissorRects）绑定感知拦截**：仅当 ① 视口/裁剪
+恰 512² 且 ② `OMGetRenderTargets→GetResource` 解析回升质后的 probe cube（对象身份）时改写
+1024²，其余原样下传——不做无条件 512² 全拦（防误伤其他 512² pass）。槽号双证 = 官方
+`d3d11.h` MIDL 声明序（IUnknown 0-2 + DeviceChild 3-6 + 接口偏移 7+37 / 7+38）+ xosh
+vtable 表（44/45）；原值模块安全阀（d3d11.dll/renderdoc.dll）与槽5 同款；`probe=0 /
+vulkan=0` 同门不挂。新增 sanity 日志三行：
+
+- `探针升质: ctx vtable=… slot44(RSSetViewports) 原值=… 来自 …; slot45(RSSetScissorRects) …`
+- `探针升质: ctx槽44/45 已挂 — probe cube 绑定中 512²→1024² (v0.12 plan-B)`
+- `探针升质: RSSetViewports 512²→1024² (probe cube 绑定中) 第 N 次`
+
+**S4f 重抓验证口径（同 §14.1 协议：同存档同机位、稳定后 F12 连抓两张）**：判据① 保持
+`GetDebugMessages` 0 条；判据② = probe 段 `RSSetViewports` 实测 **1024²**（对照 S4e/S4e2
+恒 512²）；判据③ = 六面**全幅**内容（四象限互异、uniq8 拉高，对照 S4e 仅 TL 1/4 象限）。
+三判据全中 → 特性②过闸，阶段1 全绿收口；任一不中按新增日志分支归因（ctx 槽未挂 / 改写
+计数为 0 / 绑定解析未命中）。
