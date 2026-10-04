@@ -286,9 +286,30 @@ descriptor/sampler 是给 shader 采样用的，而采出来的结果要有输�
 STAGING 读回 7/7 `≠基线✓`、`=基线` 0 条、非零 7143–7157/8192 且校验和逐帧变；`入向=2576`、
 `COPY=3`、`哨兵=0`、`[异常]=0`、PoC-B 0.91 ms/帧、画面无变化）。
 **深度半边未过**：D24 家族 `CreateTexture2D` 报 `E_INVALIDARG (0x80070057)` —— R2 只过一半。
-⇒ `v0.15.1` 加归因重试（`BindFlags` 递减 2 次、`Format` 不动）区分"格式不在 SHARED 白名单"
+⇒ `v0.16.0` 加归因重试（`BindFlags` 递减 2 次、`Format` 不动）区分"格式不在 SHARED 白名单"
 vs "源带 `BIND_DEPTH_STENCIL`"；判读与实跑表见 `docs/02` §14.12.1（含**日志跨会话追加**的
 判读脚本坑：必须只切片分析最后一个 banner 之后的部分）。
+
+**2c-β（`v0.16.0`，VK 侧交叉校验，判读模板 `docs/02` §14.13）**：
+
+1. 把色镜像的 NT handle 用 `VkImportMemoryWin32HandleInfoKHR` + `OPAQUE_WIN32` 链进
+   `VkMemoryAllocateInfo` 导成 `VkImage`（`VK_FORMAT_R16G16B16A16_SFLOAT` / OPTIMAL /
+   `TRANSFER_SRC`），**完全照抄 PoC-B v0.10.0 已验证的出向样板**——唯一新增未知是格式与尺寸。
+2. 另建 host-visible|**coherent** 的 `TRANSFER_DST` 读回 buffer 并**持久映射**
+   （`vkInvalidateMappedMemoryRanges` 不在 `POCB_DEV_FNS` 里，所以必须要求 COHERENT）。
+3. 两条命令：`[0]` 布局初转 `UNDEFINED→GENERAL` **只提交一次**（`initialLayout` 规范只允许
+   `UNDEFINED`，但读回命令要复用，不能每次读都从 `UNDEFINED` 起——那等于每次都允许丢内容）；
+   `[1]` 每次读回 `GENERAL→TRANSFER_SRC` → `vkCmdCopyImageToBuffer` → `TRANSFER_SRC→GENERAL`
+   （回到 `GENERAL` 以备下一帧）。
+4. **校验和两边共用 `ssrFnvSample`**（64 行×16 列抽样）：D3D11 侧行距 = `Mapped.RowPitch`，
+   VK 侧 = `width*8`（`bufferRowLength=0`）→ 两个值可直接相等比较，不等即两套 API 字节视图不一致。
+5. **节奏搭 D3D11 读回的便车**（前 3 次 + 每 600 次，即 `g_ssrInChkCValid`），不做每帧读回 ⇒ 不违
+   约束 2；挂在 `pocbInject` 末尾、**刻意排在 PoC-B 统计之后**，不污染 0.9 ms/帧 验收基线。
+6. **时序**：D3D11 的 `Map` 返回已保证其队列把镜像写完；镜像只在特征B 被写，到 Present 无人再动
+   ⇒ Present 时 VK 读到的是同一份字节。**建成当帧主动跳过比对**（布局初转按规范允许丢内容）。
+7. **依赖 PoC-B 开着**（借 device/queue/command pool/fence）；失败一律 `logLine` + `g_ssrVkState=2`，
+   **绝不调 `pocbFail`**（那会连坐关掉 PoC-B 注入）。
+8. 深度镜像（R2 未过）不在本步范围，代码按"镜像存在才导入"写，两种结局都兼容。
 
 ### D3 输出回写与段16 的 16 个 Draw（两个子方案）
 
