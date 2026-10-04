@@ -1076,6 +1076,30 @@ ssr.sentinel=1        ← 2b 回写开关, 只测 2a 就删掉或写 0
 2. **PowerShell 变量大小写不敏感** → `foreach ($l in $L)` 里的循环变量 `$l` 与数组 `$L`
    是**同一个变量**，循环一跑就把 `$L` 就地覆盖成最后一行，之后所有统计恒 0、
    "末 N 行"只出 1 行。循环变量一律改用与数组不同的名字（脚本里统一 `$x` + `$lines`）。
+3. **含中文的 `.ps1` 必须补 UTF-8 BOM**（`0xEF,0xBB,0xBF`）——PowerShell 5.1 对无 BOM 的
+   UTF-8 文件按 ANSI 读，注释里的中文会变乱码、进而**破坏脚本解析**（`check1.ps1` 加了
+   中文注释检查后，无 BOM 时把 `/*=1` 打成空并误报"注释提前关闭"；补 BOM 后同一份脚本 `OK`）。
+   纯 ASCII 脚本不用。判断脚本是否漏 BOM：`[System.IO.File]::ReadAllBytes($f)[0..2]` 不是
+   `239,187,191` 就是漏了。
+
+**坑：C++ 块注释里千万别出现 `*/` —— `**/` 就是 `*/`**（v0.16.0 实踩）。
+日志样例写成 `**一致✓**/ **不一致✗**`，其中 `**/` 把 `/** … */` **提前关掉**，之后整段
+文件头文档被当代码解析，报出一串 `error C2146/C4430/C3872/C3873`，且报错行号全在**注释区**
+（`main.cpp(365)` 附近）——看到 `C3872: 'U+2717' not allowed in an identifier`、
+`missing ';' before identifier '本帧VK读回'` 这种"中文/符号被当标识符"的错，
+**第一时间查 `*/` 提前闭合**，而不是去改那几行代码。
+自校验已固化：`check1.ps1` 检查 `/*` 与 `*/` 个数相等 **且** 全文无字面 `**/`。
+
+**读 CI 编译错误的正确姿势（不用抓日志）**：`actions/*` 的日志端点
+（`/actions/runs/{id}/logs`）**必须认证**，未认证返 403；但工作流里 `::error::` 生成的
+**注解 API 是无认证可读的**：
+```
+GET https://api.github.com/repos/{owner}/{repo}/commits/{sha}/check-runs
+GET https://api.github.com/repos/{owner}/{repo}/check-runs/{id}/annotations
+```
+（`User-Agent` 必带；`annotations_url` 字段是空的，要自己按 `/check-runs/{id}/annotations`
+拼。）`build.yml` 的编译步已有 `| Select-Object { if ($_ -like '*error*') { '::error::' + $_ } }`
+这层转换，所以编译错误会完整出现在注解里。脚本：`Temp\opencode\cianno3.ps1` → `ci1ddanno2.txt`。
 
 ### 14.12 SSR Step 2c-α（共享入向·D3D11 侧）跑图判读（`v0.15.0` 已实跑，**2026-10-04**）
 

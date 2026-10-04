@@ -362,7 +362,7 @@
  *     SSR侦察: 特征B(换绑)#K … [2b哨兵已排队] [2c入向已排队]
  *     SSR侦察: [2c] 重试 深度520 BindFlags=0x… (原 0x…) → OK/仍失败 … ← R2 归因
  *     SSR侦察: [2c-β] VK 导入 OK: 色镜像 NT handle → VkImage (OPAQUE_WIN32) 1920x1080 RGBA16F …
- *     SSR侦察: [2c-β] 交叉校验#K D3D11=0x… VK=0x… **一致✓**/ **不一致✗** VK非零=… 本帧VK读回=…ms 帧=F
+ *     SSR侦察: [2c-β] 交叉校验#K D3D11=0x… VK=0x… 一致则 **一致✓**、否则 **不一致✗** VK非零=… 本帧VK读回=…ms 帧=F
  *
  * 构建: GitHub Actions (build.yml job "poc-presenter"), 本地不编译
  * 安装: poc-presenter.dll 放入 <游戏>/Data/SKSE/Plugins/
@@ -3717,7 +3717,9 @@ static bool ssrInVkBuild(PocbCtx& c)
 	g_ssrVkCmd = cmds[1];
 	VkCommandBufferBeginInfo cbb{};
 	cbb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	// 关键: 两条命令的提交次数不同 —— [0] 初转**只提交一次** ⇒ ONE_TIME_SUBMIT;
+	// [1] 读回要**每次交叉校验都重新提交** ⇒ 必须 SIMULTANEOUS_USE, 否则重复提交是
+	// validation 违规 (驱动行为未定义, 校验和会莫名其妙地不一致)。
 	auto barrier = [&](VkCommandBuffer cm, VkPipelineStageFlags ss, VkAccessFlags sa,
 	                   VkPipelineStageFlags ds, VkAccessFlags da, VkImageLayout ol,
 	                   VkImageLayout nl) {
@@ -3736,6 +3738,7 @@ static bool ssrInVkBuild(PocbCtx& c)
 	// [0] UNDEFINED → GENERAL: initialLayout 只能是 UNDEFINED, 但读回命令复用后不能再出现
 	// UNDEFINED (那等于每次读都允许丢内容) ⇒ 初转单独一条, 建好时立即提交并等完。
 	// 此刻内容无所谓: D3D11 的拷贝从下一帧特征B 才开始喂 (基线本来就是"建好未拷")。
+	cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 	if (c.fns.vkBeginCommandBuffer(cmds[0], &cbb) != VK_SUCCESS)
 		return fail("vkBeginCommandBuffer(初转)");
 	barrier(cmds[0], VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
@@ -3743,6 +3746,7 @@ static bool ssrInVkBuild(PocbCtx& c)
 	if (c.fns.vkEndCommandBuffer(cmds[0]) != VK_SUCCESS)
 		return fail("vkEndCommandBuffer(初转)");
 	// [1] GENERAL → TRANSFER_SRC → copy → TRANSFER_SRC → GENERAL (回到 GENERAL 以备下一帧)
+	cbb.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
 	if (c.fns.vkBeginCommandBuffer(cmds[1], &cbb) != VK_SUCCESS)
 		return fail("vkBeginCommandBuffer(读回)");
 	// srcAccess=MEMORY_WRITE: 跨 API 的这次写不归 VK 记账, 用"全部写"把 VK 侧缓存失效掉;
@@ -3832,8 +3836,8 @@ static void ssrInVkFrame(PocbCtx& c)
 	        " VK非零=" + std::to_string(nzk) + " 本帧VK读回=" +
 	        std::to_string(ms).substr(0, 5) + "ms" +
 	        " 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed)));
-	if (d3dH != vkH)
-		g_ssrVkState = 1; // 只记不关: 不一致可能是布局/字节序问题, 留着多采几次样本
+	// 不一致**不关闸** —— 它正是 2c-β 要采的样本 (布局/字节序/行距三种归因, docs/02 §14.13),
+	// 关掉就只得到一个结论而不是一组数据。停用只由提交失败触发。
 }
 
 // 每帧: 提交一次 Vulkan 命令 → fence 等待 → 读回像素 → 拷进 backbuffer
