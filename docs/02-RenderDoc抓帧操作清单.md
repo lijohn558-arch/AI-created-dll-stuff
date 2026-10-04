@@ -1068,9 +1068,14 @@ ssr.sentinel=1        ← 2b 回写开关, 只测 2a 就删掉或写 0
 **收口动作**：`poc-presenter.ini` 已把 `ssr.sentinel` 改回 **0**（正常玩水即恢复；`ssr=1` 保留，
 2a 身份行照常打）。开关只在启动时读 → 改完须重启游戏。
 
-**判读脚本**：`Temp\opencode\run3.ps1`（11 条 checklist 自动化，含 banner 版本自检与 desc 判据结论）→ `run3.out`。
-备忘：`run4.ps1` 那版踩了 PowerShell `$matches` 在 `Where-Object` 块内**不外泄**到父作用域的坑
-（读到的是陈旧值），统计 `captures` 要在 `foreach` 里自己再 `-match` 一次。
+**判读脚本**：`Temp\opencode\run3.ps1`（11 条 checklist 自动化，含 banner 版本自检与 desc 判据结论）→ `run3.out`；
+2c 用 `run2c.ps1`（§14.12 的 12 条自动结论）→ `run2c.out`。
+**两个 PowerShell 坑**（都导致"统计恒 0 / 只出 1 行"，极易误判成"日志里没这些行"）：
+1. `$matches` 在 `Where-Object` 块内**不外泄**到父作用域 → 统计 `captures` 必须在 `foreach`
+   里自己再 `-match` 一次。
+2. **PowerShell 变量大小写不敏感** → `foreach ($l in $L)` 里的循环变量 `$l` 与数组 `$L`
+   是**同一个变量**，循环一跑就把 `$L` 就地覆盖成最后一行，之后所有统计恒 0、
+   "末 N 行"只出 1 行。循环变量一律改用与数组不同的名字（脚本里统一 `$x` + `$lines`）。
 
 ### 14.12 SSR Step 2c-α（共享入向·D3D11 侧）跑图判读模板（`v0.15.0`，**待实跑**）
 
