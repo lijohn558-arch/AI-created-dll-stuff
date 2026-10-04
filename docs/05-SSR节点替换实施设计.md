@@ -204,6 +204,36 @@ VK 侧新增：`VkDescriptorSetLayout` / `VkSampler` / `vkCmdBindDescriptorSets`
 
 （`docs/analysis/d3d11-ctx-slots.txt:53-54`：46 CopySubresourceRegion / 47 CopyResource）
 
+#### D2a-3 2b 武装条件 + 静默失效防护（`c8b7e62` 补）
+
+**（a）双身份守卫 —— 防过渡期误 arm**。原始条件只有「刚离开的强特征对象 == `g_ssrReflRt`」。
+真机 v0.13.0 日志显示**菜单/加载期是 `distinct=1`**（帧 1..5 只有一个强特征段），
+此时 `runs==1` 只会落到 `g_ssrReflRt` / `g_ssrMainHdr` **其中之一**：
+
+- 若菜单对象恰 `runs==1` → `g_ssrReflRt = 菜单纹理`；再叠加「段16 缺席窗」，
+  段19(321) 也可能等于它 → **哨兵把 324 写进主 HDR**，整帧被污染。
+
+故武装条件加一条 `g_ssrMainHdr && g_ssrMainHdr != g_ssrReflRt` ——
+即 **`runs==1` 与 `runs>1` 必须是两个不同对象**（正常双强特征格局已确立）：
+
+| 场景 | 只设一个变量 → 守卫失败 → 不 arm | 324→585 arm 条件 |
+|---|---|---|
+| 菜单单段 `runs==1` | `g_ssrReflRt=M`，`g_ssrMainHdr` 空 | ✗ |
+| 菜单单段 `runs>1` | `g_ssrMainHdr=M`，`g_ssrReflRt` 空 | ✗ |
+| 游戏内正常帧 | 585(runs=1) + 321(runs≥4)，两值不同 | ✓ 第 2 帧起 |
+| 段16 缺席窗 | `g_ssrReflRt` 残留 585、`g_ssrMainHdr`=321 → 守卫过，但 `g_ssrLastStr`=321≠585 | ✗（原判据兜底） |
+
+**（b）desc 预检 —— `CopyResource` 返回 `void`，不匹配会静默失败**。
+`ID3D11DeviceContext::CopyResource` **没有 HRESULT**；src/dst 的尺寸/格式/MSAA/片数
+不一致时 D3D11 直接丢弃该调用，**画面无变化，但 `[2b]` 行照打** →
+判读会误判成「哨兵执行了但没生效」甚至「没跑」。
+故执行前用 `ssrResObj` 取两边 `D3D11_TEXTURE2D_DESC` 比对，日志行分叉：
+
+- `[desc一致]` → 通路验通；
+- `[desc不一致! 585=… 324=…]` → 直接给出两个 desc 定位差异（最可能 `BindFlags`/MSAA）。
+
+判据落进 `docs/02` §14.11 checklist #9。
+
 ### D3 输出回写与段16 的 16 个 Draw（两个子方案）
 
 | 方案 | 流程 | 优点 | 缺点 |
