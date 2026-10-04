@@ -288,6 +288,47 @@
  *     SSR侦察: 帧=F OM=N 候选=N 强特征=N distinct=N 特征A=N 特征B=N | 累计候选=N 强特征=N
  *     SSR侦察: 帧=F 强特征对象i=0x… 本帧RT0绑定=N次/M个连续段   ← 判别子 (强特征集合内 1段 vs 4段)
  *
+ * ---- v0.14.0 (2026-10-04): SSR Step 2a/2b —— 槽47 身份识别 + 通路哨兵 (docs/05 §5) ----
+ *   Step 1 (v0.13.0) 证明反射段真机可定位; Step 2 把"观察"推进到"介入"。拆两半先做 2a/2b
+ *   (零 VK 风险、抓帧可验收), 过了再做 2c 共享入向 + 2d VK passthrough。
+ *   2a 身份识别 —— 324/520/585/321 是抓帧 ResourceId, 跨帧不可用 (R1), 只能按"来源"认:
+ *     585 反射目标 = 强特征集合里 runs==1 那个 (Step 1 判别子), 上一帧 Present 定;
+ *     321 主 HDR   = 强特征集合里 runs>1 那个, 同上; 两者帧间持久不复位;
+ *     324 场景色快照 = 新挂 ctx 槽47 (CopyResource), src 为 1920x1080 RGBA16F 时的 dst
+ *                    (S4 全帧 3 条 Copy 里唯一 src 为 RGBA16F 的就是 ev39225 的 321→324,
+ *                     两条深度拷贝 src 是 D24 家族被格式挡住);
+ *     520 深度快照   = 本帧**首条** src 为 1920x1080 D24 家族的拷贝之 dst (S4 ev21505 的
+ *                    461→520; 本帧第二条 461→466 是后期深度, 靠帧号锁 g_ssrCopyFrame
+ *                    只取首条)。2c 才用到, 本轮只学并打日志。
+ *     身份统一走 QI ID3D11Texture2D 的指针值 (COM 契约: 同对象同 IID 必返同指针, 与
+ *     ssrViewDesc 同口径) ⇒ OMSet 侧与 CopyResource 侧可直接比对。
+ *     但**裸指针值不能解引用** (QI 后即 Release) —— 2b 要真调 CopyResource, 故另持两份
+ *     活引用: g_ssrSceneRes (324, 来自 CopyResource 的 pDst AddRef) 与 g_ssrStrRes
+ *     (最近强特征对象, 来自 RTV GetResource)。持 AddRef 也顺带保证对象不被游戏销毁。
+ *   2b 通路哨兵 (docs/05 §5 Step 2 行): 特征B(段16→段17) 判定 + "刚离开的强特征对象==585"
+ *     才排队, 在 hookedOMSetRenderTargets 的 **real() 之后** 执行 CopyResource(585<-324):
+ *       · 放 real() 后 = 段17 的 {321,591} 已绑、585 恰好已解绑 → 写非绑定资源最干净;
+ *       · 段17 的 1 Draw (ev39530) 尚未发生 ⇒ 它随后读到的 585 已是 324 的内容 = 可辨识的
+ *         "旧场景色"错误画面 (类洋红哨兵思路), 这就是 Step 2 的验收画面;
+ *       · 段16 缺席的窗口里第一个强特征是段19(321)≠585 ⇒ 不排队, 不写错缓冲。
+ *     逃生门与总门分开: ssr=1 只挂槽+记日志 (2a), **ssr.sentinel=1 才回写** (2b) —— 首次
+ *     动渲染的操作值得单独开关, 出问题改 0 即退回纯观察, 2a 的身份行照常打。
+ *   槽47 校验失败只降级该槽 (33/50 照常), 绝不挂 orig47 为空的槽 —— 否则 hookedCopyResource
+ *     早退会把真调用丢掉, 游戏所有拷贝消失、渲染直接崩。
+ *   帧汇总新增 COPY= (本帧 CopyResource 次数) 与 哨兵= (累计回写次数); 强特征对象行新增
+ *   [585]/[321] 标注。
+ *   状态: **未真机验证** —— 待本版跑图判读 (预期 [2a] 认出 324/520 各 1 行、COPY=3、
+ *   ssr.sentinel=1 时 [2b] 哨兵按帧计数、反射区显示成旧场景色)。
+ *   关键日志 (新增):
+ *     SSR侦察: ctx vtable=… slot33 … ; slot50 … ; slot47(CopyResource) 原值=… 来自 …
+ *     SSR侦察: ctx槽33/50/47 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.14.0 Step2 …)
+ *     SSR侦察: ini ssr.sentinel=1 → 特征B 处 324→585 回写 (2b 哨兵 …)
+ *     SSR侦察: [2a] 场景色快照 324 = 0x… (src=0x… 1920x1080 RGBA16F) 活引用已持 帧=F
+ *     SSR侦察: [2a] 深度快照 520(假设) = 0x… (src=0x… D24家族) 本帧首条深度拷贝 帧=F
+ *     SSR侦察: 槽47Copy#K 帧=F dst=0x… … <- src=0x… …          ← 前24条 + 每64条
+ *     SSR侦察: 特征B(换绑)#K 帧=F 新RT0=0x… … [2b哨兵已排队]
+ *     SSR侦察: [2b] 哨兵#K 585=0x… <- 324=0x… 帧=F
+ *
  * 构建: GitHub Actions (build.yml job "poc-presenter"), 本地不编译
  * 安装: poc-presenter.dll 放入 <游戏>/Data/SKSE/Plugins/
  */
@@ -537,7 +578,9 @@ void patchSlotLocked(void** slot, void* target)
 
 // v0.9.2 实验开关 —— 同一份 <pluginDir>\poc-presenter.ini (与 pocbEnabled 共用文件):
 //   vulkan=0 → 关 PoC-B 注入 (见 pocbEnabled)
-//   ssr=1    → v0.13.0 SSR Step1 侦察: 挂 ctx 槽33/50 只记日志 (默认 0, 见 installSsrRecon)
+//   ssr=1    → v0.13.0/v0.14.0 SSR Step1+2a: 挂 ctx 槽33/47/50 观察记日志 (默认 0)
+//   ssr.sentinel=1 → v0.14.0 Step2b 通路哨兵: 特征B 处 CopyResource(585<-324) 回写
+//              (默认 0; **首次会动渲染**, 与 ssr 分开独立逃生门, ssr=0 时它一并失效)
 //   vtable=0 → 停用 vtable 层: 不挂交换链槽 8/22, 看门狗也不打回 ⇒ 游戏 Present 只能
 //              从方案B 的函数级 detour 进来 —— 用于给方案B 做"独立计数"
 //              (docs/01 §7.7 末遗留项: vtable 层恒先命中, TLS 去重吃掉函数层计数)
@@ -895,10 +938,13 @@ static void installCtxProbe(ID3D11Device* dev)
 	ctx->Release();
 }
 
-// ---------- SSR Step 1 侦察钩 (v0.13.0, docs/05 §5) ----------
-// 挂 ctx 槽33 (OMSetRenderTargets) + 槽50 (ClearRenderTargetView) 只读观察: 真机上反射段
-// (段16: RT0=585 / DS=461) 的绑定特征是否同帧唯一、段16 结束信号 (特征A/B) 哪个稳定。
-// 只解析调用参数, 不改任何渲染状态; ssr=0 (ini 默认, D5) 时一个槽都不挂。
+// ---------- SSR Step 1/2a/2b 侦察+介入钩 (v0.13.0/v0.14.0, docs/05 §5) ----------
+// 挂 ctx 槽33 (OMSetRenderTargets) + 槽50 (ClearRenderTargetView) + 槽47 (CopyResource):
+//   Step1 (v0.13.0) —— 只读观察: 真机上反射段 (段16: RT0=585 / DS=461) 的绑定特征是否
+//     可辨、段16 结束信号 (特征A/B) 哪个稳定; 只解析参数, 不改任何渲染状态。
+//   Step2a (v0.14.0) —— 槽47 按"来源"学 324/520 身份 (见下方 Step 2a 全局注释), 仍只读。
+//   Step2b (v0.14.0) —— 特征B 处 CopyResource(585<-324) 回写 = 通路哨兵; **首次动渲染**,
+//     独立开关 ssr.sentinel (默认 0), ssr=0 则三槽全不挂 (D5, 基线帧与 v0.12.0 同路径)。
 // 槽号双证: 官方 d3d11.h MIDL 声明序 (与 xosh 44/45 同口径); 槽34 游戏 api-scan 零命中不挂。
 struct SsrCtxEntry
 {
@@ -906,6 +952,7 @@ struct SsrCtxEntry
 	void*  imm;    // 安装时抓到的 immediate context (指针值作身份; 延迟上下文跳过观察)
 	void*  orig33; // OMSetRenderTargets    (ID3D11DeviceContext 槽33)
 	void*  orig50; // ClearRenderTargetView (槽50, 特征A "用后清")
+	void*  orig47; // CopyResource          (槽47, Step 2a 身份识别 + 2b 回写通道)
 };
 static SsrCtxEntry g_ssrCtx[4];
 static int         g_ssrCtxN = 0;
@@ -936,6 +983,32 @@ static SsrRtN g_ssrRtN[32];
 static int    g_ssrRtNN = 0;
 static int    g_ssrRtNOver = 0;
 static void*  g_ssrPrevRt0 = nullptr; // 上一次绑定的 RT0 (RT0 变化 = 换段, 用于 runs)
+
+// ---- Step 2a (v0.14.0, docs/05 D2a): 真机身份 —— 324/520/585/321 是抓帧 ResourceId,
+//      跨帧不可用 (R1), 只能按"来源"认。本组全部**帧间持久**, 帧末不复位:
+//   585 反射目标 = 强特征集合里 runs==1 那个 (Step 1 判别子), 上一帧 Present 定;
+//   321 主 HDR   = 强特征集合里 runs>1  那个, 同上;
+//   324 场景色快照 = CopyResource 的 src 是 1920x1080 RGBA16F 时的 dst
+//                  (S4 全帧 3 条 Copy 里唯一 src 为 RGBA16F 的 = ev39225 的 321→324);
+//   520 深度快照   = 本帧**首个** src 为 1920x1080 D24 家族的 CopyResource 的 dst
+//                  (S4: ev21505 的 461→520; 本帧第二条深度拷贝 461→466 是后期深度,
+//                   不是 520 —— 靠"每帧首条"区分, 由 g_ssrCopyFrame 记帧号复位)。
+//   资源对象身份统一走 QI ID3D11Texture2D 的指针值 (COM 契约: 同对象同 IID 必返同指针,
+//   与 ssrViewDesc 的取法一致 ⇒ OMSet 侧与 CopyResource 侧可直接比对)。
+static void* g_ssrReflRt = nullptr;    // 585 (2b 判据: 上一强特征对象 == 它才回写)
+static void* g_ssrMainHdr = nullptr;   // 321
+static void* g_ssrSceneObj = nullptr;  // 324 的 Texture2D 身份 (日志/换代检测)
+static void* g_ssrDepthObj = nullptr;  // 520 的 Texture2D 身份 (2c VK 输入, 本轮只学不使用)
+static ID3D11Resource* g_ssrSceneRes = nullptr; // 324 活引用 (ssrReconCopy 持, 2b 的源)
+static ID3D11Resource* g_ssrStrRes = nullptr;   // 最近强特征对象的活引用 (2b 的写目标)
+static void* g_ssrStrResObj = nullptr;          // 它的 Texture2D 身份
+static long  g_ssrCopyN = 0;           // 本帧 CopyResource 次数 (进帧汇总)
+static long  g_ssrCopyLogN = 0;        // 详情日志节流
+static unsigned long long g_ssrCopyFrame = 0; // "本帧首条深度拷贝" 判据的帧号
+static bool  g_ssrSentinelPending = false;    // 特征B 已判 → real() 返回后执行回写
+static long  g_ssrSentN = 0;           // 哨兵累计执行次数
+static bool  g_ssrSelfCopy = false;    // 2b 哨兵自己的 CopyResource 进行中 → 不计数不重复学习
+static std::atomic<bool> g_ssrSentinelOn{false}; // ini ssr.sentinel (2b 回写独立逃生门)
 
 static SsrCtxEntry* lookupSsrCtx(void** vtbl)
 {
@@ -973,6 +1046,24 @@ static bool ssrIsD24(DXGI_FORMAT f)
 {
 	return f == DXGI_FORMAT_R24G8_TYPELESS || f == DXGI_FORMAT_D24_UNORM_S8_UINT ||
 	       f == DXGI_FORMAT_R24_UNORM_X8_TYPELESS || f == DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+}
+
+// 资源 → 底层 2D 纹理 desc + 对象身份。取法与 ssrViewDesc 完全一致 (QI ID3D11Texture2D
+// 的指针值作身份, 用完即 Release 不持引用) ⇒ CopyResource 拿到的 ID3D11Resource* 与
+// OMSetRenderTargets 侧 view->GetResource() 再 QI 的结果可直接比对。
+static bool ssrResObj(ID3D11Resource* res, D3D11_TEXTURE2D_DESC* d, void** obj)
+{
+	if (!res)
+		return false;
+	ID3D11Texture2D* tex = nullptr;
+	const HRESULT hr = res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
+	if (FAILED(hr) || !tex)
+		return false;
+	tex->GetDesc(d);
+	if (obj)
+		*obj = reinterpret_cast<void*>(tex);
+	tex->Release();
+	return true;
 }
 
 static std::string ssrFmtName(DXGI_FORMAT f)
@@ -1074,12 +1165,19 @@ static void ssrReconOm(UINT n, ID3D11RenderTargetView* const* ppRTV, ID3D11Depth
 	{
 		g_ssrBFired = true;
 		g_ssrFB.fetch_add(1, std::memory_order_relaxed);
+		// Step 2b 通路哨兵 (docs/05 §5): 仅当"刚离开的强特征对象 = 上一帧判别出的反射目标
+		// 585" 才标记回写 —— 段16 缺席的窗口里第一个强特征是段19(321), 不等于 585 ⇒ 不标记,
+		// 避免写错缓冲。真正执行在 hookedOMSetRenderTargets 的 real() 之后 (那时段17 已绑,
+		// 585 恰好已解绑, CopyResource 写进去最安全)。
+		if (g_ssrSentinelOn.load(std::memory_order_relaxed) && g_ssrReflRt &&
+		    g_ssrLastStr == g_ssrReflRt && g_ssrStrRes)
+			g_ssrSentinelPending = true;
 		const long k = ++g_ssrBLogN;
 		if (k <= 16 || (k % 64) == 0)
 			logLine("SSR侦察: 特征B(换绑)#" + std::to_string(k) + " 帧=" + std::to_string(fr) +
 			        " 新RT0=" + hexOf(robj) + " (" + std::to_string(rd.Width) + "x" +
 			        std::to_string(rd.Height) + " " + ssrFmtName(rd.Format) + ") 非空=" +
-			        std::to_string(nonNull));
+			        std::to_string(nonNull) + (g_ssrSentinelPending ? " [2b哨兵已排队]" : ""));
 	}
 
 	// 候选: 恰1个非空视图且 1920x1080 RGBA16F (段15 无 DS 也命中; 段7/17/18 是 MRT×2/×3
@@ -1115,6 +1213,18 @@ static void ssrReconOm(UINT n, ID3D11RenderTargetView* const* ppRTV, ID3D11Depth
 			g_ssrStrTot++;
 			g_ssrFStr.fetch_add(1, std::memory_order_relaxed);
 			g_ssrLastStr = robj;
+			// 2b 写目标的活引用 —— robj 是 ssrViewDesc QI 后即 Release 的指针值, 只能比对
+			// 不能解引用; CopyResource 要真对象。换强特征对象才换 ref (段16 的 16 次重绑
+			// 同对象不换), 每帧至多换几次。段17 非强特征不进来 ⇒ 特征B 触发时这里存的
+			// 仍是刚离开的段16 的资源。
+			if (robj != g_ssrStrResObj)
+			{
+				if (g_ssrStrRes)
+					g_ssrStrRes->Release();
+				g_ssrStrRes = nullptr;
+				if (SUCCEEDED(first->GetResource(&g_ssrStrRes)))
+					g_ssrStrResObj = robj;
+			}
 			// 这里不复位 A/B fired —— 只在 Present 复位, 每帧各至多触发一次。否则段19
 			// 进入时复位, 段19 之后 ev44352 换绑到 35 会再触发一次 B → fb=2 误判异常。
 			bool dup = false;
@@ -1166,6 +1276,83 @@ static void ssrReconClear(ID3D11RenderTargetView* pRTV)
 		        tgt + " 强特征RT0=" + hexOf(g_ssrLastStr));
 }
 
+// 槽47 观察 (v0.14.0 Step 2a, docs/05 D2a): 每条 CopyResource 记 src/dst 对象与 desc,
+// 并按"来源"学 324/520 身份 —— 抓帧 ResourceId 跨帧不可用 (R1), 只能认来源:
+//   324 = src 为 1920x1080 RGBA16F 的拷贝之 dst (S4 全帧 3 条 Copy 里唯一 src 为 RGBA16F
+//         的就是 ev39225 的 321→324; 深度两条 src 是 D24 家族, 被格式挡住)
+//   520 = 本帧**首条** src 为 1920x1080 D24 家族的拷贝之 dst (S4: ev21505 的 461→520;
+//         本帧第二条 461→466 是后期深度 —— 靠 g_ssrCopyFrame 锁帧号只取首条)
+// 只读, 不改渲染。324 的活引用在这里一并持有 (pDst 由游戏持有, AddRef 一份保证 2b 执行时
+// 对象仍存活; ssrViewDesc/ssrResObj 返回的是 QI 后即 Release 的指针值, 不能拿去解引用)。
+static void ssrReconCopy(ID3D11Resource* pDst, ID3D11Resource* pSrc)
+{
+	g_ssrCopyN++;
+	const unsigned long long fr = g_presentCount.load(std::memory_order_relaxed) + 1;
+	D3D11_TEXTURE2D_DESC sd{}, dd{};
+	void* sobj = nullptr;
+	void* dobj = nullptr;
+	const bool sok = ssrResObj(pSrc, &sd, &sobj);
+	const bool dok = ssrResObj(pDst, &dd, &dobj);
+	if (sok && dok)
+	{
+		if (sd.Width == 1920 && sd.Height == 1080 &&
+		    sd.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
+		{
+			if (g_ssrSceneObj != dobj)
+			{
+				if (g_ssrSceneRes)
+					g_ssrSceneRes->Release();
+				pDst->AddRef();
+				g_ssrSceneRes = pDst;
+				g_ssrSceneObj = dobj;
+				logLine("SSR侦察: [2a] 场景色快照 324 = " + hexOf(dobj) + " (src=" +
+				        hexOf(sobj) + " " + std::to_string(sd.Width) + "x" +
+				        std::to_string(sd.Height) + " " + ssrFmtName(sd.Format) +
+				        ") 活引用已持 帧=" + std::to_string(fr));
+			}
+		}
+		else if (sd.Width == 1920 && sd.Height == 1080 && ssrIsD24(sd.Format) &&
+		         g_ssrCopyFrame != fr)
+		{
+			g_ssrCopyFrame = fr;
+			if (g_ssrDepthObj != dobj)
+			{
+				g_ssrDepthObj = dobj;
+				logLine("SSR侦察: [2a] 深度快照 520(假设) = " + hexOf(dobj) + " (src=" +
+				        hexOf(sobj) + " " + ssrFmtName(sd.Format) +
+				        ") 本帧首条深度拷贝 帧=" + std::to_string(fr));
+			}
+		}
+	}
+	const long k = ++g_ssrCopyLogN;
+	if (k <= 24 || (k % 64) == 0)
+	{
+		const std::string sTxt = sok
+		    ? (hexOf(sobj) + " " + std::to_string(sd.Width) + "x" + std::to_string(sd.Height) +
+		       " " + ssrFmtName(sd.Format))
+		    : std::string("QI失败");
+		const std::string dTxt = dok
+		    ? (hexOf(dobj) + " " + std::to_string(dd.Width) + "x" + std::to_string(dd.Height) +
+		       " " + ssrFmtName(dd.Format))
+		    : std::string("QI失败");
+		logLine("SSR侦察: 槽47Copy#" + std::to_string(k) + " 帧=" + std::to_string(fr) +
+		        " dst=" + dTxt + " <- src=" + sTxt);
+	}
+}
+
+static void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* ctx, ID3D11Resource* pDst,
+                                                 ID3D11Resource* pSrc)
+{
+	using Fn_t = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);
+	SsrCtxEntry* e = lookupSsrCtx(ctx ? *reinterpret_cast<void***>(ctx) : nullptr);
+	const Fn_t real = e ? reinterpret_cast<Fn_t>(e->orig47) : nullptr;
+	if (!real) // 只有 isD3D11Family 校验通过才会被 patch, 见 installSsrRecon
+		return;
+	if (!g_ssrSelfCopy && ssrWatch(e, ctx) && g_ssrOn.load(std::memory_order_relaxed))
+		ssrReconCopy(pDst, pSrc); // 2b 哨兵自己的拷贝跳过 —— 计数与学习都只认游戏的
+	real(ctx, pDst, pSrc);
+}
+
 static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx, UINT n,
                                                        ID3D11RenderTargetView* const* ppRTV,
                                                        ID3D11DepthStencilView* pDSV)
@@ -1180,6 +1367,31 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 	if (ssrWatch(e, ctx) && g_ssrOn.load(std::memory_order_relaxed))
 		ssrReconOm(n, ppRTV, pDSV);
 	real(ctx, n, ppRTV, pDSV);
+	// ---- Step 2b 通路哨兵 (docs/05 §5 Step 2): 特征B(段16→段17) 判定后的回写 ----
+	// 放在 real() **之后**: 此刻段17 的 {321,591} 已绑上, 585 恰好已解绑 —— CopyResource
+	// 写一个非绑定资源最干净 (在 real() 之前写则 585 还是绑定中的 RT0)。段17 的 1 Draw
+	// (ev39530) 尚未发生 ⇒ 它随后读到的 585 已是 324 的内容 = 可辨识的"旧场景色"错误画面。
+	// 写目标 = g_ssrStrRes (段16 资源的活引用), 源 = g_ssrSceneRes (324 的活引用),
+	// 两者都持 AddRef, 不依赖已被 Release 的裸指针值。
+	if (g_ssrSentinelPending)
+	{
+		g_ssrSentinelPending = false;
+		// 四重保险: 开关 + 两个活引用都在 + 写目标身份确为刚离开的强特征对象 (= g_ssrReflRt
+		// 的本帧实例)。g_ssrStrResObj == g_ssrLastStr 这条防"GetResource 失败导致 strResObj
+		// 残留旧值"的边角 —— 那种情况下 g_ssrStrRes 本来也是空, 但两处都查更稳。
+		if (g_ssrSentinelOn.load(std::memory_order_relaxed) && g_ssrSceneRes && g_ssrStrRes &&
+		    g_ssrStrResObj == g_ssrLastStr && g_ssrLastStr == g_ssrReflRt)
+		{
+			g_ssrSelfCopy = true;
+			ctx->CopyResource(g_ssrStrRes, g_ssrSceneRes); // dst=585 <- src=324
+			g_ssrSelfCopy = false;
+			const long k = ++g_ssrSentN;
+			if (k <= 8 || (k % 128) == 0)
+				logLine("SSR侦察: [2b] 哨兵#" + std::to_string(k) +
+				        " 585=" + hexOf(g_ssrStrResObj) + " <- 324=" + hexOf(g_ssrSceneObj) +
+				        " 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1));
+		}
+	}
 }
 
 static void STDMETHODCALLTYPE hookedClearRTV(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* pRTV,
@@ -1218,9 +1430,11 @@ static void installSsrRecon(ID3D11Device* dev)
 	}
 	void* o33 = vtbl[33];
 	void* o50 = vtbl[50];
+	void* o47 = vtbl[47]; // CopyResource (Step 2a 身份识别通道)
 	logLine("SSR侦察: ctx vtable=" + hexOf(vtbl) + " slot33(OMSetRenderTargets) 原值=" + hexOf(o33) +
 	        " 来自 " + modulePathOf(o33) + "; slot50(ClearRenderTargetView) 原值=" + hexOf(o50) +
-	        " 来自 " + modulePathOf(o50));
+	        " 来自 " + modulePathOf(o50) + "; slot47(CopyResource) 原值=" + hexOf(o47) +
+	        " 来自 " + modulePathOf(o47));
 	if (!isD3D11Family(o33) || !isD3D11Family(o50))
 	{
 		logLine("SSR侦察: ctx slot33/50 原值不在 d3d11/renderdoc — 跳过 (防错槽位)");
@@ -1228,6 +1442,12 @@ static void installSsrRecon(ID3D11Device* dev)
 		ctx->Release();
 		return;
 	}
+	// slot47 校验失败只降级该槽 (不挂), 33/50 照常 —— 324 身份学不到则 2b 哨兵不排队,
+	// 日志里看不到 [2a] 行即可判读; 绝不能挂一个 orig47 为空的槽 (hookedCopyResource 会
+	// 直接 return 掉真调用 ⇒ 游戏拷贝全丢, 渲染崩)。
+	const bool ok47 = isD3D11Family(o47);
+	if (!ok47)
+		logLine("SSR侦察: ctx slot47 原值不在 d3d11/renderdoc — 不挂 (身份识别降级, 槽33/50 照常)");
 	if (g_ssrCtxN >= (int)(sizeof(g_ssrCtx) / sizeof(g_ssrCtx[0])))
 	{
 		logLine("SSR侦察: ctx 登记表已满 — 跳过 (防越界)");
@@ -1239,10 +1459,14 @@ static void installSsrRecon(ID3D11Device* dev)
 	g_ssrCtx[g_ssrCtxN].imm = ctx; // 指针值作身份, 下面立即 Release 不持引用
 	g_ssrCtx[g_ssrCtxN].orig33 = o33;
 	g_ssrCtx[g_ssrCtxN].orig50 = o50;
+	g_ssrCtx[g_ssrCtxN].orig47 = ok47 ? o47 : nullptr;
 	++g_ssrCtxN;
 	patchSlotLocked(&vtbl[33], reinterpret_cast<void*>(&hookedOMSetRenderTargets));
 	patchSlotLocked(&vtbl[50], reinterpret_cast<void*>(&hookedClearRTV));
-	logLine("SSR侦察: ctx槽33/50 已挂 — 只记日志不动渲染 (v0.13.0 Step1; 逃生门 ssr=0)");
+	if (ok47)
+		patchSlotLocked(&vtbl[47], reinterpret_cast<void*>(&hookedCopyResource));
+	logLine("SSR侦察: ctx槽33/50" + std::string(ok47 ? "/47" : "") +
+	        " 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.14.0 Step2; 逃生门 ssr=0)");
 	LeaveCriticalSection(&g_cs);
 	ctx->Release();
 }
@@ -1288,6 +1512,17 @@ static void ssrReconPresent(uint64_t n)
 				break;
 			}
 	}
+	// ---- Step 2a 身份落定 (docs/05 D2a): 判别子 runs 一出来就按它分派585/321 ----
+	//   runs==1 ⇒ 反射目标 585 (段16 整帧只写一次), runs>1 ⇒ 主 HDR 321 (4~6 段)。
+	//   帧间持久不复位: 下一帧 ssrReconCopy 见 src==321 就认 324, 特征B 见"刚离开的强特征
+	//   对象==585" 才排队回写。资源换代后新对象在本帧末才会顶上 ⇒ 有一帧延迟, 无妨。
+	for (int i = 0; i < objN; ++i)
+	{
+		if (objRuns[i] == 1)
+			g_ssrReflRt = objs[i];
+		else if (objRuns[i] > 1)
+			g_ssrMainHdr = objs[i];
+	}
 	g_ssrFObjN = 0;
 	g_ssrRtNN = 0;
 	g_ssrRtNOver = 0;
@@ -1297,6 +1532,9 @@ static void ssrReconPresent(uint64_t n)
 	g_ssrLastCand = nullptr;
 	g_ssrLastCandStr = false;
 	g_ssrAFired = g_ssrBFired = false;
+	const long copyN = g_ssrCopyN;
+	g_ssrCopyN = 0;
+	g_ssrSentinelPending = false; // 兜底: 上一帧没被 real() 消费掉的标记不带进新帧
 	const bool act = fc > 0 || fs > 0 || fa > 0 || fb > 0;
 	// 真机判读 (2026-10-04, 4472 帧): 2571 条 [异常] 全部来自旧规则 "fs>2" —— fs 是"进入次数"
 	// 不是"唯一性", S4 只有单帧真值 fs=2, 真机主 HDR 有 2~3 次强特征进入 ⇒ fs=3~4 恒成立。
@@ -1309,7 +1547,8 @@ static void ssrReconPresent(uint64_t n)
 		std::string s = "SSR侦察: 帧=" + std::to_string(n) + " OM=" + std::to_string(fo) +
 		                " 候选=" + std::to_string(fc) + " 强特征=" + std::to_string(fs) +
 		                " distinct=" + std::to_string(objN) + " 特征A=" + std::to_string(fa) +
-		                " 特征B=" + std::to_string(fb) + " | 累计候选=" +
+		                " 特征B=" + std::to_string(fb) + " COPY=" + std::to_string(copyN) +
+		                " 哨兵=" + std::to_string(g_ssrSentN) + " | 累计候选=" +
 		                std::to_string(g_ssrCandN) + " 累计强特征=" + std::to_string(g_ssrStrTot);
 		if (anom)
 			s += " [异常]";
@@ -1317,7 +1556,9 @@ static void ssrReconPresent(uint64_t n)
 		for (int i = 0; i < objN; ++i)
 			logLine("SSR侦察: 帧=" + std::to_string(n) + " 强特征对象" + std::to_string(i + 1) +
 			        "=" + hexOf(objs[i]) + " 本帧RT0绑定=" + std::to_string(objBind[i]) +
-			        "次/" + std::to_string(objRuns[i]) + "个连续段");
+			        "次/" + std::to_string(objRuns[i]) + "个连续段" +
+			        (objs[i] == g_ssrReflRt ? " [585]" : "") +
+			        (objs[i] == g_ssrMainHdr ? " [321]" : ""));
 	}
 }
 
@@ -1335,10 +1576,19 @@ static void installProbeOn(ID3D11Device* dev)
 		g_probeOn.store(iniFlag("probe", true), std::memory_order_relaxed);
 		if (!g_probeOn.load(std::memory_order_relaxed))
 			logLine("探针升质: ini probe=0 → 不挂 CreateTexture2D (探针保持 512²)");
-		// SSR Step1 侦察 (D5): 默认 0 → 零新增拦截; 1 才挂 ctx 槽33/50 (与 probe 同门)
+		// SSR Step1 侦察 (D5): 默认 0 → 零新增拦截; 1 才挂 ctx 槽33/47/50 (与 probe 同门)
 		g_ssrOn.store(iniFlag("ssr", false), std::memory_order_relaxed);
 		if (g_ssrOn.load(std::memory_order_relaxed))
-			logLine("SSR侦察: ini ssr=1 → 挂 ctx 槽33/50 只记日志 (v0.13.0 Step1)");
+			logLine("SSR侦察: ini ssr=1 → 挂 ctx 槽33/47/50 (2a 只记日志) v0.14.0 Step2");
+		// Step 2b 通路哨兵的独立逃生门 —— 首次会动渲染 (324→585 回写), 与"只观察"分开:
+		// ssr=1 但 ssr.sentinel=0 ⇒ 纯观察, 2a 身份照样学; 出问题改 0 即退回只读。
+		g_ssrSentinelOn.store(iniFlag("ssr.sentinel", false), std::memory_order_relaxed);
+		if (g_ssrSentinelOn.load(std::memory_order_relaxed) &&
+		    g_ssrOn.load(std::memory_order_relaxed))
+			logLine("SSR侦察: ini ssr.sentinel=1 → 特征B 处 324→585 回写 (2b 哨兵, 反射区"
+			        " 会显示成可辨识的旧场景色错误画面; 逃生门 ssr.sentinel=0)");
+		else if (g_ssrSentinelOn.load(std::memory_order_relaxed))
+			logLine("SSR侦察: ini ssr.sentinel=1 但 ssr=0 → 哨兵不生效 (ssr 是总门)");
 	}
 	if (!g_probeOn.load(std::memory_order_relaxed))
 	{

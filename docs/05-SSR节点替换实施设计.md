@@ -171,6 +171,39 @@ VK 侧新增：`VkDescriptorSetLayout` / `VkSampler` / `vkCmdBindDescriptorSets`
 `POCB_DEV_FNS` 宏扩函数（现有宏没有这几个，`main.cpp` L1475–1488）；深度 VkImage 视图
 格式与 D24 兼容性在 Step 2 探测（不兼容则退 D32 支持的采样路径或转 R32）。
 
+#### D2a-1 真机身份：324/520 怎么认（Step 2a 补充，v0.14.0）
+
+**问题**：324/520/585/321 都是抓帧 `ResourceId`，跨帧不可用（R1 同一个坑）。不能拿 ID 去比对。
+**解法：按"来源"认**，四条全部落进 `main.cpp`（帧间持久，帧末不复位）：
+
+| 身份 | 真机识别规则 | 时机/依据 |
+|---|---|---|
+| **585** 反射目标 | 强特征集合里 **`runs==1`** 那个（Step 1 判别子） | 上一帧 Present 定 |
+| **321** 主 HDR | 强特征集合里 **`runs>1`** 那个 | 同上 |
+| **324** 场景色快照 | 槽47 `CopyResource` 的 **src 是 1920×1080 `RGBA16F`** 时的 dst | S4 全帧 3 条 Copy 里唯一 src 为 RGBA16F 的就是 `ev39225` 的 321→324；两条深度拷贝 src 是 D24 家族，被格式挡住 |
+| **520** 深度快照 | 本帧**首条** src 是 1920×1080 D24 家族的 `CopyResource` 之 dst | `ev21505` 的 461→520；本帧第二条 `ev44057` 的 461→466 是**后期**深度，靠帧号锁 `g_ssrCopyFrame` 只取首条 |
+
+- **前 1 帧学习、第 2 帧生效**：324 的识别不依赖 321（只看 src 格式）→ 第 1 帧就认出；
+  585 要等第 1 帧 Present 的 `runs` 出来 → **哨兵最早第 2 帧开火**。
+- **身份口径统一**：一律 QI `ID3D11Texture2D` 的指针值（COM 契约：同对象同 IID 必返同指针，
+  与 `ssrViewDesc` 同款）⇒ OMSet 侧与 CopyResource 侧可直接比对。
+- **但裸指针值不能解引用**（QI 后即 `Release`）——2b 要真调 `CopyResource`，故另持两份
+  **活引用**：`g_ssrSceneRes`（324，来自 `pDst->AddRef()`）与 `g_ssrStrRes`（最近强特征对象，
+  来自 `RTV->GetResource()`）。持 AddRef 也顺带保证对象不被游戏销毁。
+
+#### D2a-2 走哪个 API？—— `CopyResource`（槽47），不是 `CopySubresourceRegion`
+
+`rdc_pass5` 只认 RenderDoc 的 `Copy` action flag，不区分 API，所以 pass5 的
+`copies[]` 本身答不了。**排除法定案**（`docs/analysis/S4*e*-api-scan.txt`，filter 含
+`CopySubresourceRegion`、range=0-999999 全帧）：
+
+- 游戏侧 `CopySubresourceRegion` **零命中** —— 唯一 1 条是 PoC-B 自己的
+  `pDst=78 DstX=16 DstY=16 pSrc=17760`（我们 512² 洋红图进 backbuffer）；
+- `S4-extract-pass5.json` 的 `resolves:[]` 为空 → 也不是 `ResolveSubresource`；
+- 剩下的只有 **`ID3D11DeviceContext::CopyResource`** ⇒ 挂**槽47**，槽46 不挂。
+
+（`docs/analysis/d3d11-ctx-slots.txt:53-54`：46 CopySubresourceRegion / 47 CopyResource）
+
 ### D3 输出回写与段16 的 16 个 Draw（两个子方案）
 
 | 方案 | 流程 | 优点 | 缺点 |
@@ -204,9 +237,13 @@ a 的段16 结束信号（**Step 1 真机判读已二选一：定特征B** —�
 
 ### D5 配置与逃生门
 
-- 新增 `ssr=0/1`（`iniFlag` 模板，`main.cpp` L495–519），**默认 0（未过闸前）**，过闸后改默认 1；
+- `ssr=0/1`（`iniFlag` 模板），**默认 0（未过闸前）**，过闸后改默认 1 —— 总门：管挂不挂槽33/47/50；
+- **`ssr.sentinel=0/1`，默认 0**（v0.14.0 Step 2b 新增）—— 2b 回写 `CopyResource(585←324)` 的
+  **独立开关**。首次会动渲染的操作单独给一道门：`ssr=1` 只观察+学身份（2a），
+  `ssr.sentinel=1` 才回写；改 0 即退回纯观察，**身份行照常打**。`ssr=0` 时它一并失效。
 - `ssr.debug=N`：每 N 帧打触发/耗时（节流口径抄 `n%256`）；
 - 挂载受 `vulkan` 总闸 + `probe`（探针 fallback 依赖）联立把关，`ssr=0` 时零新增拦截。
+- **ini 只读一次**（`installProbeOn` 首次调用），改完必须重启游戏。
 
 ---
 
@@ -216,7 +253,7 @@ a 的段16 结束信号（**Step 1 真机判读已二选一：定特征B** —�
 |---|---|---|---|
 | **0** | 本文设计确认 | 本文件 | — |
 | **1 侦察钩** ✅ | 挂 `OMSetRenderTargets`（**槽33**）+ `ClearRenderTargetView`（**槽50**）**只记日志**：真机上强特征段是否唯一、段16 结束特征A/B 哪个稳定、判别子「本帧 RT0 绑定次数/连续段数」能否分开那两个同签名段（见 D1 前置实测） | **已完成入档**（CI `64a290e`，判读见 §4 D1 末「Step 1 真机判读」）：`distinct` 恒 ≤2、判别子 `1段 vs 4~6段` 零重叠、A/B 均 100%=1 ⇒ **信号定 B**；修正一处判据（删 `fs>2`，消除 2571 条假阳性）；不动任何渲染 | R1 **关闭** |
-| **2 输入通路** | D2a：324/520 → CopyResource → SHARED → VK 导入 + descriptor/sampler 扩展；**通路哨兵**：SSR v0 = 把 324 直拷回 585（反射区变成可辨识的「旧场景色」错误画面，类洋红哨兵思路） | 抓帧候选帧：段17 后 321 内容 = 324 = 通路成立；锚点 declared-diff 提案先行 | R2 深度格式/导入 |
+| **2 输入通路**（**拆 2a/2b → 2c/2d**，2026-10-04 定） | **2a 身份识别**：挂**槽47** `CopyResource`，按 D2a-1 规则学 324/520，`runs` 定 585/321（**只记日志**）；**2b 通路哨兵**：特征B 处 `CopyResource(585←324)`，反射区变成可辨识的「旧场景色」错误画面（类洋红哨兵思路）。→ **代码完成待真机**（`v0.14.0`）。**2c** 共享入向（2 张 SHARED + `CreateSharedHandle` + VK 导入 + `POCB_DEV_FNS` 扩 descriptor/sampler）；**2d** SSR v0 passthrough 经 VK 回写 585 | **2a** 日志：`[2a]` 认出 324/520 各 1 行、`COPY=` 每帧=3、`[585]`/`[321]` 标注落在 runs==1 / runs>1 的对象上；**2b** 抓帧：段17 后 321 内容 = 324 = 通路成立（**先验硬约束 5「必须 in-frame 拦截」**）；锚点 declared-diff 提案先行 | R2 深度格式/导入 |
 | **3 SSR v1** | D4 shader + D3a 覆盖式回写 + 事件闸同步 | 游戏内水面反射呈屏幕空间内容（人工截图对照——观感无自动判据） | R4 相机矩阵来源 |
 | **4 过闸** | 套 `docs/02` §14.6 模板：抓 S5/S4 双帧 → declared-diff 闸（A 全绿 + F 必现 + B 归因）→ 帧时不劣于基线 5%（`docs/00:93`，1660Ti 1080p，S4/S5 各测） | compare JSON + 帧时数据 + 判读入档 | R3 帧时 |
 | **5 收口** | 默认 `ssr=1`、docs/00 §1.1 与 docs/03 §7.1 回填、诚实边界新增 | commit + CI | — |
