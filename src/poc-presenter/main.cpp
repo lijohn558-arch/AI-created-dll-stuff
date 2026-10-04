@@ -345,6 +345,13 @@
  *       "D3D11 写、VK 读"这条入向通路的字节视图一致 (SSR v1 每帧都要走的路)。
  *       节奏搭 D3D11 读回的便车 (前3次+每600次), 不做每帧读回; 借用 PoC-B 的
  *       device/queue/pool/fence ⇒ **依赖 PoC-B 开着**, 失败只关自己不碰 `pocbFail`。
+ *   **v0.16.1 = 2c-β 导入归因矩阵 + 2x2 探针**:
+ *     · 真机首次导入报 `VK_ERROR_OUT_OF_DEVICE_MEMORY (-2)` (PoC-B 的 512² RGBA8 一直好好的,
+ *       色镜像是 1920x1080 RGBA16F)。差异只有 格式 / 尺寸 / 内存类型 ⇒ 按
+ *       [尺寸候选 x 允许内存类型] 矩阵逐个试并逐次记码, 成了记"哪一组合赢";
+ *     · 矩阵全失败 ⇒ 再建两张**探针纹理**做 2x2 归因: A=RGBA8@1920x1080 (只换格式)、
+ *       B=RGBA16F@512x512 (只换尺寸), 各自导入一次后即销毁 —— 四种结果直接给出
+ *       "病因是格式" 还是 "病因是尺寸", 两条改道方向完全不同。
  *   关键日志 (新增):
  *     SSR侦察: ctx vtable=… slot33 … ; slot50 … ; slot47(CopyResource) 原值=… 来自 …
  *     SSR侦察: ctx槽33/50/47 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.16.0 Step2 …)
@@ -361,6 +368,11 @@
  *     SSR侦察: [2c] 入向拷贝#K 色324=0x…→0x… 深520=0x…→0x… [2c读回 色=0x…≠基线✓ …] 帧=F
  *     SSR侦察: 特征B(换绑)#K … [2b哨兵已排队] [2c入向已排队]
  *     SSR侦察: [2c] 重试 深度520 BindFlags=0x… (原 0x…) → OK/仍失败 … ← R2 归因
+ *     SSR侦察: [2c-β]   导入矩阵成功: 第K/N 组合 size=… (VK报=… 朴素=…) type=… → 病因=… ← v0.16.1
+ *     SSR侦察: [2c-β]   导入矩阵 N 次全失败 码=… (size候选x类型) VK报size=… 朴素size=…
+ *     SSR侦察: [2c-β] 归因探测A RGBA8@1920x1080(只换格式) 导入 OK/失败 … VK报size=…
+ *     SSR侦察: [2c-β] 归因探测B RGBA16F@512x512(只换尺寸) 导入 OK/失败 … VK报size=…
+ *     SSR侦察: [2c-β]   归因结论: 病因是格式/尺寸/组合 …   ← 2c-β 改道依据
  *     SSR侦察: [2c-β] VK 导入 OK: 色镜像 NT handle → VkImage (OPAQUE_WIN32) 1920x1080 RGBA16F …
  *     SSR侦察: [2c-β] 交叉校验#K D3D11=0x… VK=0x… 一致则 **一致✓**、否则 **不一致✗** VK非零=… 本帧VK读回=…ms 帧=F
  *
@@ -3643,16 +3655,60 @@ static bool ssrInVkBuild(PocbCtx& c)
 		return fail("vkCreateImage(外部内存) = " + pocbCode(vr));
 
 	// --- 2) 导入 NT handle: 分配即导入 (链进 VkMemoryAllocateInfo) ---
+	// v0.16.1 真机归因重试: 首次导入报 VK_ERROR_OUT_OF_DEVICE_MEMORY (-2)。同一套代码
+	// PoC-B 的 512x512 RGBA8 导入一直是好的, 色镜像是 1920x1080 RGBA16F —— 差异只有
+	// ①格式 ②尺寸 (512x512x8=2,097,152 恰好页对齐; 1920x1080x8=16,588,800 不对齐,
+	// D3D11 共享分配八成向上对齐, 而 VK 报的是自己算的 size, 与句柄真实分配对不上就 -2)
+	// ③内存类型。所以先跑 [尺寸候选 x 允许内存类型] 矩阵, 每个组合都记码;
+	// 矩阵全失败再用两张探针纹理 (RGBA8@1920x1080 / RGBA16F@512x512) 做 2x2 归因,
+	// 分清"RGBA16F 不能跨 API"还是"大图分配尺寸对不上" —— 两者改道方向完全不同。
 	VkMemoryRequirements req{};
 	c.fns.vkGetImageMemoryRequirements(c.vdev, g_ssrVkImg, &req);
 	VkPhysicalDeviceMemoryProperties mp{};
 	c.fns.vkGetPhysicalDeviceMemoryProperties(c.phys, &mp);
-	int t = pocbMemType(mp, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-	if (t < 0)
-		t = pocbMemType(mp, req.memoryTypeBits, 0);
-	if (t < 0)
+	int types[8];
+	int nty = 0;
+	for (uint32_t i = 0; i < mp.memoryTypeCount && nty < 8; ++i)
+	{
+		if (!(req.memoryTypeBits & (1u << i)))
+			continue;
+		if (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+			types[nty++] = static_cast<int>(i);
+	}
+	for (uint32_t i = 0; i < mp.memoryTypeCount && nty < 8; ++i)
+	{
+		if (!(req.memoryTypeBits & (1u << i)))
+			continue;
+		bool dup = false;
+		for (int j = 0; j < nty; ++j)
+			dup = dup || (types[j] == static_cast<int>(i));
+		if (!dup)
+			types[nty++] = static_cast<int>(i);
+	}
+	if (nty == 0)
 		return fail("色镜像导入无可用内存类型 (memoryTypeBits=" +
 		            std::to_string(req.memoryTypeBits) + ")");
+	VkDeviceSize cand[6];
+	int ncd = 0;
+	auto addSz = [&](VkDeviceSize s) {
+		if (!s)
+			return;
+		for (int i = 0; i < ncd; ++i)
+			if (cand[i] == s)
+				return;
+		if (ncd < 6)
+			cand[ncd++] = s;
+	};
+	const VkDeviceSize raw =
+	    (VkDeviceSize)md.Width * (VkDeviceSize)md.Height * 8ULL; // RGBA16F = 8B/px
+	addSz(req.size);
+	addSz((req.size + 65535ULL) & ~(VkDeviceSize)65535ULL);    // VK 报值 64KB 对齐
+	addSz((req.size + 2097151ULL) & ~(VkDeviceSize)2097151ULL); // 2MB 对齐
+	addSz(raw);
+	addSz((raw + 65535ULL) & ~(VkDeviceSize)65535ULL);
+	addSz((raw + 2097151ULL) & ~(VkDeviceSize)2097151ULL);
+	VkResult vrFirst = VK_SUCCESS;
+	int hitSz = -1, hitTy = -1, hitK = 0, ntry = 0;
 	{
 		VkImportMemoryWin32HandleInfoKHR imp{};
 		imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
@@ -3661,11 +3717,174 @@ static bool ssrInVkBuild(PocbCtx& c)
 		VkMemoryAllocateInfo mai{};
 		mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
 		mai.pNext = &imp;
-		mai.allocationSize = req.size;
-		mai.memoryTypeIndex = static_cast<uint32_t>(t);
-		vr = c.fns.vkAllocateMemory(c.vdev, &mai, nullptr, &g_ssrVkMem);
-		if (vr != VK_SUCCESS)
-			return fail("vkAllocateMemory(NT handle 导入) = " + pocbCode(vr));
+		std::string codes;
+		for (int si = 0; si < ncd && vr != VK_SUCCESS; ++si)
+		{
+			for (int ti = 0; ti < nty && vr != VK_SUCCESS; ++ti)
+			{
+				++ntry;
+				mai.allocationSize = cand[si];
+				mai.memoryTypeIndex = static_cast<uint32_t>(types[ti]);
+				vr = c.fns.vkAllocateMemory(c.vdev, &mai, nullptr, &g_ssrVkMem);
+				if (vr == VK_SUCCESS)
+				{
+					hitSz = si;
+					hitTy = types[ti];
+					hitK = ntry;
+					break;
+				}
+				if (ntry == 1)
+					vrFirst = vr;
+				if (codes.size() < 160)
+					codes += (codes.empty() ? "" : ",") + pocbCode(vr);
+			}
+		}
+	}
+	if (vr == VK_SUCCESS)
+	{
+		std::string why;
+		if (hitSz > 0)
+			why = " → 病因=尺寸口径 (VK 报值不成, 换对齐值才成)";
+		else if (hitK > 1)
+			why = " → 病因=内存类型 (第一个类型不成)";
+		else
+			why = " → 首个组合即成 (尺寸/类型本来就没问题)";
+		logLine("SSR侦察: [2c-β]   导入矩阵成功: 第" + std::to_string(hitK) + "/" +
+		        std::to_string(ntry) + " 组合 size=" + std::to_string((long long)cand[hitSz]) +
+		        " (VK报=" + std::to_string((long long)req.size) + " 朴素=" +
+		        std::to_string((long long)raw) + ") type=" + std::to_string(hitTy) + why);
+	}
+	else
+	{
+		logLine("SSR侦察: [2c-β]   导入矩阵 " + std::to_string(ntry) + " 次全失败 码=" + codes +
+		        " (size候选" + std::to_string(ncd) + "x类型" + std::to_string(nty) +
+		        ") VK报size=" + std::to_string((long long)req.size) +
+		        " 朴素size=" + std::to_string((long long)raw));
+		// ---- 2x2 归因探针: 每张只改一个变量, 其余全抄色镜像 desc ----
+		auto probe = [&](const char* tag, DXGI_FORMAT dfmt, VkFormat vfmt, UINT pw,
+		                 UINT ph) -> std::string {
+			D3D11_TEXTURE2D_DESC pd = md;
+			pd.Width = pw;
+			pd.Height = ph;
+			pd.Format = dfmt;
+			pd.MipLevels = 1;
+			pd.ArraySize = 1;
+			pd.SampleDesc.Count = 1;
+			pd.Usage = D3D11_USAGE_DEFAULT;
+			pd.CPUAccessFlags = 0;
+			pd.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+			ID3D11Texture2D* pt = nullptr;
+			HRESULT phr = c.dev ? c.dev->CreateTexture2D(&pd, nullptr, &pt) : E_FAIL;
+			if (FAILED(phr) || !pt)
+				return std::string(tag) + " 建 D3D11 纹理失败 " + hexHr(phr);
+			IDXGIResource1* pres = nullptr;
+			phr = pt->QueryInterface(__uuidof(IDXGIResource1), reinterpret_cast<void**>(&pres));
+			HANDLE hh = nullptr;
+			if (SUCCEEDED(phr) && pres)
+			{
+				phr = pres->CreateSharedHandle(nullptr,
+				                               DXGI_SHARED_RESOURCE_READ |
+				                                   DXGI_SHARED_RESOURCE_WRITE,
+				                               nullptr, &hh);
+				pres->Release();
+			}
+			if (FAILED(phr) || !hh)
+			{
+				pt->Release();
+				return std::string(tag) + " CreateSharedHandle 失败 " + hexHr(phr);
+			}
+			VkExternalMemoryImageCreateInfo pem{};
+			pem.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+			pem.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+			VkImageCreateInfo pic{};
+			pic.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+			pic.pNext = &pem;
+			pic.imageType = VK_IMAGE_TYPE_2D;
+			pic.format = vfmt;
+			pic.extent = VkExtent3D{pw, ph, 1};
+			pic.mipLevels = 1;
+			pic.arrayLayers = 1;
+			pic.samples = VK_SAMPLE_COUNT_1_BIT;
+			pic.tiling = VK_IMAGE_TILING_OPTIMAL;
+			pic.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+			pic.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			pic.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			VkImage pimg = VK_NULL_HANDLE;
+			VkResult pv = c.fns.vkCreateImage(c.vdev, &pic, nullptr, &pimg);
+			if (pv != VK_SUCCESS)
+			{
+				CloseHandle(hh);
+				pt->Release();
+				return std::string(tag) + " vkCreateImage " + pocbCode(pv);
+			}
+			VkMemoryRequirements preq{};
+			c.fns.vkGetImageMemoryRequirements(c.vdev, pimg, &preq);
+			const int bpp = (dfmt == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 8 : 4;
+			VkDeviceSize pcand[3] = {
+			    preq.size,
+			    (preq.size + 65535ULL) & ~(VkDeviceSize)65535ULL,
+			    (VkDeviceSize)pw * (VkDeviceSize)ph * (VkDeviceSize)bpp,
+			};
+			int pty[2] = {pocbMemType(mp, preq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+			              pocbMemType(mp, preq.memoryTypeBits, 0)};
+			VkResult pv2 = VK_ERROR_INITIALIZATION_FAILED;
+			int ptries = 0;
+			bool got = false;
+			VkDeviceMemory pmem = VK_NULL_HANDLE;
+			for (int si = 0; si < 3 && !got; ++si)
+			{
+				for (int ti = 0; ti < 2 && !got; ++ti)
+				{
+					if (pty[ti] < 0 || (ti == 1 && pty[1] == pty[0]) || !pcand[si])
+						continue;
+					++ptries;
+					VkImportMemoryWin32HandleInfoKHR pimp{};
+					pimp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+					pimp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+					pimp.handle = hh;
+					VkMemoryAllocateInfo pmai{};
+					pmai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+					pmai.pNext = &pimp;
+					pmai.allocationSize = pcand[si];
+					pmai.memoryTypeIndex = static_cast<uint32_t>(pty[ti]);
+					pv2 = c.fns.vkAllocateMemory(c.vdev, &pmai, nullptr, &pmem);
+					got = (pv2 == VK_SUCCESS);
+				}
+			}
+			if (pv2 == VK_SUCCESS)
+				c.fns.vkFreeMemory(c.vdev, pmem, nullptr);
+			c.fns.vkDestroyImage(c.vdev, pimg, nullptr);
+			CloseHandle(hh);
+			pt->Release();
+			return std::string(tag) +
+			       (pv2 == VK_SUCCESS
+			                ? std::string(" 导入 OK")
+			                : (ptries == 0 ? std::string(" 无可用内存类型")
+			                               : std::string(" 导入失败 ") + pocbCode(pv2))) +
+			       " VK报size=" + std::to_string((long long)preq.size);
+		};
+		const std::string pA =
+		    probe("归因探测A RGBA8@1920x1080(只换格式)", DXGI_FORMAT_R8G8B8A8_UNORM,
+		          VK_FORMAT_R8G8B8A8_UNORM, md.Width, md.Height);
+		const std::string pB = probe("归因探测B RGBA16F@512x512(只换尺寸)",
+		                             DXGI_FORMAT_R16G16B16A16_FLOAT, VK_FORMAT_R16G16B16A16_SFLOAT,
+		                             512, 512);
+		logLine("SSR侦察: [2c-β] " + pA);
+		logLine("SSR侦察: [2c-β] " + pB);
+		const bool aOK = pA.find("导入 OK") != std::string::npos;
+		const bool bOK = pB.find("导入 OK") != std::string::npos;
+		std::string concl;
+		if (aOK && !bOK)
+			concl = "病因是格式 — RGBA16F 跨不了 API, 色通路需改道 (换格式或退回 D3D11 STAGING)";
+		else if (!aOK && bOK)
+			concl = "病因是尺寸 — 大图分配尺寸与句柄真实分配对不上, 需按对齐口径修 allocationSize";
+		else if (!aOK && !bOK)
+			concl = "格式与尺寸单独都不行 — 只有既小又页对齐的组合能导入";
+		else
+			concl = "两个探针单独都能导入 — 主纹理失败在组合差异, 看上面矩阵哪一组合赢";
+		logLine("SSR侦察: [2c-β]   归因结论: " + concl);
+		return fail("vkAllocateMemory(NT handle 导入) = " + pocbCode(vrFirst) +
+		            " (矩阵/探针归因见上, 病因=" + concl + ")");
 	}
 	if (c.fns.vkBindImageMemory(c.vdev, g_ssrVkImg, g_ssrVkMem, 0) != VK_SUCCESS)
 		return fail("vkBindImageMemory(色镜像)");
@@ -4850,7 +5069,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.16.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验) ====");
+	logLine("==== poc-presenter v0.16.1 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

@@ -310,6 +310,20 @@ vs "源带 `BIND_DEPTH_STENCIL`"；判读与实跑表见 `docs/02` §14.12.1（�
 7. **依赖 PoC-B 开着**（借 device/queue/command pool/fence）；失败一律 `logLine` + `g_ssrVkState=2`，
    **绝不调 `pocbFail`**（那会连坐关掉 PoC-B 注入）。
 8. 深度镜像（R2 未过）不在本步范围，代码按"镜像存在才导入"写，两种结局都兼容。
+9. **`v0.16.1` 导入归因（首跑 `-2` 后加）**：`[尺寸候选 × 允许内存类型]` 矩阵逐个试并逐次记码
+   （尺寸候选 = `req.size`、其 64KB/2MB 对齐、朴素 `W×H×8` 及其 64KB/2MB 对齐），矩阵全失败再用
+   两张探针纹理做 **2×2 归因**：`归因探测A RGBA8@1920x1080`（只换格式）、`归因探测B RGBA16F@512x512`
+   （只换尺寸），各导入一次即销毁，落成一句 `[2c-β]   归因结论: 病因是格式/尺寸/…` ——
+   **格式与尺寸的改道方向完全不同**，必须分清。仍只 `logLine` + `g_ssrVkState=2`，不碰 `pocbFail`。
+
+**状态（2026-10-04 首跑 `c5357c1` = `v0.16.0`，判读 `docs/02` §14.13.1）**：
+- **R2 归因收口 = 格式**：`BindFlags` `0x48→0x08→0x00` 三次全报 `E_INVALIDARG` ⇒ **D24 家族不在
+  D3D11 `SHARED|NTHANDLE` 白名单**，深度确定不能走 D3D11 SHARED ⇒ 改道 **VK 自建
+  `VK_FORMAT_D24_SFLOAT` 图 + `vkCmdCopyImage`（520→VK 图）**，并入 2d 一起做。
+- **2c-β 卡在导入**：`vkAllocateMemory(NT handle 导入) = -2 (VK_ERROR_OUT_OF_DEVICE_MEMORY)`；
+  同一套代码 PoC-B 的 512×512 `RGBA8` 导入一直好的，色镜像是 1920×1080 `RGBA16F`
+  ⇒ 差异只有格式/尺寸对齐/内存类型 ⇒ 上面第 9 条的矩阵 + 2×2 探针就是为这次定的。
+  D3D11 侧入向（2c-α）照常全绿，只有交叉校验没跑。
 
 ### D3 输出回写与段16 的 16 个 Draw（两个子方案）
 
