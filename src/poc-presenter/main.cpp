@@ -1222,7 +1222,9 @@ static void ssrReconOm(UINT n, ID3D11RenderTargetView* const* ppRTV, ID3D11Depth
 				if (g_ssrStrRes)
 					g_ssrStrRes->Release();
 				g_ssrStrRes = nullptr;
-				if (SUCCEEDED(first->GetResource(&g_ssrStrRes)))
+				// ID3D11View::GetResource 返回 **void** (不是 HRESULT), 出参由被调方 AddRef
+				first->GetResource(&g_ssrStrRes);
+				if (g_ssrStrRes)
 					g_ssrStrResObj = robj;
 			}
 			// 这里不复位 A/B fired —— 只在 Present 复位, 每帧各至多触发一次。否则段19
