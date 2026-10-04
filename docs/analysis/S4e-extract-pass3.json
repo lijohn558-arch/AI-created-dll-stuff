@@ -1,0 +1,202 @@
+{
+  "rdc": "C:\\Users\\joker\\skyrim-vulkan\\captures\\S4e.rdc",
+  "errors": [],
+  "groups_by_key": {
+    "ResourceId::17650": [
+      {
+        "eventId": 11512,
+        "key_at_event": "ResourceId::17650",
+        "dispatchDimension": [
+          10,
+          6,
+          90
+        ],
+        "dispatchBase": [
+          0,
+          0,
+          0
+        ],
+        "customName": ""
+      }
+    ],
+    "ResourceId::17651": [
+      {
+        "eventId": 11596,
+        "key_at_event": "ResourceId::17651",
+        "dispatchDimension": [
+          10,
+          6,
+          1
+        ],
+        "dispatchBase": [
+          0,
+          0,
+          0
+        ],
+        "customName": ""
+      },
+      {
+        "eventId": 11916,
+        "key_at_event": "ResourceId::17651",
+        "dispatchDimension": [
+          10,
+          6,
+          1
+        ],
+        "dispatchBase": [
+          0,
+          0,
+          0
+        ],
+        "customName": ""
+      },
+      {
+        "eventId": 12236,
+        "key_at_event": "ResourceId::17651",
+        "dispatchDimension": [
+          10,
+          6,
+          1
+        ],
+        "dispatchBase": [
+          0,
+          0,
+          0
+        ],
+        "customName": ""
+      }
+    ]
+  },
+  "unused_cs_attempts": [
+    "ResourceId::0(构造失败)",
+    "ResourceId::17547(构造失败)",
+    "ResourceId::17548(构造失败)",
+    "ResourceId::17549(构造失败)",
+    "ResourceId::17550(构造失败)",
+    "ResourceId::17553(构造失败)",
+    "ResourceId::17554(构造失败)",
+    "ResourceId::17561(构造失败)"
+  ],
+  "reflections": {
+    "ResourceId::17650": {
+      "key": "ResourceId::17650",
+      "boundAtEvent": 11512,
+      "threadDim": [
+        32,
+        32,
+        1
+      ],
+      "stage": "ShaderStage.Compute",
+      "encoding": "ShaderEncoding.DXBC",
+      "entryPoint": "main",
+      "bytecodeSize": 2904,
+      "cbuffers": [
+        {
+          "name": "cbuffer0",
+          "byteSize": 384,
+          "variables": [
+            "cb0_v0",
+            "cb0_v1",
+            "cb0_v2",
+            "cb0_v3",
+            "cb0_v4",
+            "cb0_v5",
+            "cb0_v6",
+            "cb0_v7",
+            "cb0_v8",
+            "cb0_v9",
+            "cb0_v10",
+            "cb0_v11",
+            "cb0_v12",
+            "cb0_v13",
+            "cb0_v14",
+            "cb0_v15",
+            "cb0_v16",
+            "cb0_v17",
+            "cb0_v18",
+            "cb0_v19",
+            "cb0_v20",
+            "cb0_v21",
+            "cb0_v22",
+            "cb0_v23"
+          ]
+        }
+      ],
+      "readOnly": [
+        {
+          "name": "texture0",
+          "bindArraySize": 1
+        },
+        {
+          "name": "texture1",
+          "bindArraySize": 1
+        },
+        {
+          "name": "texture2",
+          "bindArraySize": 1
+        },
+        {
+          "name": "texture3",
+          "bindArraySize": 1
+        }
+      ],
+      "readWrite": [
+        {
+          "name": "uav0",
+          "bindArraySize": 1
+        },
+        {
+          "name": "uav1",
+          "bindArraySize": 1
+        }
+      ],
+      "samplers": [
+        "sampler0",
+        "sampler1",
+        "sampler2",
+        "sampler3"
+      ],
+      "disasmLines": 107
+    },
+    "ResourceId::17651": {
+      "key": "ResourceId::17651",
+      "boundAtEvent": 11596,
+      "threadDim": [
+        32,
+        32,
+        1
+      ],
+      "stage": "ShaderStage.Compute",
+      "encoding": "ShaderEncoding.DXBC",
+      "entryPoint": "main",
+      "bytecodeSize": 700,
+      "cbuffers": [
+        {
+          "name": "cbuffer0",
+          "byteSize": 32,
+          "variables": [
+            "cb0_v0",
+            "cb0_v1"
+          ]
+        }
+      ],
+      "readOnly": [
+        {
+          "name": "texture0",
+          "bindArraySize": 1
+        }
+      ],
+      "readWrite": [
+        {
+          "name": "uav0",
+          "bindArraySize": 1
+        }
+      ],
+      "samplers": [
+        "sampler0"
+      ],
+      "disasmLines": 30
+    }
+  },
+  "elapsed_sec": 2.2
+}

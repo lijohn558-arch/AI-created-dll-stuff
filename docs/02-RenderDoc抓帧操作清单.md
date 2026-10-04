@@ -679,11 +679,12 @@ textures 428→438；pso 137=137、clears/copies 全等），B 类 ±1000 带内
 | 特性 | 判定 | 依据 |
 |---|---|---|
 | ① 共享纹理通路（NT handle+fence） | **过闸** | A 全绿 + F 3/3 + 双帧哨兵 SENTINEL_FOUND + 稳态 0.40–0.83 ms/帧 + 无降级 |
-| ② 探针升质 512²→1024² | **未过闸（机制缺陷 + 捕获侧视觉回归实锤）** | 缺陷①：配对 depth 未升质 → OM 非法（8 条 High 诊断、6 面内容全灭；**初态内容链证真机 draw 亦未落地** = 游戏内反射自启动即平铺清屏色）；缺陷②：viewport 恒 512² → 只渲 1/4 面 |
+| ② 探针升质 512²→1024² | **未过闸（机制缺陷 + 捕获侧视觉回归实锤）** | 缺陷①：配对 depth 未升质 → OM 非法（8 条 High 诊断、6 面内容全灭；**初态内容链证真机 draw 亦未落地** = 游戏内反射自启动即平铺清屏色）；缺陷②：viewport 恒 512² → 只渲 1/4 面（**2026-10-04 S4e 重抓验证：①已修 = 0 诊断 + 1024² 配对 + TL 象限实渲；②仍在 → §14.7，plan-B 触发**） |
 
 - **阶段1 判定：主体过闸**——共享通路（阶段1 核心交付）实证成立；探针升质单列缺陷清单，
   可按 `probe=0` 逃生门降级，不阻塞主线。
-- **v0.11 修复清单（2026-10-03 已回码 `v0.10.0→v0.11.0`，待 S4e 重抓验证）**：
+- **v0.11 修复清单（2026-10-03 已回码 `v0.10.0→v0.11.0`；2026-10-04 S4e 重抓验证
+  = 判据①③达成、②未达成 → 见 §14.7，plan-B 触发）**：
   1. ✅ hook 同步升质配对 depth：`probeDepthDesc`（512² D24 家族 4 个合法 DXGI 枚举
      = R24G8_TYPELESS/D24_UNORM_S8_UINT/R24_UNORM_X8_TYPELESS/X24_TYPELESS_G8_UINT，
      RenderDoc 显示名 "D24S8_TYPELESS"；+ mips=1 + array=1 + DSV bind）+ **cube 命中后
@@ -694,8 +695,9 @@ textures 428→438；pso 137=137、clears/copies 全等），B 类 ±1000 带内
      查页保护、只读页放弃+告警不崩）——实测坐实游戏用创建时缓存值（不重查 GetDesc），
      改它手里那份即改 viewport 派生值；若 S4e 抓帧 viewport 仍 512² → 降级 plan-B
      （拦 RSSetViewports 或重新评估升质方案）；
-  3. ⬜ 修完重抓 S4e/S4e2 双帧（§14.1 同协议：同存档同机位、稳定后 F12 连抓两张）→
-     同三闸 + 面导出重过。
+  3. ✅ 修完重抓 S4e/S4e2 双帧（§14.1 同协议：同存档同机位、稳定后 F12 连抓两张）→
+     同三闸 + 面导出重过——**2026-10-04 实测见 §14.7：判据①③达成、②未达成 →
+     特性② 仍未过闸，plan-B（拦 RSSetViewports）触发**。
 
      **启动日志 sanity（进游戏 1 分钟内看 `poc-presenter.log`）**：
 
@@ -720,7 +722,10 @@ textures 428→438；pso 137=137、clears/copies 全等），B 类 ±1000 带内
 
      **S4d→S4e 预期 DIFF = 修复生效项（declared，非回归）**：`clear.depth` 552 档
      512²→1024²；pass5/pass6 bound-profile 由全 0 恢复为 `RT=544, DS=552`（对齐 S4b 形态）；
-     `cube512_seg` conditional 2→0 应回到基线 2；viewport 512²→1024²（api-scan 口径）。
+     `cube512_seg` conditional 2→0 应回到基线 2（**2026-10-04 修正：该指标在
+     `rdc_compare.py` 硬编码 `512²+512²` 签名，升质生效后按设计恒 0——「回 2」不可达且
+     无意义，恢复证据改看 `pass5.structure` 的 1024² 配对段，见 §14.7**）；
+     viewport 512²→1024²（api-scan 口径）。
      稳定性闸 S4e2↔S4e 预期同 S4d2↔S4d（唯一 DIFF = 计数带内漂移）。
      F 类锚点（copies 3→4、tail `512²→1920×1080`、copies_total）与 A 类锚点**不应变化**——
      共享通路与升质正交，动了就是新回归。
@@ -731,3 +736,56 @@ textures 428→438；pso 137=137、clears/copies 全等），B 类 ±1000 带内
 `S4d-tex-desc.txt`（depth 配对取证：552 = 全帧唯一 512² D24）、
 `S4d-cube-*-face*.png`（6 张 1024²）、`S4b-cube-*-face*.png`（6 张 512² 对照）、
 `S4{d,d2}-pass7-pixels.json`、`S4{d,d2}-backbuffer.{json,png}`。
+
+### 14.7 S4e 验证记录（2026-10-04，v0.11 三判据实测）
+
+**证据链**：日志 sanity 四行齐（v0.11.0 banner / 槽5 已挂 / `cube→1024² 回写desc=ok` /
+`探针配对depth→1024² 回写desc=ok`，与抓帧取证互洽）→ S4e/S4e2 双帧 api-scan → cubefaces
+双帧（面内容 + `GetDebugMessages`）→ state-probe（ev14/41/882/909 绑定实底）→ tex_desc
+（升质尺寸硬取证）→ 提取 12/12 → 三组 compare（S4d→S4e / S4e2→S4e / S4b→S4e）→
+pass7/backbuffer 四路互证（双帧均 `SENTINEL_FOUND`、洋红 4/4、swapchain `ResourceId::78`）。
+
+**三判据结果（§14.6 表逐项）**：
+
+| 判据 | 结果 | 证据 |
+|---|---|---|
+| ① OM 绑定修复 | ✅ **PASS** | `GetDebugMessages` **0 条**（S4d=8 条，双帧同）；state-probe ev14/41 `RT=ResourceId::544 slice=4`、ev882/909 `slice=3`、`DS=ResourceId::552` 全非零；`S4e-tex-desc`：544=1024² RGBA16F cube、**552=1024² D24S8**（S4d 时 512²）→ `RT/DSV` 尺寸配对成立 |
+| ② viewport 适配 | ❌ **FAIL** | 双帧全帧 `RSSetViewports` **无任何 1024² 字面量**；probe 段（ev17/44/742/760/885/912/2979/2997）恒 512²——与 S4b/S4d 同值 → `pokeDescSize` 改不到游戏 viewport 来源（创建时缓存于 desc 之外 / 硬编码常量）→ **§14.6 预declared 降级分支触发** |
+| ③ 面内容恢复 | ⚠️ **字面 PASS、覆盖仅 1/4** | 六面 1024² md5 互异（S4e：`cb67f2…/6a333b…/103fd5…/b78229…/10395f…/db63bc…`）、uniq8=80–120（S4d=3、S4b=80–118）、PNG 177–394KB（S4d=5.3KB 级）——三项字面判据全中；**但象限取样：内容仅 TL（x<512 且 y<512，face0 TL distinct=769，边界 x511 实内容 / x512 实心），其余三象限单色 = 清屏色**（PNG 呈 `(42,78,95,255)`，与 S4d 纯清屏色帧 PNG 同值；导出链 x/(1+x) 实测：0.196/1.196→42、0.441/1.441→78、0.598/1.598→95 精确吻合）= 判据②失败的直接后果 |
+
+**判定：特性②仍未过闸**——缺陷①（升质只翻 cube 不翻 depth → OM 非法 → probe 零写入）
+**已修复实锤**（0 诊断 + 1024² 配对 + TL 象限实渲内容 + 日志配对行）；缺陷②（viewport
+恒 512² → 只渲 1/4 面）**未修**，按 §14.6 预declared 分支走 **plan-B：拦 `RSSetViewports`
+（+ `RSSetScissorRects`）**。实现口径：不搞「无条件 512² 全拦」（会误伤其他 512² pass），
+改用**绑定感知**——hook 内 `OMGetRenderTargets` → `GetResource` 解析当前 RT 是否 ==
+建帧时记住的 probe cube 指针，是且视口 512² 才改写 1024²。
+
+**三组 compare 判读（§13.3 分级口径）**：
+
+- **S4e2↔S4e 稳定闸**：9/10 PASS，唯一 DIFF = `counts.pass1`（draws 2837↔2838、textures
+  微漂）= 计数带内漂移，与 §14.6 预期一致 ✓；
+- **S4d→S4e declared 差分逐项核对**：
+  - `clear.target-profile`：`ClearDepthStencil 512²×2 → 1024²×2` ✓（= 预declared
+    `clear.depth` 552 档升级）；
+  - `clear.bound-profile`：S4d 的 probe clear 绑定全 0（`ClearColor@-`）→ S4e 恢复
+    `ClearColor@1024² D24×1 + ClearDepthStencil@1024² D24×2`；S4b→S4e 对照呈**逐项同构、
+    纯尺寸差分（512²↔1024²）** =「bound-profile 恢复对齐 S4b 形态」✓；
+  - `pass5.structure`：cand-only 段 `1024² RGBA16F || … || 1024² D24S8` = probe 段恢复
+    绑定 ✓；2048² R16 段差分 = §13.3 已知 B 类噪声；
+  - **预期条目修正（已回改 §14.6）**：`cube512_seg 回基线 2` 不可达且无意义——该指标在
+    `rdc_compare.py` 硬编码 `512x512 RGBA16F + 512x512 D24S8` 签名，**升质生效后按设计
+    恒 0**（S4d→S4e conditional 0=0 PASS 无信息量；S4b→S4e `2 vs 0` 的 DIFF = 升质尺寸
+    升级的 declared 差分）。恢复证据以 `pass5.structure` 1024² 配对段为准；
+  - **未 declared 差分归因**：`counts.pass1`（draws 3822→2838、textures 438→335、
+    pso 137→126）、`transparent.draws` 267→235——按 probe 功能态**聚类**：S4b(2846/316/126、
+    trans 232) ≈ S4e(2838/335/126、trans 235) 为健康聚类，S4c(3862/423/138) / S4d(3822/438/
+    137、trans 267) 为缺陷聚类 → 缺陷态多出的 ~980 draws / ~103 textures / ~11 pso /
+    ~32 transparent 随修复消失；退化路径机制未取证，列**诚实边界观察项（非回归）**；
+- **A 类 3/3 PASS + F 类 `copy.sequence` PASS**（copies 序列、`512²→1920×1080` tail 全等）：
+  共享通路与升质正交面稳定，**无新回归**。
+
+**在档产出（本轮）**：`S4{e,e2}-extract*.json`（全套 12）、`S4{e,e2}-api-scan.txt`、
+`S4{e,e2}-state-probe.txt`、`S4{e,e2}-cubefaces.{json,log}`、`S4{e,e2}-cube-*-face*.png`
+（6×2 张 1024²）、`S4e-tex-desc.txt`（544/552 = 1024² 配对取证）、`S4{e,e2}-pass7-pixels.json`、
+`S4{e,e2}-backbuffer.{json,png}`、`S4d~S4e-compare.json`、`S4e2~S4e-compare.json`、
+`S4b~S4e-compare.json`。
