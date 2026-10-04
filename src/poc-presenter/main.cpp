@@ -3708,7 +3708,9 @@ static bool ssrInVkBuild(PocbCtx& c)
 	addSz((raw + 65535ULL) & ~(VkDeviceSize)65535ULL);
 	addSz((raw + 2097151ULL) & ~(VkDeviceSize)2097151ULL);
 	VkResult vrFirst = VK_SUCCESS;
+	std::string codes;
 	int hitSz = -1, hitTy = -1, hitK = 0, ntry = 0;
+	bool got = false; // 注意: 不能拿 vr 当循环条件 —— 进矩阵时 vr 正是 VK_SUCCESS (建图刚成)
 	{
 		VkImportMemoryWin32HandleInfoKHR imp{};
 		imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
@@ -3717,10 +3719,9 @@ static bool ssrInVkBuild(PocbCtx& c)
 		VkMemoryAllocateInfo mai{};
 		mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
 		mai.pNext = &imp;
-		std::string codes;
-		for (int si = 0; si < ncd && vr != VK_SUCCESS; ++si)
+		for (int si = 0; si < ncd && !got; ++si)
 		{
-			for (int ti = 0; ti < nty && vr != VK_SUCCESS; ++ti)
+			for (int ti = 0; ti < nty && !got; ++ti)
 			{
 				++ntry;
 				mai.allocationSize = cand[si];
@@ -3728,10 +3729,22 @@ static bool ssrInVkBuild(PocbCtx& c)
 				vr = c.fns.vkAllocateMemory(c.vdev, &mai, nullptr, &g_ssrVkMem);
 				if (vr == VK_SUCCESS)
 				{
-					hitSz = si;
-					hitTy = types[ti];
-					hitK = ntry;
-					break;
+					// 分配成了 ≠ 能绑上: 尺寸小于 req.size 时 bind 会失败 ⇒ 这种候选
+					// 立即释放、继续试下一个, 免得把整条导入一票否决。
+					if (c.fns.vkBindImageMemory(c.vdev, g_ssrVkImg, g_ssrVkMem, 0) == VK_SUCCESS)
+					{
+						got = true;
+						hitSz = si;
+						hitTy = types[ti];
+						hitK = ntry;
+						break;
+					}
+					c.fns.vkFreeMemory(c.vdev, g_ssrVkMem, nullptr);
+					g_ssrVkMem = VK_NULL_HANDLE;
+					if (codes.size() < 160)
+						codes += std::string(codes.empty() ? "" : ",") + "size" +
+						         std::to_string((long long)cand[si]) + ":bind失败";
+					continue;
 				}
 				if (ntry == 1)
 					vrFirst = vr;
@@ -3740,7 +3753,7 @@ static bool ssrInVkBuild(PocbCtx& c)
 			}
 		}
 	}
-	if (vr == VK_SUCCESS)
+	if (got)
 	{
 		std::string why;
 		if (hitSz > 0)
@@ -3886,8 +3899,9 @@ static bool ssrInVkBuild(PocbCtx& c)
 		return fail("vkAllocateMemory(NT handle 导入) = " + pocbCode(vrFirst) +
 		            " (矩阵/探针归因见上, 病因=" + concl + ")");
 	}
-	if (c.fns.vkBindImageMemory(c.vdev, g_ssrVkImg, g_ssrVkMem, 0) != VK_SUCCESS)
-		return fail("vkBindImageMemory(色镜像)");
+	// bind 已在矩阵里做掉 (got=true 即绑上); 这里只兜底断言一次 —— 防呆, 正常永不触发
+	if (!g_ssrVkMem)
+		return fail("vkBindImageMemory(色镜像): 分配在但没绑上");
 
 	// --- 3) 读回 buffer: 紧密排列 width*height*8, host visible|coherent (持久映射) ---
 	g_ssrVkW = md.Width;
