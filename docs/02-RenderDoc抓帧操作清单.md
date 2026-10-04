@@ -869,8 +869,8 @@ distinct + x511/x512 边界 + cornerBR，输出 ASCII 至 `Temp\opencode\<scene>
 已固化入 `tools/quadcheck.ps1`，参数 = scene 名。
 
 **判定：特性②过闸（三判据全中）→ 阶段1 全绿收口**——特性①共享纹理通路 + 特性②探针升质
-512²→1024² 均实证成立，`probe=0` 逃生门保留为兜底；下一步推进 SSR 第二步（或 2048² 探针对照
-demo，docs/03 §6.1）。
+512²→1024² 均实证成立，`probe=0` 逃生门保留为兜底；下一步 = SSR 第二步，实施设计已落
+**`docs/05`**（节点边界、D1–D5 决策、Step 1–5 计划；2048² 探针对照 demo 仍为可选小项）。
 
 **在档产出（本轮）**：`S4{f,f2}-extract*.json`（全套 12）、`S4{f,f2}-api-scan.txt`、
 `S4{f,f2}-state-probe.txt`、`S4{f,f2}-cubefaces.{json,log}`、`S4{f,f2}-cube-*-face*.png`
