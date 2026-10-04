@@ -694,8 +694,36 @@ textures 428→438；pso 137=137、clears/copies 全等），B 类 ±1000 带内
      查页保护、只读页放弃+告警不崩）——实测坐实游戏用创建时缓存值（不重查 GetDesc），
      改它手里那份即改 viewport 派生值；若 S4e 抓帧 viewport 仍 512² → 降级 plan-B
      （拦 RSSetViewports 或重新评估升质方案）；
-  3. ⬜ 修完重抓 S4e/S4e2 双帧 → 同三闸 + 面导出重过（**通过判据**：probe 段 0 条 OM
-     诊断 + viewport=1024² + 六面 md5 互异/uniq 高 + clear.depth 512²→1024² 声明项）。
+  3. ⬜ 修完重抓 S4e/S4e2 双帧（§14.1 同协议：同存档同机位、稳定后 F12 连抓两张）→
+     同三闸 + 面导出重过。
+
+     **启动日志 sanity（进游戏 1 分钟内看 `poc-presenter.log`）**：
+
+     ```
+     ==== poc-presenter v0.11.0 ...
+     探针升质: 槽5 已挂 (512² cube+配对depth→1024² + 回写desc, 逃生门 probe=0 / vulkan=0)
+     探针升质: 512² RGBA16F cube(6面) → 1024² 第 1 次, hr=0, 回写desc=ok
+     探针配对depth: 512² D24 → 1024² 第 1 次, hr=0, 回写desc=ok
+     ```
+
+     异常分支：无「探针配对depth」行 = 配对失败（±10s 窗没等到，查「开窗 10s 已过」告警）；
+     `回写desc=no` +「游戏描述符页只读」= 缺陷② plan-B（viewport 仍 512² → 另拦
+     RSSetViewports）；「带初始数据」告警 = 该纹理建时带 init，升质被主动跳过。
+
+     **通过判据**（三项全中才算特性②过闸）：
+
+     | 判据 | 口径 | 工具 |
+     |---|---|---|
+     | ① OM 绑定修复 | probe 段 `GetDebugMessages` **0 条**（S4d 是 8 条）+ state-probe ev118/400 `RT=544(1024²) DS=552(1024²)` 非零 | `rdc_dump_cubefaces` / `rdc_state_probe` |
+     | ② viewport 适配 | probe 段 `RSSetViewports` = **1024²**（S4d/S4b 均 512² 字面量） | `rdc_api_scan` |
+     | ③ 面内容恢复 | 六面 **md5 互异、uniq_rgb8 拉高到两位数**（对照 S4d 全同=3、S4b=80–118）、PNG 从 5.3KB 涨到百 KB 级 | `rdc_dump_cubefaces` |
+
+     **S4d→S4e 预期 DIFF = 修复生效项（declared，非回归）**：`clear.depth` 552 档
+     512²→1024²；pass5/pass6 bound-profile 由全 0 恢复为 `RT=544, DS=552`（对齐 S4b 形态）；
+     `cube512_seg` conditional 2→0 应回到基线 2；viewport 512²→1024²（api-scan 口径）。
+     稳定性闸 S4e2↔S4e 预期同 S4d2↔S4d（唯一 DIFF = 计数带内漂移）。
+     F 类锚点（copies 3→4、tail `512²→1920×1080`、copies_total）与 A 类锚点**不应变化**——
+     共享通路与升质正交，动了就是新回归。
 - **下一步不被阻塞**：SSR 第二步（或 2048² 探针对照 demo）可先行决策（docs/03 §6.1）。
 
 在档产出：`S4d*-extract*.json`（全套）、`S4c~S4d-compare.json`、`S4b~S4d-compare.json`、
