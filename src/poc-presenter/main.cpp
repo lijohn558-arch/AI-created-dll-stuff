@@ -329,7 +329,16 @@
  *   强特征对象行新增 [585]/[321] 标注。
  *   状态: **2a/2b 已真机验收通过** (2026-10-04, `407c8b3`, 5520 帧, 11/11 全绿、0 [异常]、
  *   PoC-B 0.88–0.98 ms/帧; 目视形态 = 水几乎消失, 见 docs/02 §14.11.1 与 docs/05 D2a-3)。
- *   **2c 共享入向 (v0.15.0) 未真机验证** —— 待本版跑图判读。
+ *   **2c-α (v0.15.0) 真机判读结果 (2026-10-04, 3455 帧, docs/02 §14.12)**:
+ *     ✅ **色通路全绿** —— RGBA16F/1920x1080 SHARED|NTHANDLE 建得出 + CreateSharedHandle 拿到
+ *     NT handle + CopyResource 落地 + STAGING 读回 7/7 全 `≠基线✓` (0 个 `=基线`),
+ *     非零样本 7143–7157/8192 且校验和逐帧变 = 内容随场景真实变化; 入向=2576、COPY=3、
+ *     哨兵=0、[异常]=0、PoC-B 0.91 ms/帧。
+ *     ❌ **R2 深度未过** —— D24 家族 `CreateTexture2D` 直接 `E_INVALIDARG (0x80070057)`。
+ *   **v0.15.1 = R2 归因重试**: 分不清"格式不在 SHARED 白名单" vs "源带 DEPTH_STENCIL
+ *     而 SHARED 不许带" ⇒ 首次失败后按 BindFlags 递减 (SRV→0) 再试两次并逐次记日志,
+ *     **Format 一律不动** (CopyResource 要求 src/dst 格式完全一致)。三种全失败 = 格式禁
+ *     共享 ⇒ 深度需改道 (2c-β 先只用色, 深度另谋)。
  *   关键日志 (新增):
  *     SSR侦察: ctx vtable=… slot33 … ; slot50 … ; slot47(CopyResource) 原值=… 来自 …
  *     SSR侦察: ctx槽33/50/47 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.14.0 Step2 …)
@@ -1501,16 +1510,49 @@ static bool ssrInMakeShared(ID3D11Device* dev, ID3D11Resource* src, ID3D11Textur
 	                              // 一致性最严的解释, 少一个字段对不上就是静默丢弃
 	td.CPUAccessFlags = 0;
 	td.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+	const UINT origBF = td.BindFlags;
 	HRESULT hr = dev->CreateTexture2D(&td, nullptr, out);
 	if (FAILED(hr) || !*out)
 	{
+		// ---- R2 归因诊断 (v0.15.1): 真机实测深度报 E_INVALIDARG, 必须分清两种病因 ----
+		//   (a) **格式**不在 D3D11 SHARED 白名单 (D24 家族大概率如此) → 递减 BindFlags 仍全失败;
+		//   (b) 源带 D3D11_BIND_DEPTH_STENCIL 而 SHARED 不许带 → 放宽 BindFlags 后成功。
+		// 只重试 BindFlags、**不动 Format** —— CopyResource 要求 src/dst 格式完全一致,
+		// 改了格式拷贝必失败。放宽后 desc 与源不一致的风险由 [2c读回 ≠基线/=基线] 判据兜底。
+		const HRESULT hrFirst = hr;
 		logLine("SSR侦察: [2c] " + std::string(nm) + " SHARED 镜像 CreateTexture2D 失败 " +
-		        hexHr(hr) + " (" + std::to_string(td.Width) + "x" + std::to_string(td.Height) +
-		        " " + ssrFmtName(td.Format) + " mips" + std::to_string(td.MipLevels) +
+		        hexHr(hrFirst) + " (" + std::to_string(td.Width) + "x" + std::to_string(td.Height) +
+		        " Format=" + std::to_string(static_cast<int>(td.Format)) +
+		        " " + ssrFmtName(td.Format) + " BindFlags=0x" + uhex64(origBF).substr(8) +
+		        " mips" + std::to_string(td.MipLevels) +
 		        " msaa" + std::to_string(td.SampleDesc.Count) + ") ← R2 风险点");
-		*out = nullptr;
-		return false;
+		const UINT cand[2] = { D3D11_BIND_SHADER_RESOURCE, 0 };
+		for (int ci = 0; ci < 2 && (FAILED(hr) || !*out); ++ci)
+		{
+			if (cand[ci] == origBF)
+				continue; // 与原始相同 —— 上面那次已经试过了
+			td.BindFlags = cand[ci];
+			hr = dev->CreateTexture2D(&td, nullptr, out);
+			logLine("SSR侦察: [2c]   重试 " + std::string(nm) + " BindFlags=0x" +
+			        uhex64(cand[ci]).substr(8) + " (原 0x" + uhex64(origBF).substr(8) + ") → " +
+			        ((SUCCEEDED(hr) && *out)
+		                     ? std::string("OK = 病因是 BindFlags, 格式可共享!")
+		                     : std::string("仍失败 ") + hexHr(hr) + " = 病因是格式"));
+		}
+		if (FAILED(hr) || !*out)
+		{
+			logLine("SSR侦察: [2c] " + std::string(nm) + " 三种 BindFlags 全失败 → 结论: " +
+			        ssrFmtName(sd.Format) + " (Format=" +
+			        std::to_string(static_cast<int>(sd.Format)) +
+			        ") 不在 D3D11 SHARED 白名单 —— R2 病因=格式, 深度不能走 D3D11 SHARED, 需改道");
+			*out = nullptr;
+			return false;
+		}
 	}
+	if (td.BindFlags != origBF)
+		logLine("SSR侦察: [2c] " + std::string(nm) + " 注意: 镜像 BindFlags 已放宽 0x" +
+		        uhex64(origBF).substr(8) + "→0x" + uhex64(td.BindFlags).substr(8) +
+		        " (与源不一致, CopyResource 能否落地看 [2c读回] 判据)");
 	IDXGIResource1* r1 = nullptr;
 	hr = (*out)->QueryInterface(__uuidof(IDXGIResource1), reinterpret_cast<void**>(&r1));
 	if (SUCCEEDED(hr) && r1)
@@ -1530,8 +1572,10 @@ static bool ssrInMakeShared(ID3D11Device* dev, ID3D11Resource* src, ID3D11Textur
 		return false;
 	}
 	logLine("SSR侦察: [2c] " + std::string(nm) + " SHARED 镜像 OK = " + hexOf(*out) + " (" +
-	        std::to_string(td.Width) + "x" + std::to_string(td.Height) + " " +
-	        ssrFmtName(td.Format) + ") handle=" + hexOf(*hOut) + " 源=" + hexOf(src));
+	        std::to_string(td.Width) + "x" + std::to_string(td.Height) +
+	        " Format=" + std::to_string(static_cast<int>(td.Format)) + " " +
+	        ssrFmtName(td.Format) + " BindFlags=0x" + uhex64(td.BindFlags).substr(8) +
+	        ") handle=" + hexOf(*hOut) + " 源=" + hexOf(src));
 	return true;
 }
 
@@ -1795,7 +1839,7 @@ static void installSsrRecon(ID3D11Device* dev)
 	if (ok47)
 		patchSlotLocked(&vtbl[47], reinterpret_cast<void*>(&hookedCopyResource));
 	logLine("SSR侦察: ctx槽33/50" + std::string(ok47 ? "/47" : "") +
-	        " 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.14.0 Step2; 逃生门 ssr=0)");
+	        " 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.15.1 Step2; 逃生门 ssr=0)");
 	LeaveCriticalSection(&g_cs);
 	ctx->Release();
 }
@@ -1910,7 +1954,7 @@ static void installProbeOn(ID3D11Device* dev)
 		// SSR Step1 侦察 (D5): 默认 0 → 零新增拦截; 1 才挂 ctx 槽33/47/50 (与 probe 同门)
 		g_ssrOn.store(iniFlag("ssr", false), std::memory_order_relaxed);
 		if (g_ssrOn.load(std::memory_order_relaxed))
-			logLine("SSR侦察: ini ssr=1 → 挂 ctx 槽33/47/50 (2a 只记日志) v0.14.0 Step2");
+			logLine("SSR侦察: ini ssr=1 → 挂 ctx 槽33/47/50 (2a 只记日志) v0.15.1 Step2");
 		// Step 2b 通路哨兵的独立逃生门 —— 首次会动渲染 (324→585 回写), 与"只观察"分开:
 		// ssr=1 但 ssr.sentinel=0 ⇒ 纯观察, 2a 身份照样学; 出问题改 0 即退回只读。
 		g_ssrSentinelOn.store(iniFlag("ssr.sentinel", false), std::memory_order_relaxed);
@@ -4499,7 +4543,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.15.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared) ====");
+	logLine("==== poc-presenter v0.15.1 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
