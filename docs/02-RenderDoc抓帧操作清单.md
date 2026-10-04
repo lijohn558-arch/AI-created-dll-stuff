@@ -877,3 +877,65 @@ distinct + x511/x512 边界 + cornerBR，输出 ASCII 至 `Temp\opencode\<scene>
 （6×2 张 1024²）、`S4f-tex-desc.txt`（544/552 = 1024² 配对取证）、`S4{f,f2}-pass7-pixels.json`、
 `S4{f,f2}-backbuffer.{json,png}`、`S4f~S4f2-compare.json`、`S4e~S4f-compare.json`、
 `S4b~S4f-compare.json`、`S4{e,f,f2}-quads.txt`（象限取样对照）。
+
+### 14.9 SSR Step 1 侦察准备（2026-10-04，v0.13.0 挂钩前地面真值 + 槽号双证）
+
+阶段1 全绿收口后进入水体第二步（`docs/05`）。Step 1 侦察钩挂 ctx 槽33/50 只记日志，挂钩前
+先用 capture 侧数据把「判据会不会在真机上自相矛盾」核一遍——**结果推翻两条既有结论**。
+
+**槽号双证**：`d3d11-ctx-slots.txt`（官方 d3d11.h MIDL 声明序，与 xosh 44/45 互证）=
+33 `OMSetRenderTargets` / 34 `OMSetRenderTargetsAndUnorderedAccessViews` /
+50 `ClearRenderTargetView` / 53 `ClearDepthStencilView` / 47 `CopyResource` /
+89 `OMGetRenderTargets`。游戏 api-scan 全帧零命中槽34 → **不挂槽34**；
+`main.cpp` 旧注释把 `OMGetRenderTargets` 写成 33 → 已改 89。
+
+**新证据 `S4-api-scan.txt`**（`rdc_api_scan.py -Scene S4`，range 0-999999，
+filter `OMSetRenderTargets,ClearRenderTargetView` → 142 + 9 条，4s）。state 类调用是
+action，pass5/pass6 永远看不见——这是第一次拿到反射段边界的**原生调用**真值。
+
+**发现① ev39511 的清屏目标不是 585**：
+`ev39511 ClearRenderTargetView pRenderTargetView=res:ResourceId::592`，而
+`ev39512 OMSetRenderTargets NumViews=2 {322,592} DS=463` = 段17 的 `321+591`（pass5 段表）
+→ **view592 = 纹理591 = 段17 的 RT1（R10G10B10A2_UNORM）**，**585 整帧从不被清**。
+`S4-water.md:114` 的「585 用后清」来自 pass5 `clears.rts` = `bound_targets()`（当时绑着谁）
+**不是清谁**——该文件 §Clear 方法论行本已警告此坑，此行是漏改。
+同表 ev39546/47 的「疑 582/336 预清」被 api-scan **确证**（view583/337 = 纹理582/336）。
+→ `docs/05` D3 特征A 判据改为「**清在强特征通道进行期间**」（清谁不参与判定），否则永不触发。
+→ `S4-water.md` 段表/Clear 表、`S5-night-combat.md:146` 同步修正（S5 未跑 api-scan，按 S4 口径）。
+
+**发现② D1「同帧唯一」不成立**：全帧 36 段里有 **2 个签名完全相同的强特征段**
+（判据 = 非空 RT0 恰 1 + 1920x1080 RGBA16F + 1920x1080 D24S8 DSV461）：
+
+| 段 | 事件 | RT0 | Draw | 备注 |
+|---|---|---|---|---|
+| 段16 反射段 | 39270–39502 | 585 | 16 | 每 Draw 前重绑 = 16 次 OMSet |
+| 段19 后期前处理 | 44021 | 321 | 1 | PS 1628（`S4-water.md:93`；S5 43684 同款） |
+
+**判别子**（按 `ssrReconOm` 同口径回放全帧 api-scan 得出，非估算）：
+
+| 对象 | 作 RT0 绑定 | 连续绑定段 |
+|---|---|---|
+| 585 反射目标 | **16** | **1** |
+| 321 主 HDR | **50** | **4** |
+| 339（非强特征段） | **17** | 1 |
+
+→ **次数不唯一**（339 比 585 还多），**判别取「1 段 vs 4 段」**，且只在强特征对象集合内
+有效，不能全帧海选。备选 = 段内 Draw 数 16 vs 1，但要 Draw Hook（`docs/05` 方案 C，v1 规避）。
+特征B 也带判别力但靠次序：后期前处理必在场景渲染之后 ⇒ 段16 恒为帧内首个强特征段 ⇒
+B 每帧只触发一次 ⇒ 恒归因段16；若真机出现更早的强特征段，「1 段 vs 4 段」是第二道保险。
+
+**代码侧同步修正（`main.cpp` v0.13.0）**：① 强特征按「进入」计数不按次绑（否则段16 的
+16 次重绑把 fs 顶到 16，「同帧恰1」判据必挂）；② A/B fired 只在 Present 复位（否则段19
+进入时复位 → ev44352 换绑到 35 再触发一次 B → fb=2 误判）；③ 特征A 触发前提 =
+强特征通道进行中（`g_ssrInStrong`，任一次非强 OMSet/解绑即中断）；④ 候选详情按
+(对象, 强征与否) 去重再节流（防 16 次重绑刷屏）；⑤ 新增 RT0 身份表（32 项/帧，
+记绑定次数 + 连续段数，Present 取数后清）。
+
+**预期日志基线（判读用）**：`强特征=2 distinct=2 特征A=1 特征B=1`，两对象分别报
+`16次/1段` 与 `50次/4段`；异常 = 有候选却强特征0 / 有强特征而 A+B==0 / A 或 B 单项>1 /
+强特征>2 / distinct>2；加载过场无候选无强特征不算异常。判读回填 `docs/05` §5 Step 1。
+
+**在档产出（本轮）**：`S4-api-scan.txt`（全帧原生调用真值）、`d3d11-ctx-slots.txt`
+（槽号双证表，原在 `Temp\opencode\` 已归档入库）、`docs/05` D1 前置实测 + D3 特征A 修正 +
+R1 更新、`S4-water.md` 段表/Clear 表修正、`S5-night-combat.md:146` 同步、
+`main.cpp` v0.13.0 Step 1 侦察钩（待 CI）。

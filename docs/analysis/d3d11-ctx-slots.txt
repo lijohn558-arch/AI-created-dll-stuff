@@ -1,0 +1,121 @@
+# ID3D11DeviceContext vtable 槽号表（MIDL 声明序）—— 槽号双证之一
+#
+# 来源：官方 Windows SDK d3d11.h 的 MIDL 生成声明顺序（ID3D11DeviceContext 继承链上，
+#   IUnknown 0-2 + ID3D11DeviceChild 3-6 之后的纯接口方法序）。
+# 互证：xosh 已验证口径 RSSetViewports=44 / RSSetScissorRects=45 与本表一致 → 整表可信
+#   （与 docs/02:801 探针槽号双证同法）。
+# 用途：poc-presenter SSR Step 1 侦察钩的挂载槽号依据（docs/05 D1；main.cpp installSsrRecon）。
+# 关键槽：33 OMSetRenderTargets / 34 OMSetRenderTargetsAndUnorderedAccessViews（游戏 api-scan
+#   零命中 → 不挂）/ 50 ClearRenderTargetView / 53 ClearDepthStencilView / 47 CopyResource
+#   / 89 OMGetRenderTargets（main.cpp 旧注释误写 33，已修正）。
+# 提取日期：2026-10-04
+#
+--- 以下为原表（每行 "<槽号> <方法名>"） ---
+7 VSSetConstantBuffers
+8 PSSetShaderResources
+9 PSSetShader
+10 PSSetSamplers
+11 VSSetShader
+12 DrawIndexed
+13 Draw
+14 Map
+15 Unmap
+16 PSSetConstantBuffers
+17 IASetInputLayout
+18 IASetVertexBuffers
+19 IASetIndexBuffer
+20 DrawIndexedInstanced
+21 DrawInstanced
+22 GSSetConstantBuffers
+23 GSSetShader
+24 IASetPrimitiveTopology
+25 VSSetShaderResources
+26 VSSetSamplers
+27 Begin
+28 End
+29 GetData
+30 SetPredication
+31 GSSetShaderResources
+32 GSSetSamplers
+33 OMSetRenderTargets
+34 OMSetRenderTargetsAndUnorderedAccessViews
+35 OMSetBlendState
+36 OMSetDepthStencilState
+37 SOSetTargets
+38 DrawAuto
+39 DrawIndexedInstancedIndirect
+40 DrawInstancedIndirect
+41 Dispatch
+42 DispatchIndirect
+43 RSSetState
+44 RSSetViewports
+45 RSSetScissorRects
+46 CopySubresourceRegion
+47 CopyResource
+48 UpdateSubresource
+49 CopyStructureCount
+50 ClearRenderTargetView
+51 ClearUnorderedAccessViewUint
+52 ClearUnorderedAccessViewFloat
+53 ClearDepthStencilView
+54 GenerateMips
+55 SetResourceMinLOD
+56 GetResourceMinLOD
+57 ResolveSubresource
+58 ExecuteCommandList
+59 HSSetShaderResources
+60 HSSetShader
+61 HSSetSamplers
+62 HSSetConstantBuffers
+63 DSSetShaderResources
+64 DSSetShader
+65 DSSetSamplers
+66 DSSetConstantBuffers
+67 CSSetShaderResources
+68 CSSetUnorderedAccessViews
+69 CSSetShader
+70 CSSetSamplers
+71 CSSetConstantBuffers
+72 VSGetConstantBuffers
+73 PSGetShaderResources
+74 PSGetShader
+75 PSGetSamplers
+76 VSGetShader
+77 PSGetConstantBuffers
+78 IAGetInputLayout
+79 IAGetVertexBuffers
+80 IAGetIndexBuffer
+81 GSGetConstantBuffers
+82 GSGetShader
+83 IAGetPrimitiveTopology
+84 VSGetShaderResources
+85 VSGetSamplers
+86 GetPredication
+87 GSGetShaderResources
+88 GSGetSamplers
+89 OMGetRenderTargets
+90 OMGetRenderTargetsAndUnorderedAccessViews
+91 OMGetBlendState
+92 OMGetDepthStencilState
+93 SOGetTargets
+94 RSGetState
+95 RSGetViewports
+96 RSGetScissorRects
+97 HSGetShaderResources
+98 HSGetShader
+99 HSGetSamplers
+100 HSGetConstantBuffers
+101 DSGetShaderResources
+102 DSGetShader
+103 DSGetSamplers
+104 DSGetConstantBuffers
+105 CSGetShaderResources
+106 CSGetUnorderedAccessViews
+107 CSGetShader
+108 CSGetSamplers
+109 CSGetConstantBuffers
+110 ClearState
+111 Flush
+112 GetType
+113 GetContextFlags
+114 FinishCommandList

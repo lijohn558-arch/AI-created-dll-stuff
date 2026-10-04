@@ -1,5 +1,5 @@
 /*
- * poc-presenter — PoC-A v1.7 (Present 拦截) + PoC-B v0.1 (Vulkan 注入), 插件版本 0.9.0
+ * poc-presenter — PoC-A v1.7 (Present 拦截) + PoC-B v0.1 (Vulkan 注入), 插件版本 0.13.0
  *
  * 目的 (docs/00 首周行动项 #4 / 最高风险项 #1 的第一环):
  *   证明能在真实游戏进程内拦截 IDXGISwapChain::Present —— 这是 PoC-B (在 Present 里
@@ -237,6 +237,46 @@
  *     探针升质: ctx槽44/45 已挂 — probe cube 绑定中 512²→1024² (v0.12 plan-B)
  *     探针升质: RSSetViewports 512²→1024² (probe cube 绑定中) 第 N 次
  *     探针升质: GetImmediateContext 空 / ctx slot44/45 原值不在 d3d11/renderdoc — 跳过
+ *
+ * ---- v0.13.0 (2026-10-04): SSR Step 1 侦察钩 —— ctx 槽33/50 只记日志 (docs/05 §5) ----
+ *   SSR 节点替换第一步: 真机验证反射段边界特征可否稳定识别 (R1: RenderDoc 事件号是抓帧
+ *   局部量, 真机不可用)。挂 immediate context 槽33 (OMSetRenderTargets) + 槽50
+ *   (ClearRenderTargetView), 只读解析调用参数, 完全不改渲染 (不动任何参数/状态)。
+ *   槽号双证 (官方 d3d11.h MIDL 声明序, 与 xosh 44/45 同口径): 33/34/44/45/47/50/53/89;
+ *   游戏 api-scan 零命中槽34 (OMSetRenderTargetsAndUnorderedAccessViews) → 不挂;
+ *   OMGetRenderTargets 实为槽89 (main.cpp 旧注释误写 33, 已修正)。
+ *   判据 (docs/05 D1/D3a, 按对象身份 QI + 帧号 g_presentCount):
+ *     候选   = 首个非空 RT 视图为 1920x1080 R16G16B16A16_FLOAT (按非空视图数, 防 n=8 带 null);
+ *     强特征 = 候选 + DSV 1920x1080 D24 家族 —— **按"进入"计数, 不按次绑**: 真机段16 每个
+ *              Draw 前都重绑一次 (一帧 16 次), 按次计则 fs 恒=16, "同帧恰1" 判据必挂;
+ *     特征A  = 强特征通道"进行期间"的 ClearRenderTargetView (被清对象不参与判定);
+ *     特征B  = 强特征后首次 OMSet 换绑到别的 RT0 (段16 → 段17 ev39512 的 321+591)。
+ *   S4 api-scan 实测修正两点 (docs/05:105 与 S4-water.md:114 的旧说法作废):
+ *     ① ev39511 清的是 view592 = 纹理 591 (段17 的 RT1, R10G10B10A2), 585 整帧从不被清 ——
+ *        pass5 的 clears.rts 取自 bound_targets(), 是"当时绑着谁"不是"清谁";
+ *     ② D1 的"同帧唯一"不成立: 同帧有 2 个签名完全相同的强特征段 —— 段16 反射段
+ *        (585, 16 Draw) 与 段19 后期前处理 (321, 1 Draw, PS1628)。故另记判别子
+ *        "本帧 RT0 绑定次数/连续段数": S4 实测 585=16次/1段、321=50次/4段 (全帧共 142 次
+ *        OMSet, 按本函数同口径回放 `S4-api-scan.txt` 得出)。次只差 3 倍不可靠, **判别取
+ *        "1 段 vs 4 段"** —— 反射目标按定义整帧只写一次即被段17 消费, 主 HDR 缓冲处处复用。
+ *        注意该判别只在"强特征对象集合内"有效: 全帧另有 339 = 17次/1段 (段签名非强特征),
+ *        所以不能拿"次数≈16 且 1 段"去全帧海选, 只能用来在 2 个强特征段里二选一。
+ *        Step 2 固化 D1 时用它二选一。
+ *   挂载门: pocbEnabled (vulkan 总闸) + g_probeOn + ini ssr=1 (D5 默认 0 → 零新增拦截);
+ *   ssr=0 时连槽33/50 都不挂, 基线帧与 v0.12.0 完全同路径。
+ *   日志节流: 候选详情按 (对象,强征与否) 去重后前16条 + 每64条; A/B 详情前16条 + 每64条;
+ *   notePresent 内帧汇总 (前5帧恒打 + 每60帧有活动时 + 异常帧恒打)。
+ *   正常帧基线 = 强特征2 (distinct=2) + 特征A1 + 特征B1; 异常 = 有候选却强特征0 /
+ *   有强特征而A+B==0 / A 单项>1 / B 单项>1 / 强特征>2 / distinct>2 (A、B 分开计阈值,
+ *   不用 A+B>1 —— 两者在正常帧里本就各 1 次); 加载过场无候选无强特征, 不算异常。
+ *   关键日志 (新增):
+ *     SSR侦察: ctx vtable=… slot33(OMSetRenderTargets) 原值=… 来自 …; slot50(ClearRTV) …
+ *     SSR侦察: ctx槽33/50 已挂 — 只记日志不动渲染 (v0.13.0 Step1; 逃生门 ssr=0)
+ *     SSR侦察: 槽33候选#N 帧=F 本帧第M次候选 n=1 非空=1 RT0=0x… (1920x1080 RGBA16F) DS=… 强特征
+ *     SSR侦察: 特征A(强特征期间清)#N 帧=F 被清=0x… … 强特征RT0=0x…
+ *     SSR侦察: 特征B(换绑)#N 帧=F 新RT0=0x… (…) 非空=2
+ *     SSR侦察: 帧=F OM=N 候选=N 强特征=N distinct=N 特征A=N 特征B=N | 累计候选=N 强特征=N
+ *     SSR侦察: 帧=F 强特征对象i=0x… 本帧RT0绑定=N次/M个连续段   ← 判别子 (强特征集合内 1段 vs 4段)
  *
  * 构建: GitHub Actions (build.yml job "poc-presenter"), 本地不编译
  * 安装: poc-presenter.dll 放入 <游戏>/Data/SKSE/Plugins/
@@ -487,6 +527,7 @@ void patchSlotLocked(void** slot, void* target)
 
 // v0.9.2 实验开关 —— 同一份 <pluginDir>\poc-presenter.ini (与 pocbEnabled 共用文件):
 //   vulkan=0 → 关 PoC-B 注入 (见 pocbEnabled)
+//   ssr=1    → v0.13.0 SSR Step1 侦察: 挂 ctx 槽33/50 只记日志 (默认 0, 见 installSsrRecon)
 //   vtable=0 → 停用 vtable 层: 不挂交换链槽 8/22, 看门狗也不打回 ⇒ 游戏 Present 只能
 //              从方案B 的函数级 detour 进来 —— 用于给方案B 做"独立计数"
 //              (docs/01 §7.7 末遗留项: vtable 层恒先命中, TLS 去重吃掉函数层计数)
@@ -723,7 +764,7 @@ static CtxEntry* lookupCtx(void** vtbl)
 }
 
 // v0.12 plan-B 绑定感知: 当前 OM RT0 是否即探针 cube (拿真实绑定 —— OMGetRenderTargets
-// 走真槽33, 未被我们改, 不递归)
+// 走真槽89, 未被我们挂 (我们挂的是 33/44/45/50), 不递归)
 static bool omBoundToProbeCube(ID3D11DeviceContext* ctx)
 {
 	ID3D11Texture2D* cube = g_probeCube.load(std::memory_order_acquire);
@@ -844,6 +885,423 @@ static void installCtxProbe(ID3D11Device* dev)
 	ctx->Release();
 }
 
+// ---------- SSR Step 1 侦察钩 (v0.13.0, docs/05 §5) ----------
+// 挂 ctx 槽33 (OMSetRenderTargets) + 槽50 (ClearRenderTargetView) 只读观察: 真机上反射段
+// (段16: RT0=585 / DS=461) 的绑定特征是否同帧唯一、段16 结束信号 (特征A/B) 哪个稳定。
+// 只解析调用参数, 不改任何渲染状态; ssr=0 (ini 默认, D5) 时一个槽都不挂。
+// 槽号双证: 官方 d3d11.h MIDL 声明序 (与 xosh 44/45 同口径); 槽34 游戏 api-scan 零命中不挂。
+struct SsrCtxEntry
+{
+	void** vtbl;
+	void*  imm;    // 安装时抓到的 immediate context (指针值作身份; 延迟上下文跳过观察)
+	void*  orig33; // OMSetRenderTargets    (ID3D11DeviceContext 槽33)
+	void*  orig50; // ClearRenderTargetView (槽50, 特征A "用后清")
+};
+static SsrCtxEntry g_ssrCtx[4];
+static int         g_ssrCtxN = 0;
+static std::atomic<bool> g_ssrOn{false}; // ini ssr (D5 默认 0)
+static bool        g_ssrWatchAll = false; // 指针身份失配后转按 vtbl 观察全部上下文 (见 ssrWatch)
+// 本帧状态 (Present 时清零; 观察只发生在 immediate context 上 = 渲染线程)
+static std::atomic<long> g_ssrFOm{0}, g_ssrFCand{0}, g_ssrFStr{0}, g_ssrFA{0}, g_ssrFB{0};
+static void* g_ssrFObj[4];           // 本帧强特征对象身份 (判 distinct 唯一性)
+static int   g_ssrFObjN = 0;
+static void* g_ssrLastStr = nullptr; // 最近强特征的 RT0 身份 (特征A/B 判据)
+static bool  g_ssrInStrong = false;  // 强特征通道"进行中" —— 特征A 的触发前提; 任一次
+                                     // 解绑/换到非强绑定即中断 (见 ssrReconOm 顶部复位)
+static bool  g_ssrAFired = false, g_ssrBFired = false; // 每帧各至多一次, 只在 Present 复位
+static long  g_ssrStrTot = 0;                          // 累计强特征 (按"进入"计, 非按次绑)
+static long  g_ssrCandN = 0;                           // 累计候选
+static long  g_ssrCandLogN = 0;                        // 候选详情已打条数 (按对象去重后节流)
+static long  g_ssrALogN = 0, g_ssrBLogN = 0;           // A/B 详情日志节流
+static void* g_ssrLastCand = nullptr;                  // 候选详情按 (对象,强征与否) 去重
+static bool  g_ssrLastCandStr = false;                 //   防 16 次重绑刷屏 (见 ssrReconOm 末)
+// 判别子 —— 真机同帧有两个签名完全相同的强特征段 (docs/05 D1 实测推翻"同帧唯一"):
+//   段16   反射段    RT0=585 16 Draw → S4 实测全帧只绑 16 次、只在 1 个连续绑定段里出现
+//   段19   后期前处理 RT0=321 1 Draw  → S4 实测全帧绑 50 次、散在 4 个连续绑定段里
+// 次数只差 3 倍 (16/50, 场景一变可能更近), "1 段 vs 4 段"才是结构性区别:
+// 反射目标按定义整帧只写一次 (写完即被段17 消费), 主 HDR 缓冲则处处复用。
+// 判别只在"强特征对象集合内"有效 —— 全帧另有 339 = 17次/1段, 不能拿它去全帧海选。
+struct SsrRtN { void* obj; long n; long runs; };
+static SsrRtN g_ssrRtN[32];
+static int    g_ssrRtNN = 0;
+static int    g_ssrRtNOver = 0;
+static void*  g_ssrPrevRt0 = nullptr; // 上一次绑定的 RT0 (RT0 变化 = 换段, 用于 runs)
+
+static SsrCtxEntry* lookupSsrCtx(void** vtbl)
+{
+	if (!vtbl)
+		return nullptr;
+	for (int i = 0; i < g_ssrCtxN; ++i)
+		if (g_ssrCtx[i].vtbl == vtbl)
+			return &g_ssrCtx[i];
+	return nullptr;
+}
+
+// 视图 → 底层 2D 纹理 desc + 对象身份 (QI ID3D11Texture2D 的指针值作帧内身份: 同对象 QI
+// 结果稳定; 只取指针值立即 Release, 不持引用 —— 资源仍归游戏)
+static bool ssrViewDesc(ID3D11View* v, D3D11_TEXTURE2D_DESC* d, void** obj)
+{
+	if (!v || !d)
+		return false;
+	ID3D11Resource* res = nullptr;
+	v->GetResource(&res);
+	if (!res)
+		return false;
+	ID3D11Texture2D* tex = nullptr;
+	const HRESULT hr = res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
+	res->Release();
+	if (FAILED(hr) || !tex)
+		return false;
+	tex->GetDesc(d);
+	if (obj)
+		*obj = reinterpret_cast<void*>(tex);
+	tex->Release();
+	return true;
+}
+
+static bool ssrIsD24(DXGI_FORMAT f)
+{
+	return f == DXGI_FORMAT_R24G8_TYPELESS || f == DXGI_FORMAT_D24_UNORM_S8_UINT ||
+	       f == DXGI_FORMAT_R24_UNORM_X8_TYPELESS || f == DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+}
+
+static std::string ssrFmtName(DXGI_FORMAT f)
+{
+	switch (f)
+	{
+	case DXGI_FORMAT_R16G16B16A16_FLOAT: return "RGBA16F";
+	case DXGI_FORMAT_R10G10B10A2_UNORM:  return "R10G10B10A2";
+	case DXGI_FORMAT_R8G8B8A8_UNORM:     return "RGBA8";
+	case DXGI_FORMAT_R16G16_FLOAT:       return "RG16F";
+	case DXGI_FORMAT_R24G8_TYPELESS:
+	case DXGI_FORMAT_D24_UNORM_S8_UINT:
+	case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+	case DXGI_FORMAT_X24_TYPELESS_G8_UINT: return "D24家族";
+	default: return "fmt" + std::to_string(static_cast<int>(f));
+	}
+}
+
+// 上下文身份核对: 安装时抓的 immediate 指针若与调用方不一致 (RenderDoc 包装/重取等),
+// 不能就此哑掉 —— 告警一次后转为按 vtbl 观察全部上下文 (g_ssrWatchAll), 宁可多记不漏记
+static bool ssrWatch(SsrCtxEntry* e, ID3D11DeviceContext* ctx)
+{
+	if (!e)
+		return false;
+	if (e->imm == ctx)
+		return true;
+	if (g_ssrWatchAll)
+		return true;
+	g_ssrWatchAll = true;
+	logLine("SSR侦察: 上下文指针与安装时不同 (imm=" + hexOf(e->imm) + " 调用方=" + hexOf(ctx) +
+	        ") → 转为按 vtbl 观察全部上下文 (宁多记不漏记)");
+	return true;
+}
+
+// 槽33 观察: 只读解析参数 (候选 / 强特征 / 特征B), 不动渲染
+static void ssrReconOm(UINT n, ID3D11RenderTargetView* const* ppRTV, ID3D11DepthStencilView* pDSV)
+{
+	g_ssrFOm.fetch_add(1, std::memory_order_relaxed);
+	// 每次换绑先假定"强特征通道已中断", 解析成功且确为强特征才回置 true —— 特征A 靠它
+	// 判断 clear 是否落在强特征通道进行期间 (真机 585 整帧不被清, 见 ssrReconClear)
+	const bool wasStrong = g_ssrInStrong;
+	g_ssrInStrong = false;
+	if (!ppRTV || n == 0 || n > 8)
+		return;
+	// 按非空视图数计 (防 NumViews=8 带 null), 取首个非空视图作 RT0 身份
+	UINT nonNull = 0;
+	ID3D11RenderTargetView* first = nullptr;
+	for (UINT i = 0; i < n; ++i)
+		if (ppRTV[i])
+		{
+			if (!first)
+				first = ppRTV[i];
+			++nonNull;
+		}
+	if (!first)
+		return;
+	D3D11_TEXTURE2D_DESC rd{};
+	void* robj = nullptr;
+	if (!ssrViewDesc(first, &rd, &robj))
+		return;
+	// 与 notePresent 的 fetch_add+1 口径对齐: 事件时点 present 计数还是上一帧的, 本帧 = +1
+	const unsigned long long fr = g_presentCount.load(std::memory_order_relaxed) + 1;
+
+	// 判别子: 本帧以该对象为 RT0 的 OMSetRenderTargets 次数 + 跨几个连续绑定段
+	// (Present 时对强特征对象报数)。S4 全帧实测 142 次 OMSet (按本函数同口径回放
+	// `S4-api-scan.txt`): 585 = 16 次/1 段, 321 = 50 次/4 段 —— "1 段 vs 4 段" 是
+	// 反射目标与主 HDR 缓冲的结构性区别; 且只在强特征集合内有效 (339 也 17次/1段)。
+	{
+		int i = 0;
+		for (; i < g_ssrRtNN; ++i)
+			if (g_ssrRtN[i].obj == robj)
+				break;
+		if (i == g_ssrRtNN)
+		{
+			if (g_ssrRtNN < (int)(sizeof(g_ssrRtN) / sizeof(g_ssrRtN[0])))
+			{
+				g_ssrRtN[g_ssrRtNN].obj = robj;
+				g_ssrRtN[g_ssrRtNN].n = 0;
+				g_ssrRtN[g_ssrRtNN].runs = 0;
+				++g_ssrRtNN;
+			}
+			else if (++g_ssrRtNOver == 1)
+				logLine("SSR侦察: 本帧 RT0 身份表已满(32) — 新 RT0 不再计绑定次数");
+		}
+		if (i < g_ssrRtNN)
+		{
+			++g_ssrRtN[i].n;
+			if (robj != g_ssrPrevRt0) // RT0 换对象 = 换段, 该对象新开一个连续绑定段
+			{
+				++g_ssrRtN[i].runs;
+				g_ssrPrevRt0 = robj;
+			}
+		}
+	}
+
+	// 特征B: 强特征之后首次换绑到别的 RT0 (段16 → 段17 ev39512 的 321+591)。fired 后不再记;
+	// 不清 lastStr —— 特征A 可能晚于 B 出现, 两个信号独立计数, 顺序不预设 (docs/05 二选一)
+	if (g_ssrLastStr && robj != g_ssrLastStr && !g_ssrBFired)
+	{
+		g_ssrBFired = true;
+		g_ssrFB.fetch_add(1, std::memory_order_relaxed);
+		const long k = ++g_ssrBLogN;
+		if (k <= 16 || (k % 64) == 0)
+			logLine("SSR侦察: 特征B(换绑)#" + std::to_string(k) + " 帧=" + std::to_string(fr) +
+			        " 新RT0=" + hexOf(robj) + " (" + std::to_string(rd.Width) + "x" +
+			        std::to_string(rd.Height) + " " + ssrFmtName(rd.Format) + ") 非空=" +
+			        std::to_string(nonNull));
+	}
+
+	// 候选: 恰1个非空视图且 1920x1080 RGBA16F (段15 无 DS 也命中; 段7/17/18 是 MRT×2/×3
+	// 靠视图数排除, 非空=1 是强特征的前置条件 —— 否则段17 会被误判第二个强特征)
+	if (nonNull != 1 || rd.Width != 1920 || rd.Height != 1080 ||
+	    rd.Format != DXGI_FORMAT_R16G16B16A16_FLOAT)
+		return;
+	const long c = ++g_ssrCandN;
+	g_ssrFCand.fetch_add(1, std::memory_order_relaxed);
+	// 强特征: 再 + 1920x1080 D24 家族 DSV (段16)
+	std::string dsTxt = "无";
+	bool strong = false;
+	if (pDSV)
+	{
+		D3D11_TEXTURE2D_DESC dd{};
+		void* dobj = nullptr;
+		if (ssrViewDesc(pDSV, &dd, &dobj))
+		{
+			dsTxt = hexOf(dobj) + " " + std::to_string(dd.Width) + "x" + std::to_string(dd.Height) +
+			        " " + ssrFmtName(dd.Format);
+			strong = dd.Width == 1920 && dd.Height == 1080 && ssrIsD24(dd.Format);
+		}
+		else
+			dsTxt = "有(QI失败)";
+	}
+	if (strong)
+	{
+		g_ssrInStrong = true;
+		// 强特征"进入"才计数 —— 真机段16 每个 Draw 前重绑一次 (一帧 16 次), 按次计则
+		// fs 恒=16, "同帧强特征恰1" 判据必挂。换对象 或 通道被中断后再绑回 才算新的一段。
+		if (robj != g_ssrLastStr || !wasStrong)
+		{
+			g_ssrStrTot++;
+			g_ssrFStr.fetch_add(1, std::memory_order_relaxed);
+			g_ssrLastStr = robj;
+			// 这里不复位 A/B fired —— 只在 Present 复位, 每帧各至多触发一次。否则段19
+			// 进入时复位, 段19 之后 ev44352 换绑到 35 会再触发一次 B → fb=2 误判异常。
+			bool dup = false;
+			for (int i = 0; i < g_ssrFObjN; ++i)
+				if (g_ssrFObj[i] == robj)
+					dup = true;
+			if (!dup && g_ssrFObjN < (int)(sizeof(g_ssrFObj) / sizeof(g_ssrFObj[0])))
+				g_ssrFObj[g_ssrFObjN++] = robj;
+		}
+	}
+	// 候选详情按 (对象, 是否强特征) 去重后再节流 —— 真机段16 每个 Draw 前都重绑一次
+	// (一帧 16 次), 不去重则首 16 行全是同一行, 预算烧光也看不到别的候选对象 (段15/19 的 321)
+	if (robj != g_ssrLastCand || strong != g_ssrLastCandStr)
+	{
+		g_ssrLastCand = robj;
+		g_ssrLastCandStr = strong;
+		const long k = ++g_ssrCandLogN;
+		if (k <= 16 || (c % 64) == 0)
+			logLine("SSR侦察: 槽33候选#" + std::to_string(k) + " 帧=" + std::to_string(fr) +
+			        " 本帧第" + std::to_string(c) + "次候选 n=" + std::to_string(n) +
+			        " 非空=" + std::to_string(nonNull) + " RT0=" + hexOf(robj) + " (" +
+			        std::to_string(rd.Width) + "x" + std::to_string(rd.Height) + " " +
+			        ssrFmtName(rd.Format) + ") DS=" + dsTxt + (strong ? " 强特征" : ""));
+	}
+}
+
+// 槽50 观察: 特征A = 强特征通道"进行期间"发生的 ClearRenderTargetView。
+// 修正 (S4 api-scan 实测, 推翻 docs/05:105 的 "585 用后清"): ev39511 清的是 view 592
+// = 纹理 591 (段17 的 RT1, R10G10B10A2), **585 整帧从不被清** —— pass5 的 clears.rts 字段
+// 取自 bound_targets(), 是"当时绑着谁"而非"清谁", 旧判据 (清对象==强特征对象) 永不触发。
+// 但该 clear 发生时 585 仍是绑定中的 RT0, 正是段16 结束的前兆, 故判据改为"清在强特征通道
+// 进行期间", 被清对象是谁不参与判定, 只记进日志供判读。
+static void ssrReconClear(ID3D11RenderTargetView* pRTV)
+{
+	if (!pRTV || !g_ssrLastStr || !g_ssrInStrong || g_ssrAFired)
+		return;
+	g_ssrAFired = true;
+	g_ssrFA.fetch_add(1, std::memory_order_relaxed);
+	D3D11_TEXTURE2D_DESC d{};
+	void* obj = nullptr;
+	std::string tgt = "QI失败";
+	if (ssrViewDesc(pRTV, &d, &obj))
+		tgt = hexOf(obj) + " " + std::to_string(d.Width) + "x" + std::to_string(d.Height) + " " +
+		      ssrFmtName(d.Format);
+	const long k = ++g_ssrALogN;
+	if (k <= 16 || (k % 64) == 0)
+		logLine("SSR侦察: 特征A(强特征期间清)#" + std::to_string(k) + " 帧=" +
+		        std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1) + " 被清=" +
+		        tgt + " 强特征RT0=" + hexOf(g_ssrLastStr));
+}
+
+static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx, UINT n,
+                                                       ID3D11RenderTargetView* const* ppRTV,
+                                                       ID3D11DepthStencilView* pDSV)
+{
+	using Fn_t = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT,
+	                                      ID3D11RenderTargetView* const*, ID3D11DepthStencilView*);
+	SsrCtxEntry* e = lookupSsrCtx(ctx ? *reinterpret_cast<void***>(ctx) : nullptr);
+	const Fn_t real = e ? reinterpret_cast<Fn_t>(e->orig33) : nullptr;
+	if (!real) // 理论不可达: 只有被我们改过的槽才会进本函数
+		return;
+	// 延迟上下文与 immediate 共享 vtable —— 身份核对只观察 immediate (失配则转全观察)
+	if (ssrWatch(e, ctx) && g_ssrOn.load(std::memory_order_relaxed))
+		ssrReconOm(n, ppRTV, pDSV);
+	real(ctx, n, ppRTV, pDSV);
+}
+
+static void STDMETHODCALLTYPE hookedClearRTV(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* pRTV,
+                                             const FLOAT ColorRGBA[4])
+{
+	using Fn_t = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11RenderTargetView*, const FLOAT*);
+	SsrCtxEntry* e = lookupSsrCtx(ctx ? *reinterpret_cast<void***>(ctx) : nullptr);
+	const Fn_t real = e ? reinterpret_cast<Fn_t>(e->orig50) : nullptr;
+	if (!real)
+		return;
+	if (ssrWatch(e, ctx) && g_ssrOn.load(std::memory_order_relaxed))
+		ssrReconClear(pRTV);
+	real(ctx, pRTV, ColorRGBA);
+}
+
+// 挂 immediate context 槽33/50 —— 幂等 (按 vtable 去重); 门控 = pocbEnabled + probe + ssr
+static void installSsrRecon(ID3D11Device* dev)
+{
+	if (!dev || !pocbEnabled() || !g_probeOn.load(std::memory_order_relaxed) ||
+	    !g_ssrOn.load(std::memory_order_relaxed))
+		return;
+	ID3D11DeviceContext* ctx = nullptr;
+	dev->GetImmediateContext(&ctx);
+	if (!ctx)
+	{
+		logLine("SSR侦察: GetImmediateContext 空 — 槽33/50 未挂");
+		return;
+	}
+	void** vtbl = *reinterpret_cast<void***>(ctx);
+	EnterCriticalSection(&g_cs);
+	if (lookupSsrCtx(vtbl))
+	{
+		LeaveCriticalSection(&g_cs);
+		ctx->Release();
+		return;
+	}
+	void* o33 = vtbl[33];
+	void* o50 = vtbl[50];
+	logLine("SSR侦察: ctx vtable=" + hexOf(vtbl) + " slot33(OMSetRenderTargets) 原值=" + hexOf(o33) +
+	        " 来自 " + modulePathOf(o33) + "; slot50(ClearRenderTargetView) 原值=" + hexOf(o50) +
+	        " 来自 " + modulePathOf(o50));
+	if (!isD3D11Family(o33) || !isD3D11Family(o50))
+	{
+		logLine("SSR侦察: ctx slot33/50 原值不在 d3d11/renderdoc — 跳过 (防错槽位)");
+		LeaveCriticalSection(&g_cs);
+		ctx->Release();
+		return;
+	}
+	if (g_ssrCtxN >= (int)(sizeof(g_ssrCtx) / sizeof(g_ssrCtx[0])))
+	{
+		logLine("SSR侦察: ctx 登记表已满 — 跳过 (防越界)");
+		LeaveCriticalSection(&g_cs);
+		ctx->Release();
+		return;
+	}
+	g_ssrCtx[g_ssrCtxN].vtbl = vtbl;
+	g_ssrCtx[g_ssrCtxN].imm = ctx; // 指针值作身份, 下面立即 Release 不持引用
+	g_ssrCtx[g_ssrCtxN].orig33 = o33;
+	g_ssrCtx[g_ssrCtxN].orig50 = o50;
+	++g_ssrCtxN;
+	patchSlotLocked(&vtbl[33], reinterpret_cast<void*>(&hookedOMSetRenderTargets));
+	patchSlotLocked(&vtbl[50], reinterpret_cast<void*>(&hookedClearRTV));
+	logLine("SSR侦察: ctx槽33/50 已挂 — 只记日志不动渲染 (v0.13.0 Step1; 逃生门 ssr=0)");
+	LeaveCriticalSection(&g_cs);
+	ctx->Release();
+}
+
+// notePresent 调: 帧末汇总 + 清零本帧状态。判据 (docs/05 §5 Step1, 依 S4 api-scan 实测修正):
+//   基线 = 同帧强特征 2 个 —— 段16 反射段(585,16 Draw) 与 段19 后期前处理(321,1 Draw),
+//   签名完全相同, D1 原假设"同帧唯一"被推翻; + 特征A/B 各恰 1 次。
+//   异常帧恒打: 有候选却强特征 0 / 有强特征而 A+B==0 / A 单项>1 / B 单项>1 /
+//   强特征>2 / distinct>2; 前 5 帧恒打 (无水场景也能证明钩子活着), 有活动的每 60 帧心跳。
+//   加载/过场 (无候选无强特征) 不算异常, 免得刷屏。
+// 判别子: 每个强特征对象另打一行"本帧 RT0 绑定次数/连续段数" —— S4 实测 585=16次/1段、
+//   321=50次/4段; 量只差 3 倍不可靠, 判别取"1 段 vs 4 段"(反射目标整帧只写一次),
+//   且只在强特征对象集合内有效 (全帧另有 339 = 17次/1段)。
+static void ssrReconPresent(uint64_t n)
+{
+	if (!g_ssrOn.load(std::memory_order_relaxed))
+		return;
+	const long fo = g_ssrFOm.exchange(0, std::memory_order_relaxed);
+	const long fc = g_ssrFCand.exchange(0, std::memory_order_relaxed);
+	const long fs = g_ssrFStr.exchange(0, std::memory_order_relaxed);
+	const long fa = g_ssrFA.exchange(0, std::memory_order_relaxed);
+	const long fb = g_ssrFB.exchange(0, std::memory_order_relaxed);
+	// 先把本帧强特征对象 + 各自 RT0 绑定次数/连续段数取到本地, 再立刻清帧状态 (表不跨帧)
+	const int objN = g_ssrFObjN;
+	void* objs[4];
+	long  objBind[4];
+	long  objRuns[4];
+	for (int i = 0; i < objN; ++i)
+	{
+		objs[i] = g_ssrFObj[i];
+		objBind[i] = 0;
+		objRuns[i] = 0;
+		for (int j = 0; j < g_ssrRtNN; ++j)
+			if (g_ssrRtN[j].obj == objs[i])
+			{
+				objBind[i] = g_ssrRtN[j].n;
+				objRuns[i] = g_ssrRtN[j].runs;
+				break;
+			}
+	}
+	g_ssrFObjN = 0;
+	g_ssrRtNN = 0;
+	g_ssrRtNOver = 0;
+	g_ssrPrevRt0 = nullptr;
+	g_ssrLastStr = nullptr;
+	g_ssrInStrong = false;
+	g_ssrLastCand = nullptr;
+	g_ssrLastCandStr = false;
+	g_ssrAFired = g_ssrBFired = false;
+	const bool act = fc > 0 || fs > 0 || fa > 0 || fb > 0;
+	const bool anom = (fs == 0 && fc > 0) || (fs > 0 && (fa + fb) == 0) || fa > 1 || fb > 1 ||
+	                  fs > 2 || objN > 2;
+	if (n <= 5 || (n % 60 == 0 && act) || anom)
+	{
+		std::string s = "SSR侦察: 帧=" + std::to_string(n) + " OM=" + std::to_string(fo) +
+		                " 候选=" + std::to_string(fc) + " 强特征=" + std::to_string(fs) +
+		                " distinct=" + std::to_string(objN) + " 特征A=" + std::to_string(fa) +
+		                " 特征B=" + std::to_string(fb) + " | 累计候选=" +
+		                std::to_string(g_ssrCandN) + " 累计强特征=" + std::to_string(g_ssrStrTot);
+		if (anom)
+			s += " [异常]";
+		logLine(s);
+		for (int i = 0; i < objN; ++i)
+			logLine("SSR侦察: 帧=" + std::to_string(n) + " 强特征对象" + std::to_string(i + 1) +
+			        "=" + hexOf(objs[i]) + " 本帧RT0绑定=" + std::to_string(objBind[i]) +
+			        "次/" + std::to_string(objRuns[i]) + "个连续段");
+	}
+}
+
 // 挂设备 vtable 槽5 —— 幂等 (按 vtable 去重), 首次调用读 ini
 static void installProbeOn(ID3D11Device* dev)
 {
@@ -858,6 +1316,10 @@ static void installProbeOn(ID3D11Device* dev)
 		g_probeOn.store(iniFlag("probe", true), std::memory_order_relaxed);
 		if (!g_probeOn.load(std::memory_order_relaxed))
 			logLine("探针升质: ini probe=0 → 不挂 CreateTexture2D (探针保持 512²)");
+		// SSR Step1 侦察 (D5): 默认 0 → 零新增拦截; 1 才挂 ctx 槽33/50 (与 probe 同门)
+		g_ssrOn.store(iniFlag("ssr", false), std::memory_order_relaxed);
+		if (g_ssrOn.load(std::memory_order_relaxed))
+			logLine("SSR侦察: ini ssr=1 → 挂 ctx 槽33/50 只记日志 (v0.13.0 Step1)");
 	}
 	if (!g_probeOn.load(std::memory_order_relaxed))
 	{
@@ -892,6 +1354,7 @@ static void installProbeOn(ID3D11Device* dev)
 	logLine("探针升质: 槽5 已挂 (512² cube+配对depth→1024² + 回写desc, 逃生门 probe=0 / vulkan=0)");
 	LeaveCriticalSection(&g_cs);
 	installCtxProbe(dev); // v0.12 plan-B: 同设备 immediate context 槽44/45 (自身幂等)
+	installSsrRecon(dev); // v0.13.0 Step1: SSR 侦察 ctx 槽33/50 (自身幂等, 门控 ssr=1)
 }
 
 // 由 registerSwp (交换链一出现) / pocbInit (双保险) 调 —— 必须早于游戏创建探针
@@ -1132,6 +1595,7 @@ std::string swapDesc(IDXGISwapChain* sc)
 void notePresent(const char* via, IDXGISwapChain* sc)
 {
 	const uint64_t n = g_presentCount.fetch_add(1) + 1;
+	ssrReconPresent(n); // v0.13.0 Step1: 帧末汇总 (ssr=0 时内部早退, 零开销)
 	if (n == 1)
 	{
 		g_lastLog = std::chrono::steady_clock::now();
@@ -3424,7 +3888,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.12.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports) ====");
+	logLine("==== poc-presenter v0.13.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1 侦察拦 ctx槽33/50 只记日志) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
