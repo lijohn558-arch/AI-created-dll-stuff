@@ -249,6 +249,40 @@ VK 侧新增：`VkDescriptorSetLayout` / `VkSampler` / `vkCmdBindDescriptorSets`
 - **(d) 副作用面干净**：`[异常]` 0 条、`COPY=3` 恒定（游戏自己的 3 条 CopyResource 未受影响）、
   PoC-B 0.88–0.98 ms/帧（Step1 为 0.87）。`ssr.sentinel` 验收后已改回 **0**（正常玩水恢复）。
 
+#### D2a-4 2c 共享入向：D3D11 侧（`v0.15.0`，2c-α）
+
+**目标**：把 R2（D24 深度 / FP16 这两个 PoC-B 没验过的共享格式）解掉，为 2c-β 的 VK 导入铺路。
+**范围裁剪**（2026-10-04 选定 2c v1）：**`POCB_DEV_FNS` 扩 descriptor/sampler 推迟到 2d** ——
+descriptor/sampler 是给 shader 采样用的，而采出来的结果要有输出才可验收，那必须先有 2d 的
+出向回写；没有 2d 时加 descriptor/sampler 就是死代码、也没法验收。故 2c 只做"入向通路本身"。
+
+**做法**：
+
+1. **2 张 `SHARED|NTHANDLE` 镜像**（`g_ssrInTexC` 色 / `g_ssrInTexD` 深度），desc **全抄源**
+   （含 `BindFlags`），只改 `CPUAccessFlags=0` + `MiscFlags=SHARED|SHARED_NTHANDLE`。
+   照抄 `BindFlags` 是为了满足 `CopyResource` 对 src/dst 一致性最严的解释——2b 已经踩过
+   "**`CopyResource` 返回 void、desc 不一致时静默丢弃但日志照打**"的坑，从源头保证一致最省事。
+2. **触发点与 2b 哨兵同位**（特征B → `real()` 之后），但**开关独立**：`g_ssrInPending` 由
+   `ssr.shared` 门控（`g_ssrSentinelPending` 是被 `g_ssrSentinelOn` 门控的，`ssr.sentinel=0`
+   时根本不置位，2c 不能搭它的车）。**只要求双强特征格局已确立**（菜单期两值相等 → 不 arm，
+   同 D2a-3a），**不要求 `lastStr==585`**——入向拷的是 324/520，与 585 是谁无关，段16 缺席帧照拷。
+3. **`CreateSharedHandle` 各取一个 NT handle**（`g_ssrInHC`/`g_ssrInHD`）→ 2c-β 交 VK 导入。
+4. **STAGING 读回自校验**（`ssrInFnv`，FNV-1a 抽样 64 行×16 列）：建镜像时先记一份
+   "**未拷基线**"，之后读到的校验和 ≠ 基线 = 拷贝真落地。CPU 读回阻塞、违约束 2 的每帧读回
+   禁令 ⇒ **节流到前 3 次 + 每 600 次**。内部置 `g_ssrSelfCopy`，免得暂存拷贝被槽47 钩
+   计进 2a 的 `COPY=` 与身份学习。
+
+**R2 验收点**（`docs/02` §14.12）：`[2c] 色324 SHARED 镜像 OK` / `[2c] 深度520 SHARED 镜像 OK`
+各 1 行 ⇒ D24 与 FP16 都能建出 SHARED 且 DXGI 允许共享；`[2c读回 …≠基线✓ …非零…]` ⇒ 拷进去了。
+深度那行若报 `CreateTexture2D 失败 … ← R2 风险点` 或 `CreateSharedHandle 失败 … ← R2 风险点`，
+则 **R2 只过一半**（色过、深度不过），日志会明确指出是哪一步、哪个格式。
+
+**逃生门**：`ssr.shared=0`（默认）即退回 v0.14.0 的 2b 路径；`ssr=0` 则三槽全不挂。
+**副作用面**：只往我方镜像写，**不动游戏资源、不改画面**（与 2b 的"改 585"性质完全不同，
+所以另给一道独立门，D5 的逃生门思路一致）。
+
+**状态**：**代码完成，未真机验证**（待跑图判读，见 `docs/02` §14.12）。
+
 ### D3 输出回写与段16 的 16 个 Draw（两个子方案）
 
 | 方案 | 流程 | 优点 | 缺点 |
@@ -301,7 +335,11 @@ a 的段16 结束信号（**Step 1 真机判读已二选一：定特征B** —�
 |---|---|---|---|
 | **0** | 本文设计确认 | 本文件 | — |
 | **1 侦察钩** ✅ | 挂 `OMSetRenderTargets`（**槽33**）+ `ClearRenderTargetView`（**槽50**）**只记日志**：真机上强特征段是否唯一、段16 结束特征A/B 哪个稳定、判别子「本帧 RT0 绑定次数/连续段数」能否分开那两个同签名段（见 D1 前置实测） | **已完成入档**（CI `64a290e`，判读见 §4 D1 末「Step 1 真机判读」）：`distinct` 恒 ≤2、判别子 `1段 vs 4~6段` 零重叠、A/B 均 100%=1 ⇒ **信号定 B**；修正一处判据（删 `fs>2`，消除 2571 条假阳性）；不动任何渲染 | R1 **关闭** |
-| **2 输入通路**（**拆 2a/2b → 2c/2d**，2026-10-04 定） | **2a 身份识别**：挂**槽47** `CopyResource`，按 D2a-1 规则学 324/520，`runs` 定 585/321（**只记日志**）；**2b 通路哨兵**：特征B 处 `CopyResource(585←324)`，反射区变成可辨识的「旧场景色」错误画面（类洋红哨兵思路）。→ ✅ **已验收通过（`v0.14.0` / `407c8b3`，2026-10-04 真机 5520 帧，11/11 全绿，`0 [异常]`、0.88–0.98 ms/帧；见 `docs/02` §14.11.1）**。**2c** 共享入向（2 张 SHARED + `CreateSharedHandle` + VK 导入 + `POCB_DEV_FNS` 扩 descriptor/sampler）；**2d** SSR v0 passthrough 经 VK 回写 585 | **2a** 日志：`[2a]` 认出 324/520 各 1 行 ✓、`COPY=` 每帧=3 ✓、`[585]`/`[321]` 标注落在 runs==1 / runs>1 的对象上 ✓；**2b** 目视：**水几乎消失**（`324`=段16 前快照不含水 → 段17 读到"没画水的场景"）；`[desc一致]=42/[desc不一致!]=0`，写目标恒 = `[585]` 的 runs==1 对象；**硬约束 5「必须 in-frame 拦截」验通**；锚点 declared-diff 提案先行 | R2 深度格式/导入 |
+| **2 输入通路**（**拆 2a/2b → 2c/2d**，2026-10-04 定） | **2a 身份识别**：挂**槽47** `CopyResource`，按 D2a-1 规则学 324/520，`runs` 定 585/321（**只记日志**）；**2b 通路哨兵**：特征B 处 `CopyResource(585←324)`，反射区变成可辨识的「旧场景色」错误画面（类洋红哨兵思路）。→ ✅ **已验收通过（`v0.14.0` / `407c8b3`，2026-10-04 真机 5520 帧，11/11 全绿，`0 [异常]`、0.88–0.98 ms/帧；见 `docs/02` §14.11.1）**。**2c** 共享入向（2 张 SHARED + `CreateSharedHandle` + VK 导入 + `POCB_DEV_FNS` 扩 descriptor/sampler）
+→ **2c-α（D3D11 侧）代码完成 `v0.15.0` 待真机**（R2 验证：D24/FP16 能否建 SHARED + 读回校验；
+descriptor/sampler **推迟到 2d**，理由见 D2a-4）；**2c-β** VK `OPAQUE_WIN32` 导入两图 +
+`vkCmdCopyImageToBuffer`/`vkMapMemory` 交叉校验（两函数已在 `POCB_DEV_FNS`，**零新增 VK API**）；
+**2d** SSR v0 passthrough 经 VK 回写 585 | **2a** 日志：`[2a]` 认出 324/520 各 1 行 ✓、`COPY=` 每帧=3 ✓、`[585]`/`[321]` 标注落在 runs==1 / runs>1 的对象上 ✓；**2b** 目视：**水几乎消失**（`324`=段16 前快照不含水 → 段17 读到"没画水的场景"）；`[desc一致]=42/[desc不一致!]=0`，写目标恒 = `[585]` 的 runs==1 对象；**硬约束 5「必须 in-frame 拦截」验通**；锚点 declared-diff 提案先行 | R2 深度格式/导入 |
 | **3 SSR v1** | D4 shader + D3a 覆盖式回写 + 事件闸同步 | 游戏内水面反射呈屏幕空间内容（人工截图对照——观感无自动判据） | R4 相机矩阵来源 |
 | **4 过闸** | 套 `docs/02` §14.6 模板：抓 S5/S4 双帧 → declared-diff 闸（A 全绿 + F 必现 + B 归因）→ 帧时不劣于基线 5%（`docs/00:93`，1660Ti 1080p，S4/S5 各测） | compare JSON + 帧时数据 + 判读入档 | R3 帧时 |
 | **5 收口** | 默认 `ssr=1`、docs/00 §1.1 与 docs/03 §7.1 回填、诚实边界新增 | commit + CI | — |

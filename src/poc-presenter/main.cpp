@@ -313,12 +313,23 @@
  *       · 段16 缺席的窗口里第一个强特征是段19(321)≠585 ⇒ 不排队, 不写错缓冲。
  *     逃生门与总门分开: ssr=1 只挂槽+记日志 (2a), **ssr.sentinel=1 才回写** (2b) —— 首次
  *     动渲染的操作值得单独开关, 出问题改 0 即退回纯观察, 2a 的身份行照常打。
+ *   2c 共享入向 (v0.15.0, docs/05 D2a-a + 风险 R2): 触发点与 2b **同位** (特征B → real()
+ *     后), 开关独立 (ssr.shared, 默认 0)。做法 = 建 2 张 SHARED|NTHANDLE 镜像**照抄** 324 色
+ *     与 520 深度的 desc, 每帧 CopyResource(源→镜像) 各一下, CreateSharedHandle 取 NT handle
+ *     交给 2c-β 的 VK (OPAQUE_WIN32) 导入。
+ *       · **只往我方镜像写, 不动游戏资源、不改画面** —— 与 2b 的"改 585"性质不同, 故另给一道门;
+ *       · 不要求 lastStr==585 (入向不碰 585), 但要求双强特征格局已确立 (菜单期不 arm, 同 D2a-3a);
+ *       · R2 验收点 = D24 深度与 FP16 这两个 PoC-B 没验过的格式: 能否建出 SHARED、DXGI 是否
+ *         允许共享、拷进去后 STAGING 读回校验和是否 ≠ "未拷"基线 —— CopyResource 返回 void、
+ *         失败静默 (2b 踩过), 所以必须自己读回证一次; 读回阻塞故节流 (前 3 次 + 每 600 次)。
+ *     逃生门同前: ssr.shared=0 即退回 v0.14.0 行为; ssr=0 则三槽全不挂。
  *   槽47 校验失败只降级该槽 (33/50 照常), 绝不挂 orig47 为空的槽 —— 否则 hookedCopyResource
  *     早退会把真调用丢掉, 游戏所有拷贝消失、渲染直接崩。
- *   帧汇总新增 COPY= (本帧 CopyResource 次数) 与 哨兵= (累计回写次数); 强特征对象行新增
- *   [585]/[321] 标注。
- *   状态: **未真机验证** —— 待本版跑图判读 (预期 [2a] 认出 324/520 各 1 行、COPY=3、
- *   ssr.sentinel=1 时 [2b] 哨兵按帧计数、反射区显示成旧场景色)。
+ *   帧汇总新增 COPY= (本帧 CopyResource 次数)、哨兵= (2b 累计回写) 与 入向= (2c 累计触发);
+ *   强特征对象行新增 [585]/[321] 标注。
+ *   状态: **2a/2b 已真机验收通过** (2026-10-04, `407c8b3`, 5520 帧, 11/11 全绿、0 [异常]、
+ *   PoC-B 0.88–0.98 ms/帧; 目视形态 = 水几乎消失, 见 docs/02 §14.11.1 与 docs/05 D2a-3)。
+ *   **2c 共享入向 (v0.15.0) 未真机验证** —— 待本版跑图判读。
  *   关键日志 (新增):
  *     SSR侦察: ctx vtable=… slot33 … ; slot50 … ; slot47(CopyResource) 原值=… 来自 …
  *     SSR侦察: ctx槽33/50/47 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.14.0 Step2 …)
@@ -328,6 +339,12 @@
  *     SSR侦察: 槽47Copy#K 帧=F dst=0x… … <- src=0x… …          ← 前24条 + 每64条
  *     SSR侦察: 特征B(换绑)#K 帧=F 新RT0=0x… … [2b哨兵已排队]
  *     SSR侦察: [2b] 哨兵#K 585=0x… <- 324=0x… 帧=F
+ *     SSR侦察: ini ssr.shared=1 → 2c 共享入向: 324/520 拷进 SHARED|NTHANDLE 镜像 …
+ *     SSR侦察: [2c] 色324 SHARED 镜像 OK = 0x… (1920x1080 RGBA16F) handle=0x… 源=0x…
+ *     SSR侦察: [2c] 深度520 SHARED 镜像 CreateTexture2D 失败 0x… ← R2 风险点
+ *     SSR侦察: [2c] 共享入向就绪 — 色324=OK 深度520=OK; 基线校验和(建好未拷) 色=0x… 深=0x…
+ *     SSR侦察: [2c] 入向拷贝#K 色324=0x…→0x… 深520=0x…→0x… [2c读回 色=0x…≠基线✓ …] 帧=F
+ *     SSR侦察: 特征B(换绑)#K … [2b哨兵已排队] [2c入向已排队]
  *
  * 构建: GitHub Actions (build.yml job "poc-presenter"), 本地不编译
  * 安装: poc-presenter.dll 放入 <游戏>/Data/SKSE/Plugins/
@@ -1010,6 +1027,31 @@ static long  g_ssrSentN = 0;           // 哨兵累计执行次数
 static bool  g_ssrSelfCopy = false;    // 2b 哨兵自己的 CopyResource 进行中 → 不计数不重复学习
 static std::atomic<bool> g_ssrSentinelOn{false}; // ini ssr.sentinel (2b 回写独立逃生门)
 
+// ---- Step 2c (v0.15.0, docs/05 D2a-a + 风险 R2): 共享入向 —— D3D11 侧 ----
+// 2 张 SHARED|NTHANDLE 纹理镜像游戏资源: 324 场景色 (1920x1080 RGBA16F) 与 520 深度
+// (1920x1080 D24 家族)。触发点与 2b 哨兵同位 (特征B → real() 后), 每次 CopyResource
+// 源→镜像各一下; CreateSharedHandle 各取一个 NT handle → 2c-β 由 VK 经
+// VK_KHR_external_memory_win32 (OPAQUE_WIN32) 导成 VkImage。
+// 验收重点 = R2: **D24 深度与 FP16 这两个 PoC-B 没验过的格式能否建出 SHARED、能否被
+// DXGI 允许共享、拷进去后能不能读回** —— 这正是 docs/05 写的"深度共享无先例"。
+// 门控: ini ssr.shared (默认 0) 且 ssr=1 是总门; **只往我方镜像写, 不动游戏资源, 不改画面**
+// (与 2b 哨兵的"改 585"性质完全不同, 所以单独给一道独立开关, D5 的逃生门思路一致)。
+static ID3D11Resource*  g_ssrDepthRes = nullptr; // 520 活引用 (2a 只学身份, 2c 补持一份)
+static ID3D11Texture2D* g_ssrInTexC = nullptr;   // 324 的 SHARED 镜像 (色)
+static ID3D11Texture2D* g_ssrInTexD = nullptr;   // 520 的 SHARED 镜像 (深度)
+static ID3D11Texture2D* g_ssrInStgC = nullptr;   // 色镜像的 STAGING 镜像 (读回自校验用)
+static ID3D11Texture2D* g_ssrInStgD = nullptr;   // 深度镜像的 STAGING 镜像
+static HANDLE g_ssrInHC = nullptr;               // 色镜像 NT handle (2c-β 交 VK 导入)
+static HANDLE g_ssrInHD = nullptr;               // 深度镜像 NT handle
+static std::atomic<bool> g_ssrSharedOn{false};   // ini ssr.shared
+static bool  g_ssrInPending = false;             // 特征B 已判 → real() 后执行入向拷贝
+static bool  g_ssrInBuilt = false;               // 两张镜像 + 暂存已建、句柄已取
+static bool  g_ssrInDepthFail = false;           // 深度镜像建不出 (R2 的一半答案)
+static long  g_ssrInN = 0;                       // 入向拷贝触发累计
+static long  g_ssrInLogN = 0;                    // 读回自校验节流 (前3次 + 每600次)
+static unsigned long long g_ssrInBaseC = 0;      // 建好但**未拷**时的色镜像校验和 (基线)
+static unsigned long long g_ssrInBaseD = 0;      // 同上, 深度
+
 static SsrCtxEntry* lookupSsrCtx(void** vtbl)
 {
 	if (!vtbl)
@@ -1176,12 +1218,19 @@ static void ssrReconOm(UINT n, ID3D11RenderTargetView* const* ppRTV, ID3D11Depth
 		    g_ssrMainHdr && g_ssrMainHdr != g_ssrReflRt &&
 		    g_ssrLastStr == g_ssrReflRt && g_ssrStrRes)
 			g_ssrSentinelPending = true;
+		// Step 2c 共享入向 (v0.15.0, docs/05 D2a-a): 与 2b **同一触发点** (特征B), 但开关独立。
+		// 只要求"双强特征格局已确立"(菜单期 g_ssrMainHdr == g_ssrReflRt ⇒ 不 arm, 同 D2a-3a),
+		// **不要求 lastStr == 585** —— 入向拷的是 324/520, 与 585 是谁无关, 段16 缺席帧照拷。
+		if (g_ssrSharedOn.load(std::memory_order_relaxed) && g_ssrReflRt &&
+		    g_ssrMainHdr && g_ssrMainHdr != g_ssrReflRt && g_ssrSceneRes)
+			g_ssrInPending = true;
 		const long k = ++g_ssrBLogN;
 		if (k <= 16 || (k % 64) == 0)
 			logLine("SSR侦察: 特征B(换绑)#" + std::to_string(k) + " 帧=" + std::to_string(fr) +
 			        " 新RT0=" + hexOf(robj) + " (" + std::to_string(rd.Width) + "x" +
 			        std::to_string(rd.Height) + " " + ssrFmtName(rd.Format) + ") 非空=" +
-			        std::to_string(nonNull) + (g_ssrSentinelPending ? " [2b哨兵已排队]" : ""));
+			        std::to_string(nonNull) + (g_ssrSentinelPending ? " [2b哨兵已排队]" : "") +
+			        (g_ssrInPending ? " [2c入向已排队]" : ""));
 	}
 
 	// 候选: 恰1个非空视图且 1920x1080 RGBA16F (段15 无 DS 也命中; 段7/17/18 是 MRT×2/×3
@@ -1323,10 +1372,14 @@ static void ssrReconCopy(ID3D11Resource* pDst, ID3D11Resource* pSrc)
 			g_ssrCopyFrame = fr;
 			if (g_ssrDepthObj != dobj)
 			{
+				if (g_ssrDepthRes)
+					g_ssrDepthRes->Release();
+				pDst->AddRef(); // 2c: 与 g_ssrSceneRes 同法持一份活引用 (源是 520)
+				g_ssrDepthRes = pDst;
 				g_ssrDepthObj = dobj;
 				logLine("SSR侦察: [2a] 深度快照 520(假设) = " + hexOf(dobj) + " (src=" +
 				        hexOf(sobj) + " " + ssrFmtName(sd.Format) +
-				        ") 本帧首条深度拷贝 帧=" + std::to_string(fr));
+				        ") 活引用已持 本帧首条深度拷贝 帧=" + std::to_string(fr));
 			}
 		}
 	}
@@ -1357,6 +1410,248 @@ static void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* ctx, ID3D1
 	if (!g_ssrSelfCopy && ssrWatch(e, ctx) && g_ssrOn.load(std::memory_order_relaxed))
 		ssrReconCopy(pDst, pSrc); // 2b 哨兵自己的拷贝跳过 —— 计数与学习都只认游戏的
 	real(ctx, pDst, pSrc);
+}
+
+// ---- Step 2c (v0.15.0): 十六进制/校验和小工具 ----
+static std::string uhex64(unsigned long long v)
+{
+	static const char* d = "0123456789ABCDEF";
+	std::string s(16, '0');
+	for (int i = 15; i >= 0; --i)
+	{
+		s[i] = d[v & 0xF];
+		v >>= 4;
+	}
+	return s;
+}
+
+// 把 STAGING 镜像读回算 FNV-1a 校验和 (只抽样 64 行 x 16 列, 不做全图读)。
+// **为什么必须自校验**: CopyResource 返回 void, desc 不一致时 D3D11 静默丢弃、日志照打
+// (2b 已踩过这坑, 见 [2b] 的 desc 预检) ⇒ "镜像建得出"不能证明"拷进去了", 必须读回看内容。
+// 基线 = 建镜像时(尚未拷过)的校验和; 之后读到的值与基线不同 = 拷贝真落地。
+// CPU 读回阻塞 (docs/05 约束 2 禁每帧读回) ⇒ 由调用方节流; 内部把 g_ssrSelfCopy 置位,
+// 免得自己这道暂存拷贝被槽47 钩计进 2a 的 COPY=/学习里。
+static unsigned long long ssrInFnv(ID3D11DeviceContext* ctx, ID3D11Texture2D* mir,
+                                   ID3D11Texture2D* stg, const char* nm, long* nz)
+{
+	if (nz)
+		*nz = 0;
+	if (!ctx || !mir || !stg)
+		return 0;
+	const bool prevSelf = g_ssrSelfCopy;
+	g_ssrSelfCopy = true;
+	ctx->CopyResource(stg, mir);
+	D3D11_MAPPED_SUBRESOURCE m{};
+	const HRESULT hr = ctx->Map(stg, 0, D3D11_MAP_READ, 0, &m);
+	if (FAILED(hr) || !m.pData)
+	{
+		g_ssrSelfCopy = prevSelf;
+		logLine("SSR侦察: [2c读回] " + std::string(nm) + " Map(STAGING) 失败 " + hexHr(hr));
+		return 0;
+	}
+	D3D11_TEXTURE2D_DESC md{};
+	mir->GetDesc(&md);
+	const int bpp = (md.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 8 : 4;
+	unsigned long long h = 14695981039346656037ULL; // FNV-1a offset basis (0xcbf29ce484222325)
+	long nzc = 0;
+	const int rows = 64;
+	const int cols = 16;
+	for (int r = 0; r < rows && r < (int)md.Height; ++r)
+	{
+		const unsigned char* row =
+		    static_cast<const unsigned char*>(m.pData) + (size_t)r * m.RowPitch;
+		for (int c = 0; c < cols; ++c)
+		{
+			const int x = (int)((long long)c * md.Width / cols);
+			const unsigned char* px = row + (size_t)x * bpp;
+			for (int b = 0; b < bpp; ++b)
+			{
+				h ^= px[b];
+				h *= 1099511628211ULL; // FNV prime
+				if (px[b])
+					++nzc;
+			}
+		}
+	}
+	ctx->Unmap(stg, 0);
+	g_ssrSelfCopy = prevSelf;
+	if (nz)
+		*nz = nzc;
+	return h;
+}
+
+// 建 1 张 SHARED|NTHANDLE 镜像 (desc 照抄源) 并取 NT handle。失败只降级、不抛。
+static bool ssrInMakeShared(ID3D11Device* dev, ID3D11Resource* src, ID3D11Texture2D** out,
+                            HANDLE* hOut, const char* nm)
+{
+	*out = nullptr;
+	*hOut = nullptr;
+	D3D11_TEXTURE2D_DESC sd{};
+	if (!ssrResObj(src, &sd, nullptr))
+	{
+		logLine("SSR侦察: [2c] " + std::string(nm) + " 镜像: 源 QI ID3D11Texture2D 失败 → 跳过");
+		return false;
+	}
+	if (sd.Usage != D3D11_USAGE_DEFAULT)
+	{
+		logLine("SSR侦察: [2c] " + std::string(nm) + " 镜像: 源 Usage 非 DEFAULT → 跳过");
+		return false;
+	}
+	D3D11_TEXTURE2D_DESC td = sd; // **全抄** (含 BindFlags) —— 满足 CopyResource 对 src/dst
+	                              // 一致性最严的解释, 少一个字段对不上就是静默丢弃
+	td.CPUAccessFlags = 0;
+	td.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+	HRESULT hr = dev->CreateTexture2D(&td, nullptr, out);
+	if (FAILED(hr) || !*out)
+	{
+		logLine("SSR侦察: [2c] " + std::string(nm) + " SHARED 镜像 CreateTexture2D 失败 " +
+		        hexHr(hr) + " (" + std::to_string(td.Width) + "x" + std::to_string(td.Height) +
+		        " " + ssrFmtName(td.Format) + " mips" + std::to_string(td.MipLevels) +
+		        " msaa" + std::to_string(td.SampleDesc.Count) + ") ← R2 风险点");
+		*out = nullptr;
+		return false;
+	}
+	IDXGIResource1* r1 = nullptr;
+	hr = (*out)->QueryInterface(__uuidof(IDXGIResource1), reinterpret_cast<void**>(&r1));
+	if (SUCCEEDED(hr) && r1)
+	{
+		hr = r1->CreateSharedHandle(nullptr,
+		                            DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+		                            nullptr, hOut);
+		r1->Release();
+	}
+	if (FAILED(hr) || !*hOut)
+	{
+		logLine("SSR侦察: [2c] " + std::string(nm) + " CreateSharedHandle 失败 " + hexHr(hr) +
+		        " (" + ssrFmtName(td.Format) + ") ← R2 风险点: D3D11 建得出但 DXGI 不让共享");
+		(*out)->Release();
+		*out = nullptr;
+		*hOut = nullptr;
+		return false;
+	}
+	logLine("SSR侦察: [2c] " + std::string(nm) + " SHARED 镜像 OK = " + hexOf(*out) + " (" +
+	        std::to_string(td.Width) + "x" + std::to_string(td.Height) + " " +
+	        ssrFmtName(td.Format) + ") handle=" + hexOf(*hOut) + " 源=" + hexOf(src));
+	return true;
+}
+
+// 首次触发时建两张镜像 + 各自 STAGING + 记"未拷"基线校验和。幂等。
+// 延迟到首次触发才建: 324/520 的身份要到进实机场景后才齐 (菜单期两值相等、不 arm)。
+static void ssrInBuild(ID3D11DeviceContext* ctx)
+{
+	if (g_ssrInBuilt || !g_ssrSceneRes || !g_ssrDepthRes)
+		return;
+	ID3D11Device* dev = nullptr;
+	ctx->GetDevice(&dev);
+	if (!dev)
+		return;
+	ID3D11Texture2D* tc = nullptr;
+	ID3D11Texture2D* td = nullptr;
+	HANDLE hc = nullptr;
+	HANDLE hd = nullptr;
+	if (!ssrInMakeShared(dev, g_ssrSceneRes, &tc, &hc, "色324"))
+	{
+		dev->Release();
+		return; // 色建不出 → 入向整段停用 (上面已打 R2 风险点日志)
+	}
+	if (!ssrInMakeShared(dev, g_ssrDepthRes, &td, &hd, "深度520"))
+	{
+		g_ssrInDepthFail = true; // R2 的一半答案: 深度不让共享 —— 色照跑, 不连坐
+		if (td)
+		{
+			td->Release();
+			td = nullptr;
+		}
+		if (hd)
+		{
+			CloseHandle(hd);
+			hd = nullptr;
+		}
+	}
+	auto mkStg = [&](ID3D11Texture2D* src, ID3D11Texture2D** out) {
+		*out = nullptr;
+		if (!src)
+			return;
+		D3D11_TEXTURE2D_DESC md{};
+		src->GetDesc(&md);
+		D3D11_TEXTURE2D_DESC sd = md;
+		sd.Usage = D3D11_USAGE_STAGING;
+		sd.BindFlags = 0;
+		sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		sd.MiscFlags = 0;
+		if (FAILED(dev->CreateTexture2D(&sd, nullptr, out)) || !*out)
+		{
+			*out = nullptr;
+			logLine("SSR侦察: [2c] STAGING 镜像 CreateTexture2D 失败 " +
+			        ssrFmtName(sd.Format) + " → 该项读回自校验不可用");
+		}
+	};
+	mkStg(tc, &g_ssrInStgC);
+	mkStg(td, &g_ssrInStgD);
+	dev->Release();
+	g_ssrInTexC = tc;
+	g_ssrInHC = hc;
+	g_ssrInTexD = td;
+	g_ssrInHD = hd;
+	long nz = 0;
+	g_ssrInBaseC = ssrInFnv(ctx, g_ssrInTexC, g_ssrInStgC, "色基线", &nz);
+	long nzd = 0;
+	g_ssrInBaseD = (g_ssrInTexD && g_ssrInStgD)
+	    ? ssrInFnv(ctx, g_ssrInTexD, g_ssrInStgD, "深基线", &nzd)
+	    : 0;
+	g_ssrInBuilt = true;
+	logLine("SSR侦察: [2c] 共享入向就绪 — 色324=OK 深度520=" +
+	        std::string(g_ssrInDepthFail ? "FAIL(R2 未过)" : "OK") +
+	        "; 基线校验和(建好未拷) 色=0x" + uhex64(g_ssrInBaseC) +
+	        " 深=0x" + uhex64(g_ssrInBaseD) +
+	        "; 自此每帧特征B 处 CopyResource(324/520 → SHARED 镜像)");
+}
+
+// 触发点: 与 2b 哨兵同位 (特征B → real() 后), 把 324/520 拷进各自 SHARED 镜像。
+static void ssrInQueue(ID3D11DeviceContext* ctx)
+{
+	if (!g_ssrSharedOn.load(std::memory_order_relaxed) || g_ssrSelfCopy || !ctx)
+		return;
+	if (!g_ssrInBuilt)
+	{
+		ssrInBuild(ctx);
+		if (!g_ssrInBuilt)
+			return;
+	}
+	g_ssrSelfCopy = true; // 自己的拷贝不回灌进 2a 的 COPY= 计数与身份学习 (与 2b 同法)
+	if (g_ssrSceneRes && g_ssrInTexC)
+		ctx->CopyResource(g_ssrInTexC, g_ssrSceneRes); // 324 → 色镜像
+	if (g_ssrDepthRes && g_ssrInTexD)
+		ctx->CopyResource(g_ssrInTexD, g_ssrDepthRes); // 520 → 深度镜像
+	g_ssrSelfCopy = false;
+	const long k = ++g_ssrInN;
+	const long c = ++g_ssrInLogN;
+	const bool logThis = (k <= 8) || (k % 128) == 0;
+	const bool chk = (c <= 3) || (c % 600) == 0; // 读回阻塞, 只做极少数次
+	if (!logThis && !chk)
+		return;
+	std::string s = "SSR侦察: [2c] 入向拷贝#" + std::to_string(k) + " 色324=" +
+	                hexOf(g_ssrSceneObj) + "→" + hexOf(g_ssrInTexC);
+	s += (g_ssrDepthRes && g_ssrInTexD ? " 深520=" + hexOf(g_ssrDepthObj) + "→" +
+	                                         hexOf(g_ssrInTexD)
+	                                   : " 深=跳过(R2 未过)");
+	if (chk)
+	{
+		long nz = 0;
+		const unsigned long long h = ssrInFnv(ctx, g_ssrInTexC, g_ssrInStgC, "色", &nz);
+		s += " [2c读回 色=0x" + uhex64(h) + (h != g_ssrInBaseC ? "≠基线✓" : "=基线✗") +
+		     " 非零" + std::to_string(nz);
+		if (g_ssrInTexD && g_ssrInStgD)
+		{
+			long nzd = 0;
+			const unsigned long long h2 = ssrInFnv(ctx, g_ssrInTexD, g_ssrInStgD, "深", &nzd);
+			s += " 深=0x" + uhex64(h2) + (h2 != g_ssrInBaseD ? "≠基线✓" : "=基线✗") +
+			     " 非零" + std::to_string(nzd);
+		}
+		s += "]";
+	}
+	s += " 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1);
+	logLine(s);
 }
 
 static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx, UINT n,
@@ -1415,6 +1710,16 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 				              : " [desc不一致! 585=" + (dok2 ? dsc(dd) : std::string("QI失败")) +
 				                    " 324=" + (sok2 ? dsc(sd) : std::string("QI失败")) + "]"));
 		}
+	}
+	// ---- Step 2c 共享入向 (v0.15.0): 与 2b 同一触发点, 独立开关 ----
+	// 放在 real() 之后的理由同 2b (此刻段17 已绑、585 已解绑) —— 入向拷贝不碰 585,
+	// 只往我方 SHARED 镜像写, 但沿用同一时机, 2c-β 的 VK 读回与 2d 的回写都在这条时间线上。
+	if (g_ssrInPending)
+	{
+		g_ssrInPending = false;
+		if (g_ssrSharedOn.load(std::memory_order_relaxed) &&
+		    g_ssrOn.load(std::memory_order_relaxed))
+			ssrInQueue(ctx);
 	}
 }
 
@@ -1559,6 +1864,7 @@ static void ssrReconPresent(uint64_t n)
 	const long copyN = g_ssrCopyN;
 	g_ssrCopyN = 0;
 	g_ssrSentinelPending = false; // 兜底: 上一帧没被 real() 消费掉的标记不带进新帧
+	g_ssrInPending = false;       // 同上 (2c 入向标记)
 	const bool act = fc > 0 || fs > 0 || fa > 0 || fb > 0;
 	// 真机判读 (2026-10-04, 4472 帧): 2571 条 [异常] 全部来自旧规则 "fs>2" —— fs 是"进入次数"
 	// 不是"唯一性", S4 只有单帧真值 fs=2, 真机主 HDR 有 2~3 次强特征进入 ⇒ fs=3~4 恒成立。
@@ -1572,7 +1878,8 @@ static void ssrReconPresent(uint64_t n)
 		                " 候选=" + std::to_string(fc) + " 强特征=" + std::to_string(fs) +
 		                " distinct=" + std::to_string(objN) + " 特征A=" + std::to_string(fa) +
 		                " 特征B=" + std::to_string(fb) + " COPY=" + std::to_string(copyN) +
-		                " 哨兵=" + std::to_string(g_ssrSentN) + " | 累计候选=" +
+		                " 哨兵=" + std::to_string(g_ssrSentN) +
+		                " 入向=" + std::to_string(g_ssrInN) + " | 累计候选=" +
 		                std::to_string(g_ssrCandN) + " 累计强特征=" + std::to_string(g_ssrStrTot);
 		if (anom)
 			s += " [异常]";
@@ -1613,6 +1920,17 @@ static void installProbeOn(ID3D11Device* dev)
 			        " 会显示成可辨识的旧场景色错误画面; 逃生门 ssr.sentinel=0)");
 		else if (g_ssrSentinelOn.load(std::memory_order_relaxed))
 			logLine("SSR侦察: ini ssr.sentinel=1 但 ssr=0 → 哨兵不生效 (ssr 是总门)");
+		// Step 2c 共享入向的独立开关 (v0.15.0) —— 默认 0 → 与 v0.14.0 的 2b 路径完全一致。
+		// 1 才建 SHARED|NTHANDLE 镜像并每帧拷一次; **只写我方镜像, 不动游戏资源、不改画面**
+		// (与 2b 的"改 585"性质不同, 所以另给一道门; 逃生门思路同 D5)。
+		g_ssrSharedOn.store(iniFlag("ssr.shared", false), std::memory_order_relaxed);
+		if (g_ssrSharedOn.load(std::memory_order_relaxed) &&
+		    g_ssrOn.load(std::memory_order_relaxed))
+			logLine("SSR侦察: ini ssr.shared=1 → 2c 共享入向: 324/520 拷进 SHARED|NTHANDLE "
+			        "镜像 + CreateSharedHandle (R2 验证; 只写镜像不改画面; 逃生门 "
+			        "ssr.shared=0)");
+		else if (g_ssrSharedOn.load(std::memory_order_relaxed))
+			logLine("SSR侦察: ini ssr.shared=1 但 ssr=0 → 入向不生效 (ssr 是总门)");
 	}
 	if (!g_probeOn.load(std::memory_order_relaxed))
 	{
@@ -4181,7 +4499,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.14.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel) ====");
+	logLine("==== poc-presenter v0.15.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
