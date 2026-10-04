@@ -1169,7 +1169,11 @@ static void ssrReconOm(UINT n, ID3D11RenderTargetView* const* ppRTV, ID3D11Depth
 		// 585" 才标记回写 —— 段16 缺席的窗口里第一个强特征是段19(321), 不等于 585 ⇒ 不标记,
 		// 避免写错缓冲。真正执行在 hookedOMSetRenderTargets 的 real() 之后 (那时段17 已绑,
 		// 585 恰好已解绑, CopyResource 写进去最安全)。
+		// 额外要求 g_ssrMainHdr 已学到且 != g_ssrReflRt —— 即"runs==1 与 runs>1 是两个不同
+		// 对象"的正常双强特征格局已确立。菜单/加载期只有一个强特征段, 只会设到其中一个变量,
+		// 该条件不成立 ⇒ 过渡期不会拿菜单对象当 585 去写。
 		if (g_ssrSentinelOn.load(std::memory_order_relaxed) && g_ssrReflRt &&
+		    g_ssrMainHdr && g_ssrMainHdr != g_ssrReflRt &&
 		    g_ssrLastStr == g_ssrReflRt && g_ssrStrRes)
 			g_ssrSentinelPending = true;
 		const long k = ++g_ssrBLogN;
@@ -1384,6 +1388,21 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 		if (g_ssrSentinelOn.load(std::memory_order_relaxed) && g_ssrSceneRes && g_ssrStrRes &&
 		    g_ssrStrResObj == g_ssrLastStr && g_ssrLastStr == g_ssrReflRt)
 		{
+			// CopyResource 返回 **void** —— src/dst 尺寸/格式/多重采样/片数不一致时不会给你
+			// HRESULT, 只会静默失败 (画面没变化, 但 [2b] 行照打) ⇒ 判读会误判成"哨兵没生效"。
+			// 所以先把两边 desc 比一遍并打进日志: [desc一致] 才算通路验通, 不一致行会直接给出
+			// 两个 desc 去定位差异 (最可能是 BindFlags/MSAA, D3D11 对 CopyResource 的匹配要求)。
+			D3D11_TEXTURE2D_DESC sd{}, dd{};
+			void* so = nullptr;
+			void* dso = nullptr;
+			const bool sok2 = ssrResObj(g_ssrSceneRes, &sd, &so);
+			const bool dok2 = ssrResObj(g_ssrStrRes, &dd, &dso);
+			auto dsc = [](const D3D11_TEXTURE2D_DESC& d) {
+				return std::to_string(d.Width) + "x" + std::to_string(d.Height) + " " +
+				       ssrFmtName(d.Format) + " mips" + std::to_string(d.MipLevels) +
+				       " msaa" + std::to_string(d.SampleDesc.Count);
+			};
+			const bool same = sok2 && dok2 && dsc(sd) == dsc(dd);
 			g_ssrSelfCopy = true;
 			ctx->CopyResource(g_ssrStrRes, g_ssrSceneRes); // dst=585 <- src=324
 			g_ssrSelfCopy = false;
@@ -1391,7 +1410,10 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 			if (k <= 8 || (k % 128) == 0)
 				logLine("SSR侦察: [2b] 哨兵#" + std::to_string(k) +
 				        " 585=" + hexOf(g_ssrStrResObj) + " <- 324=" + hexOf(g_ssrSceneObj) +
-				        " 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1));
+				        " 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1) +
+				        (same ? " [desc一致]"
+				              : " [desc不一致! 585=" + (dok2 ? dsc(dd) : std::string("QI失败")) +
+				                    " 324=" + (sok2 ? dsc(sd) : std::string("QI失败")) + "]"));
 		}
 	}
 }
