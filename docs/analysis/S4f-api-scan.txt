@@ -1,0 +1,253 @@
+# api-scan scene=S4f range=0-999999 filter=OMSetRenderTargets,CreateRenderTargetView,CreateDepthStencilView,CreateShaderResourceView,CreateTexture2D,ClearState,ClearRenderTargetView,ClearDepthStencilView,CopySubresourceRegion,UpdateSubresource,RSSetViewports
+# mapped_events=47403
+# matched=249
+# elapsed_sec=3.8
+ev1       ID3D11DeviceContext::ClearState  Context=res:ResourceId::50
+ev12      ID3D11DeviceContext::ClearRenderTargetView  Context=res:ResourceId::50 pRenderTargetView=res:ResourceId::545 ColorRGBA={0.19607843458652496,0.44117647409439087,0.5980392098426819,0.0}
+ev13      ID3D11DeviceContext::ClearDepthStencilView  Context=res:ResourceId::50 pDepthStencilView=res:ResourceId::553 ClearFlags=3(D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL) Depth=1.0 Stencil=0
+ev14      ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::545} pDepthStencilView=res:ResourceId::553
+ev17      ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1024.0,Height=1024.0,MinDepth=0.0,MaxDepth=1.0}}
+ev41      ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::545} pDepthStencilView=res:ResourceId::553
+ev44      ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1024.0,Height=1024.0,MinDepth=0.0,MaxDepth=1.0}}
+ev2277    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1024.0,Height=1024.0,MinDepth=0.0,MaxDepth=1.0}}
+ev2295    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1024.0,Height=1024.0,MinDepth=0.0,MaxDepth=1.0}}
+ev2397    ID3D11DeviceContext::ClearRenderTargetView  Context=res:ResourceId::50 pRenderTargetView=res:ResourceId::548 ColorRGBA={0.19607843458652496,0.44117647409439087,0.5980392098426819,0.0}
+ev2398    ID3D11DeviceContext::ClearDepthStencilView  Context=res:ResourceId::50 pDepthStencilView=res:ResourceId::553 ClearFlags=3(D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL) Depth=1.0 Stencil=0
+ev2399    ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::548} pDepthStencilView=res:ResourceId::553
+ev2402    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1024.0,Height=1024.0,MinDepth=0.0,MaxDepth=1.0}}
+ev2426    ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::548} pDepthStencilView=res:ResourceId::553
+ev2429    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1024.0,Height=1024.0,MinDepth=0.0,MaxDepth=1.0}}
+ev4496    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1024.0,Height=1024.0,MinDepth=0.0,MaxDepth=1.0}}
+ev4514    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1024.0,Height=1024.0,MinDepth=0.0,MaxDepth=1.0}}
+ev4636    ID3D11DeviceContext::ClearDepthStencilView  Context=res:ResourceId::50 pDepthStencilView=res:ResourceId::521 ClearFlags=1(D3D11_CLEAR_DEPTH) Depth=1.0 Stencil=0
+ev4637    ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::521
+ev4640    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=256.0,Height=256.0,MinDepth=0.0,MaxDepth=1.0}}
+ev4656    ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::521
+ev4659    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=256.0,Height=256.0,MinDepth=0.0,MaxDepth=1.0}}
+ev4858    ID3D11DeviceContext::ClearDepthStencilView  Context=res:ResourceId::50 pDepthStencilView=res:ResourceId::523 ClearFlags=1(D3D11_CLEAR_DEPTH) Depth=1.0 Stencil=0
+ev4859    ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::523
+ev4860    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=256.0,Height=256.0,MinDepth=0.0,MaxDepth=1.0}}
+ev4875    ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::523
+ev4876    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=256.0,Height=256.0,MinDepth=0.0,MaxDepth=1.0}}
+ev5680    ID3D11DeviceContext::ClearDepthStencilView  Context=res:ResourceId::50 pDepthStencilView=res:ResourceId::515 ClearFlags=1(D3D11_CLEAR_DEPTH) Depth=1.0 Stencil=0
+ev5681    ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::515
+ev5682    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=2048.0,Height=2048.0,MinDepth=0.0,MaxDepth=1.0}}
+ev5696    ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::515
+ev5698    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=2048.0,Height=2048.0,MinDepth=0.0,MaxDepth=1.0}}
+ev6418    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=2048.0,Height=2048.0,MinDepth=0.0,MaxDepth=0.999970018863678}}
+ev6431    ID3D11DeviceContext::ClearDepthStencilView  Context=res:ResourceId::50 pDepthStencilView=res:ResourceId::517 ClearFlags=1(D3D11_CLEAR_DEPTH) Depth=1.0 Stencil=0
+ev6432    ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::517
+ev6435    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=2048.0,Height=2048.0,MinDepth=0.0,MaxDepth=1.0}}
+ev6450    ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::517
+ev6453    ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=2048.0,Height=2048.0,MinDepth=0.0,MaxDepth=1.0}}
+ev12281   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=2048.0,Height=2048.0,MinDepth=0.0,MaxDepth=0.999970018863678}}
+ev12294   ID3D11DeviceContext::ClearDepthStencilView  Context=res:ResourceId::50 pDepthStencilView=res:ResourceId::535 ClearFlags=1(D3D11_CLEAR_DEPTH) Depth=1.0 Stencil=0
+ev12295   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::535
+ev12298   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=2048.0,Height=2048.0,MinDepth=0.0,MaxDepth=1.0}}
+ev12313   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::535
+ev12316   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=1587.47216796875,Width=460.52789306640625,Height=460.52789306640625,MinDepth=0.0,MaxDepth=1.0}}
+ev12482   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=1587.47216796875,Width=460.52789306640625,Height=460.52789306640625,MinDepth=0.0,MaxDepth=0.999970018863678}}
+ev12497   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::0
+ev12500   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=1587.47216796875,Width=460.52789306640625,Height=460.52789306640625,MinDepth=0.0,MaxDepth=1.0}}
+ev13253   ID3D11DeviceContext::ClearDepthStencilView  Context=res:ResourceId::50 pDepthStencilView=res:ResourceId::505 ClearFlags=3(D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL) Depth=1.0 Stencil=0
+ev13254   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::505
+ev13255   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.9999979734420776}}
+ev23648   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.9999979734420776}}
+ev23821   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.9999679923057556}}
+ev23847   ID3D11DeviceContext::ClearRenderTargetView  Context=res:ResourceId::50 pRenderTargetView=res:ResourceId::410 ColorRGBA={1.0,0.0,0.0,0.0}
+ev23848   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::410} pDepthStencilView=res:ResourceId::0
+ev23851   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.9999849796295166}}
+ev23866   ID3D11DeviceContext::ClearRenderTargetView  Context=res:ResourceId::50 pRenderTargetView=res:ResourceId::386 ColorRGBA={0.5,0.5,0.0,0.0}
+ev23867   ID3D11DeviceContext::ClearRenderTargetView  Context=res:ResourceId::50 pRenderTargetView=res:ResourceId::365 ColorRGBA={0.37908345460891724,0.5490174293518066,0.6633960604667664,1.0}
+ev23890   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::393,res:ResourceId::386} pDepthStencilView=res:ResourceId::505
+ev23893   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.9999979734420776}}
+ev40641   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev40662   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev40680   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev40812   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.9999719858169556}}
+ev41615   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.9999679923057556}}
+ev41754   ID3D11DeviceContext::ClearDepthStencilView  Context=res:ResourceId::50 pDepthStencilView=res:ResourceId::505 ClearFlags=2(D3D11_CLEAR_STENCIL) Depth=1.0 Stencil=0
+ev41765   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::386,res:ResourceId::393} pDepthStencilView=res:ResourceId::505
+ev41768   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.9999979734420776}}
+ev41783   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::386,res:ResourceId::393} pDepthStencilView=res:ResourceId::505
+ev41792   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::386,res:ResourceId::393} pDepthStencilView=res:ResourceId::505
+ev41803   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::386,res:ResourceId::393} pDepthStencilView=res:ResourceId::505
+ev41814   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::386,res:ResourceId::393} pDepthStencilView=res:ResourceId::505
+ev41824   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::386,res:ResourceId::393} pDepthStencilView=res:ResourceId::505
+ev41832   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::386,res:ResourceId::393} pDepthStencilView=res:ResourceId::505
+ev41840   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::386,res:ResourceId::393} pDepthStencilView=res:ResourceId::505
+ev41848   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::386,res:ResourceId::393} pDepthStencilView=res:ResourceId::505
+ev41856   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::386,res:ResourceId::393} pDepthStencilView=res:ResourceId::505
+ev41864   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::386,res:ResourceId::393} pDepthStencilView=res:ResourceId::505
+ev41872   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::386,res:ResourceId::393} pDepthStencilView=res:ResourceId::505
+ev41880   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::386,res:ResourceId::393} pDepthStencilView=res:ResourceId::505
+ev41884   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::386} pDepthStencilView=res:ResourceId::0
+ev41895   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::389} pDepthStencilView=res:ResourceId::0
+ev41898   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=960.0,Height=540.0,MinDepth=0.0,MaxDepth=0.9999979734420776}}
+ev41915   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::709} pDepthStencilView=res:ResourceId::0
+ev41918   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::709} pDepthStencilView=res:ResourceId::0
+ev41920   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=960.0,Height=540.0,MinDepth=0.0,MaxDepth=0.9999979734420776}}
+ev41934   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::0
+ev41937   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::0
+ev41939   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=0.0,Height=0.0,MinDepth=0.0,MaxDepth=0.9999979734420776}}
+ev41958   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::0
+ev41965   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::0
+ev41967   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev41976   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::471} pDepthStencilView=res:ResourceId::0
+ev41978   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev41988   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::471} pDepthStencilView=res:ResourceId::0
+ev42000   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::474} pDepthStencilView=res:ResourceId::0
+ev42002   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=960.0,Height=540.0,MinDepth=0.0,MaxDepth=1.0}}
+ev42020   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::477} pDepthStencilView=res:ResourceId::0
+ev42022   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=480.0,Height=270.0,MinDepth=0.0,MaxDepth=1.0}}
+ev42040   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::480} pDepthStencilView=res:ResourceId::0
+ev42042   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=240.0,Height=135.0,MinDepth=0.0,MaxDepth=1.0}}
+ev42060   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::483} pDepthStencilView=res:ResourceId::0
+ev42062   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=120.0,Height=67.0,MinDepth=0.0,MaxDepth=1.0}}
+ev42080   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::486} pDepthStencilView=res:ResourceId::0
+ev42082   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=60.0,Height=33.0,MinDepth=0.0,MaxDepth=1.0}}
+ev42101   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::489} pDepthStencilView=res:ResourceId::0
+ev42103   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=30.0,Height=16.0,MinDepth=0.0,MaxDepth=1.0}}
+ev42127   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::492} pDepthStencilView=res:ResourceId::0
+ev42129   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=15.0,Height=8.0,MinDepth=0.0,MaxDepth=1.0}}
+ev42147   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::495} pDepthStencilView=res:ResourceId::0
+ev42149   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=7.0,Height=4.0,MinDepth=0.0,MaxDepth=1.0}}
+ev42167   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::498} pDepthStencilView=res:ResourceId::0
+ev42169   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=3.0,Height=2.0,MinDepth=0.0,MaxDepth=1.0}}
+ev42187   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::501} pDepthStencilView=res:ResourceId::0
+ev42189   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1.0,Height=1.0,MinDepth=0.0,MaxDepth=1.0}}
+ev42207   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::460} pDepthStencilView=res:ResourceId::0
+ev42209   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev42237   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::464} pDepthStencilView=res:ResourceId::0
+ev42239   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev42257   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::452} pDepthStencilView=res:ResourceId::0
+ev42259   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev42284   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::365} pDepthStencilView=res:ResourceId::0
+ev42286   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev42308   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::365} pDepthStencilView=res:ResourceId::0
+ev42338   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::629} pDepthStencilView=res:ResourceId::505
+ev42341   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.9999979734420776}}
+ev42383   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::629} pDepthStencilView=res:ResourceId::505
+ev42386   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.9999979734420776}}
+ev42405   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::629} pDepthStencilView=res:ResourceId::505
+ev42420   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::629} pDepthStencilView=res:ResourceId::505
+ev42447   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::629} pDepthStencilView=res:ResourceId::505
+ev42450   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.9999979734420776}}
+ev42464   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::629} pDepthStencilView=res:ResourceId::505
+ev42476   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::629} pDepthStencilView=res:ResourceId::505
+ev42488   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::629} pDepthStencilView=res:ResourceId::505
+ev42500   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::629} pDepthStencilView=res:ResourceId::505
+ev42512   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::629} pDepthStencilView=res:ResourceId::505
+ev42524   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::629} pDepthStencilView=res:ResourceId::505
+ev42536   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::629} pDepthStencilView=res:ResourceId::505
+ev42548   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::629} pDepthStencilView=res:ResourceId::505
+ev42564   ID3D11DeviceContext::ClearRenderTargetView  Context=res:ResourceId::50 pRenderTargetView=res:ResourceId::632 ColorRGBA={0.0,0.0,0.0,0.0}
+ev42565   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::632} pDepthStencilView=res:ResourceId::506
+ev42568   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.9999979734420776}}
+ev42584   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::505
+ev42586   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.9999979734420776}}
+ev42599   ID3D11DeviceContext::ClearRenderTargetView  Context=res:ResourceId::50 pRenderTargetView=res:ResourceId::626 ColorRGBA={0.0,0.0,0.0,0.0}
+ev42600   ID3D11DeviceContext::ClearRenderTargetView  Context=res:ResourceId::50 pRenderTargetView=res:ResourceId::380 ColorRGBA={0.0,0.0,0.0,0.0}
+ev42601   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev42624   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev42626   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.9999979734420776}}
+ev45087   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev45108   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev45185   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev45206   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev45475   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev45496   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev45543   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev45564   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev45574   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev45595   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev45639   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev45660   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev45670   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev45691   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev45735   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev45756   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev45766   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev45787   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev45812   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev45833   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev45844   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev45865   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev45894   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev45923   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev45961   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev45974   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev45995   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev46024   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev46051   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev46806   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev46835   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev46858   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::506
+ev46869   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev46893   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=3 ppRenderTargetViews={res:ResourceId::365,res:ResourceId::626,res:ResourceId::380} pDepthStencilView=res:ResourceId::505
+ev46915   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::365} pDepthStencilView=res:ResourceId::505
+ev46918   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev46929   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::0
+ev46931   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev46941   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::444} pDepthStencilView=res:ResourceId::0
+ev46943   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev46966   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::0
+ev46968   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=0.0,Height=0.0,MinDepth=0.0,MaxDepth=1.0}}
+ev46984   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::0
+ev46999   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::365} pDepthStencilView=res:ResourceId::0
+ev47001   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev47018   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::576} pDepthStencilView=res:ResourceId::0
+ev47020   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=480.0,Height=270.0,MinDepth=0.0,MaxDepth=1.0}}
+ev47034   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::580} pDepthStencilView=res:ResourceId::0
+ev47036   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=120.0,Height=68.0,MinDepth=0.0,MaxDepth=1.0}}
+ev47049   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::584} pDepthStencilView=res:ResourceId::0
+ev47051   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=30.0,Height=17.0,MinDepth=0.0,MaxDepth=1.0}}
+ev47065   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::588} pDepthStencilView=res:ResourceId::0
+ev47067   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=8.0,Height=5.0,MinDepth=0.0,MaxDepth=1.0}}
+ev47080   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::592} pDepthStencilView=res:ResourceId::0
+ev47082   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=2.0,Height=2.0,MinDepth=0.0,MaxDepth=1.0}}
+ev47098   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::399} pDepthStencilView=res:ResourceId::0
+ev47100   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=480.0,Height=270.0,MinDepth=0.0,MaxDepth=1.0}}
+ev47119   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::407} pDepthStencilView=res:ResourceId::0
+ev47121   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=480.0,Height=270.0,MinDepth=0.0,MaxDepth=1.0}}
+ev47137   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::434} pDepthStencilView=res:ResourceId::0
+ev47139   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev47160   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::572} pDepthStencilView=res:ResourceId::0
+ev47162   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=480.0,Height=270.0,MinDepth=0.0,MaxDepth=1.0}}
+ev47171   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::0
+ev47173   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=0.0,Height=0.0,MinDepth=0.0,MaxDepth=1.0}}
+ev47187   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=0 ppRenderTargetViews={} pDepthStencilView=res:ResourceId::0
+ev47200   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::362} pDepthStencilView=res:ResourceId::0
+ev47202   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev47219   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=1 ppRenderTargetViews={res:ResourceId::362} pDepthStencilView=res:ResourceId::0
+ev47231   ID3D11DeviceContext::OMSetRenderTargets  Context=res:ResourceId::50 NumViews=2 ppRenderTargetViews={res:ResourceId::362,res:ResourceId::393} pDepthStencilView=res:ResourceId::505
+ev47234   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=1.0}}
+ev47236   ID3D11DeviceContext::RSSetViewports  Context=res:ResourceId::50 NumViewports=1 pViewports={{TopLeftX=0.0,TopLeftY=0.0,Width=1920.0,Height=1080.0,MinDepth=0.0,MaxDepth=0.0}}
+ev47249   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17721 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47250   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17720 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47260   ID3D11DeviceContext::ClearDepthStencilView  Context=res:ResourceId::50 pDepthStencilView=res:ResourceId::505 ClearFlags=2(D3D11_CLEAR_STENCIL) Depth=0.0 Stencil=0
+ev47265   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17721 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47266   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17720 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47278   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17721 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47279   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17720 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47289   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17721 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47290   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17720 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47297   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17721 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47298   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17720 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47308   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17721 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47309   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17720 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47323   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17721 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47324   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17720 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47338   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17721 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47339   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17720 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47351   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17721 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47352   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17720 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47366   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17721 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47367   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17720 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47374   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17721 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47375   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17720 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47382   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17721 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47383   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17720 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47390   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17721 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47391   ID3D11DeviceContext::UpdateSubresource  Context=res:ResourceId::50 pDstResource=res:ResourceId::17720 DstSubresource=0 pDstBox=null SrcRowPitch=0 SrcDepthPitch=0 pSrcData={} SourceDataLength=128
+ev47400   ID3D11DeviceContext::CopySubresourceRegion  Context=res:ResourceId::50 pDstResource=res:ResourceId::78 DstSubresource=0 DstX=16 DstY=16 DstZ=0 pSrcResource=res:ResourceId::17760 SrcSubresource=0 pSrcBox=null

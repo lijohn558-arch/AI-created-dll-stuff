@@ -1,0 +1,375 @@
+{
+ "rdc": "C:\\Users\\joker\\skyrim-vulkan\\captures\\S4f2.rdc",
+ "scene": "S4f2",
+ "full": "S4f2",
+ "errors": [],
+ "api_probe": {
+  "Subresource_doc": "\n\nSubresource()\nSubresource(other: Subresource)\nSubresource(mip: int = 0, slice: int = 0, sample: int = 0)\n\nSpecifies a subresource within a texture.\n\n",
+  "Subresource_inst_dir": [
+   "acquire",
+   "append",
+   "disown",
+   "mip",
+   "next",
+   "own",
+   "sample",
+   "slice",
+   "this",
+   "thisown"
+  ],
+  "ctrl_debug_api": [
+   "ContinueDebug",
+   "DebugMeshThread",
+   "DebugPixel",
+   "DebugThread",
+   "DebugVertex",
+   "GetDebugMessages",
+   "ReloadShaderDebugInformation"
+  ],
+  "GetDebugMessages_args": "()",
+  "debug_messages_n": 0,
+  "debug_messages": []
+ },
+ "candidates": [
+  {
+   "id": "ResourceId::544",
+   "w": 1024,
+   "h": 1024,
+   "arraySize": 6,
+   "mips": 1,
+   "type": "TextureType.TextureCubeArray",
+   "format": "R16G16B16A16_FLOAT"
+  }
+ ],
+ "fetch_notes": [
+  "ResourceId::544/6: mip0_sliceF_sample0 lens=[8388608, 8388608, 8388608, 8388608, 8388608, 8388608] expect=8388608 md5s=['2f1cd609c606', '72734e00e0fd', '2c39f06022b3', '4e46a3fbfe7c', '85fe0f41befc', '4ae8bce069d5'] diverse=True",
+  "ResourceId::544/6:   face0 head16=c23435385b39ca3bd2343e386239cc3b",
+  "ResourceId::544/6:   face1 head16=a430b430af2e003c9e30ae30a62e003c",
+  "ResourceId::544/6:   face2 head16=aa30ba30b72eff3bb030c130c12eff3b",
+  "ResourceId::544/6:   face3 head16=f5322f37d0388c3b06333c37d738a13b",
+  "ResourceId::544/6:   face4 head16=0c366d383f3903281936733845395628",
+  "ResourceId::544/6:   face5 head16=60307f305d2e00006e308b306d2e0000"
+ ],
+ "face_stats": [
+  {
+   "resource": "ResourceId::544",
+   "face": 0,
+   "w": 1024,
+   "h": 1024,
+   "order": "mip0_sliceF_sample0",
+   "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S4f2-cube-ResourceId544-face0.png",
+   "png_bytes": 1228694,
+   "raw_md5": "2f1cd609c6063be2673bc4d87617baad",
+   "half_min": [
+    11284,
+    11807,
+    11521
+   ],
+   "half_max": [
+    15595,
+    15698,
+    15795
+   ],
+   "mean_float": [
+    0.2411,
+    0.2809,
+    0.2773
+   ],
+   "uniq_rgb8_sampled": 135
+  },
+  {
+   "resource": "ResourceId::544",
+   "face": 1,
+   "w": 1024,
+   "h": 1024,
+   "order": "mip0_sliceF_sample0",
+   "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S4f2-cube-ResourceId544-face1.png",
+   "png_bytes": 1171849,
+   "raw_md5": "72734e00e0fd0b9b5d2bcd91fe1f503f",
+   "half_min": [
+    5534,
+    5534,
+    0
+   ],
+   "half_max": [
+    15469,
+    15565,
+    15652
+   ],
+   "mean_float": [
+    0.2587,
+    0.3011,
+    0.2881
+   ],
+   "uniq_rgb8_sampled": 128
+  },
+  {
+   "resource": "ResourceId::544",
+   "face": 2,
+   "w": 1024,
+   "h": 1024,
+   "order": "mip0_sliceF_sample0",
+   "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S4f2-cube-ResourceId544-face2.png",
+   "png_bytes": 848836,
+   "raw_md5": "2c39f06022b39f56b9f025cff98b3b26",
+   "half_min": [
+    0,
+    0,
+    0
+   ],
+   "half_max": [
+    15490,
+    15590,
+    15664
+   ],
+   "mean_float": [
+    0.2238,
+    0.2526,
+    0.2375
+   ],
+   "uniq_rgb8_sampled": 129
+  },
+  {
+   "resource": "ResourceId::544",
+   "face": 3,
+   "w": 1024,
+   "h": 1024,
+   "order": "mip0_sliceF_sample0",
+   "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S4f2-cube-ResourceId544-face3.png",
+   "png_bytes": 1089558,
+   "raw_md5": "4e46a3fbfe7c6226df9a638498529b04",
+   "half_min": [
+    11784,
+    12385,
+    11970
+   ],
+   "half_max": [
+    15626,
+    15726,
+    15819
+   ],
+   "mean_float": [
+    0.2281,
+    0.2715,
+    0.2698
+   ],
+   "uniq_rgb8_sampled": 122
+  },
+  {
+   "resource": "ResourceId::544",
+   "face": 4,
+   "w": 1024,
+   "h": 1024,
+   "order": "mip0_sliceF_sample0",
+   "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S4f2-cube-ResourceId544-face4.png",
+   "png_bytes": 434470,
+   "raw_md5": "85fe0f41befc76611c4658a12f2adf02",
+   "half_min": [
+    11937,
+    13461,
+    13995
+   ],
+   "half_max": [
+    14250,
+    14548,
+    14687
+   ],
+   "mean_float": [
+    0.1712,
+    0.2962,
+    0.3604
+   ],
+   "uniq_rgb8_sampled": 79
+  },
+  {
+   "resource": "ResourceId::544",
+   "face": 5,
+   "w": 1024,
+   "h": 1024,
+   "order": "mip0_sliceF_sample0",
+   "png": "C:\\Users\\joker\\skyrim-vulkan\\docs\\analysis\\S4f2-cube-ResourceId544-face5.png",
+   "png_bytes": 584148,
+   "raw_md5": "4ae8bce069d5c250c5899fca6247d14b",
+   "half_min": [
+    11678,
+    11661,
+    11268
+   ],
+   "half_max": [
+    14623,
+    14736,
+    14525
+   ],
+   "mean_float": [
+    0.2086,
+    0.2221,
+    0.1925
+   ],
+   "uniq_rgb8_sampled": 87
+  }
+ ],
+ "last_event": 45476,
+ "tex_samples": [
+  {
+   "id": "ResourceId::17646",
+   "w": 4096,
+   "h": 1,
+   "fmt": "R32_FLOAT",
+   "type": "TextureType.Texture1D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::17648",
+   "w": 4096,
+   "h": 1,
+   "fmt": "R32_FLOAT",
+   "type": "TextureType.Texture1D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::78",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R8G8B8A8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::364",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R16G16B16A16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::367",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R16G16B16A16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::369",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R8G8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::372",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R11G11B10_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::379",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R16G16B16A16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::382",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R8G8B8A8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::388",
+   "w": 960,
+   "h": 540,
+   "fmt": "R8G8B8A8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::392",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R16G16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::398",
+   "w": 480,
+   "h": 270,
+   "fmt": "R16G16B16A16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::402",
+   "w": 480,
+   "h": 270,
+   "fmt": "R8G8B8A8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::406",
+   "w": 480,
+   "h": 270,
+   "fmt": "R16G16B16A16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::409",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R8G8B8A8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::433",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R8G8B8A8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::439",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::443",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::447",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R16_FLOAT",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  },
+  {
+   "id": "ResourceId::451",
+   "w": 1920,
+   "h": 1080,
+   "fmt": "R8G8B8A8_UNORM",
+   "type": "TextureType.Texture2D",
+   "arraySize": 1
+  }
+ ],
+ "elapsed_sec": 20.1
+}

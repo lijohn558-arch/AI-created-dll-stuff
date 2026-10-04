@@ -1,0 +1,67 @@
+{
+  "rdc": "C:\\Users\\joker\\skyrim-vulkan\\captures\\S4f2.rdc",
+  "stride": 10,
+  "errors": [],
+  "dispatch_sampled": 10,
+  "cs_counts_sampled": {
+    "ResourceId::17650": 1,
+    "ResourceId::17651": 9
+  },
+  "cs_counts_extrapolated": {
+    "ResourceId::17650": 10,
+    "ResourceId::17651": 90
+  },
+  "cs_positions_sampled": {
+    "ResourceId::17650": [
+      10778
+    ],
+    "ResourceId::17651": [
+      10862,
+      10942,
+      11022,
+      11102,
+      11182,
+      11262,
+      11342,
+      11422,
+      11502
+    ]
+  },
+  "cs_dispatch_groups": {},
+  "cs_reflections": {
+    "ResourceId::17650": {
+      "key": "ResourceId::17650",
+      "note": "反射获取失败",
+      "dir": null
+    },
+    "ResourceId::17651": {
+      "key": "ResourceId::17651",
+      "note": "反射获取失败",
+      "dir": null
+    }
+  },
+  "draw_sampled": 378,
+  "output_formats": {
+    "R16G16B16A16_FLOAT": 202,
+    "R16G16_FLOAT": 122,
+    "R8G8B8A8_UNORM": 123,
+    "R32_FLOAT": 2,
+    "R8G8_UNORM": 25
+  },
+  "depth_formats": {
+    "D24S8_TYPELESS": 292,
+    "R16_TYPELESS": 82
+  },
+  "rt_combos": {
+    "D:D24S8_TYPELESS + R16G16B16A16_FLOAT": 31,
+    "D:R16_TYPELESS": 82,
+    "D:D24S8_TYPELESS": 114,
+    "D:D24S8_TYPELESS + R16G16B16A16_FLOAT + R16G16_FLOAT + R8G8B8A8_UNORM": 120,
+    "D:D24S8_TYPELESS + R16G16_FLOAT + R8G8B8A8_UNORM": 2,
+    "R32_FLOAT": 2,
+    "D:D24S8_TYPELESS + R16G16B16A16_FLOAT + R8G8_UNORM": 25,
+    "R16G16B16A16_FLOAT": 1,
+    "R8G8B8A8_UNORM": 1
+  },
+  "elapsed_sec": 5.5
+}
