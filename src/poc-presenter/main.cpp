@@ -1647,7 +1647,7 @@ static void installProbeOn(ID3D11Device* dev)
 	logLine("探针升质: 槽5 已挂 (512² cube+配对depth→1024² + 回写desc, 逃生门 probe=0 / vulkan=0)");
 	LeaveCriticalSection(&g_cs);
 	installCtxProbe(dev); // v0.12 plan-B: 同设备 immediate context 槽44/45 (自身幂等)
-	installSsrRecon(dev); // v0.13.0 Step1: SSR 侦察 ctx 槽33/50 (自身幂等, 门控 ssr=1)
+	installSsrRecon(dev); // v0.14.0 Step1/2a: SSR 侦察+身份 ctx 槽33/47/50 (幂等, 门控 ssr=1)
 }
 
 // 由 registerSwp (交换链一出现) / pocbInit (双保险) 调 —— 必须早于游戏创建探针
@@ -4181,7 +4181,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.13.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1 侦察拦 ctx槽33/50 只记日志) ====");
+	logLine("==== poc-presenter v0.14.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
