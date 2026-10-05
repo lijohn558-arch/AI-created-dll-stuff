@@ -352,6 +352,16 @@
  *     · 矩阵全失败 ⇒ 再建两张**探针纹理**做 2x2 归因: A=RGBA8@1920x1080 (只换格式)、
  *       B=RGBA16F@512x512 (只换尺寸), 各自导入一次后即销毁 —— 四种结果直接给出
  *       "病因是格式" 还是 "病因是尺寸", 两条改道方向完全不同。
+ *   **v0.16.2 = 帧时基线 (`frametime`)**:
+ *     · 谁要: ① 阶段2 / SSR Step4 的过闸判据"帧时不劣于基线 5%"一直**没有基线数**可比;
+ *       ② 后续 compute culling + indirect draw 要按帧预算调剔除力度与间接 draw 上限;
+ *       ③ `docs/00` §6.5 动态帧预算的数据源。
+ *     · CPU = Present-to-Present 帧间隔 (steady_clock, 每帧 1 样本); GPU = `D3D11_QUERY_TIMESTAMP`
+ *       + `TIMESTAMP_DISJOINT` 在 Present 处成对打点 (End(ts0) 开窗、下次 Present End(ts1) 收窗),
+ *       结果一律 `DONOTFLUSH` 非阻塞读, 没就绪就跳过本帧 —— 观测通路自己不能变成卡顿源;
+ *       同一时刻只允许一个 disjoint 活跃 ⇒ 三条全拿到才开下一窗, GPU 样本约帧数的一半。
+ *     · 每 600 帧出一行分布统计 (均值/中位/p95/最大 + >20ms 计数), 另有会话累计;
+ *       单帧 >=1s (读盘/切场景) 只计数不进分布。逃生门 `ini frametime=0` (默认 1)。
  *   关键日志 (新增):
  *     SSR侦察: ctx vtable=… slot33 … ; slot50 … ; slot47(CopyResource) 原值=… 来自 …
  *     SSR侦察: ctx槽33/50/47 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.16.0 Step2 …)
@@ -373,6 +383,9 @@
  *     SSR侦察: [2c-β] 归因探测A RGBA8@1920x1080(只换格式) 导入 OK/失败 … VK报size=…
  *     SSR侦察: [2c-β] 归因探测B RGBA16F@512x512(只换尺寸) 导入 OK/失败 … VK报size=…
  *     SSR侦察: [2c-β]   归因结论: 病因是格式/尺寸/组合 …   ← 2c-β 改道依据
+ *     帧时基线 CPU: 均值 16.62 中位 16.61 p95 17.05 最大 42.10 ms >20ms=3/600 | GPU: 均值 …
+ *         (样本 N) | 会话 CPU n=… 均值 … 最大 … / GPU n=… … | 丢弃>=1s …   ← 每 600 帧一行
+ *     帧时基线: GPU 时间戳查询就绪 (TIMESTAMP+DISJOINT) … / 创建失败 … -> 本局只记 CPU 侧
  *     SSR侦察: [2c-β] VK 导入 OK: 色镜像 NT handle → VkImage (OPAQUE_WIN32) 1920x1080 RGBA16F …
  *     SSR侦察: [2c-β] 交叉校验#K D3D11=0x… VK=0x… 一致则 **一致✓**、否则 **不一致✗** VK非零=… 本帧VK读回=…ms 帧=F
  *
@@ -385,6 +398,7 @@
 #include <d3d11.h>
 #include <dxgi1_4.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -1758,6 +1772,8 @@ static void ssrInQueue(ID3D11DeviceContext* ctx)
 	logLine(s);
 }
 
+static void ftNoteCtx(ID3D11DeviceContext* ctx); // 定义在下方"帧时基线"块 (它在本函数之后)
+
 static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx, UINT n,
                                                        ID3D11RenderTargetView* const* ppRTV,
                                                        ID3D11DepthStencilView* pDSV)
@@ -1772,6 +1788,11 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 	if (ssrWatch(e, ctx) && g_ssrOn.load(std::memory_order_relaxed))
 		ssrReconOm(n, ppRTV, pDSV);
 	real(ctx, n, ppRTV, pDSV);
+	// ---- 帧时基线 (v0.16.2): 顺手在这条每帧必经的 ctx 钩上拿到 immediate context ----
+	// 只认 e->imm == ctx (安装时记下的 immediate 指针), 延迟上下文不拿来建查询;
+	// PoC-B 开着时 notePresent 已经能拿到 ctx, 这里是它关掉时的兜底。
+	if (e && e->imm == ctx)
+		ftNoteCtx(ctx);
 	// ---- Step 2b 通路哨兵 (docs/05 §5 Step 2): 特征B(段16→段17) 判定后的回写 ----
 	// 放在 real() **之后**: 此刻段17 的 {321,591} 已绑上, 585 恰好已解绑 —— CopyResource
 	// 写一个非绑定资源最干净 (在 real() 之前写则 585 还是绑定中的 RT0)。段17 的 1 Draw
@@ -2307,10 +2328,176 @@ std::string swapDesc(IDXGISwapChain* sc)
 	return buf;
 }
 
+// ========== 帧时基线 (v0.16.2, docs/00 6.5 方案A / docs/05 R3) ==========
+// 谁要这份数据:
+//   1) 阶段2 与 SSR Step4 的过闸判据一直是"帧时不劣于基线 5%" (docs/00:96, docs/05:386),
+//      但基线数从来没实测过 —— 闸没有数可比;
+//   2) 后续 compute culling + indirect draw 要按帧预算调剔除力度/meshlet 阈值/间接 draw
+//      上限, 没有帧时分布就只能拍脑袋;
+//   3) 6.5 动态帧预算(超标帧压缩脚本预算)的数据源就是它。
+// 口径 (两条分开, 语义不同, 别混用):
+//   CPU = Present-to-Present 帧间隔 (steady_clock), 每帧 1 样本;
+//   GPU = D3D11 TIMESTAMP + TIMESTAMP_DISJOINT, 在 Present 处 End(ts0) 开窗、下一次 Present
+//         End(ts1) 收窗, 时间差 = 一帧的 GPU 提交跨度。查询结果一律 DONOTFLUSH 非阻塞读,
+//         没就绪就跳过本帧绝不等 —— 观测通路自己不能变成卡顿源。D3D11 规定同一时刻只能有
+//         一个 disjoint 活跃, 故三条(Disj/Ts0/Ts1)全拿到才开下一窗 => GPU 样本约帧数的一半。
+// 逃生门: ini frametime=0 (默认 1); 拿不到 immediate context (PoC-B/探针/ssr 全关) 只记 CPU。
+static double g_ftCpu[600];
+static int g_ftCpuN = 0;
+static double g_ftGpu[600];
+static int g_ftGpuN = 0;
+static uint64_t g_ftCpuAll = 0, g_ftGpuAll = 0;
+static double g_ftCpuSumAll = 0.0, g_ftGpuSumAll = 0.0;
+static double g_ftCpuMaxAll = 0.0, g_ftGpuMaxAll = 0.0;
+static uint64_t g_ftHitch = 0; // 单帧间隔 >= 1s (读盘/切场景), 不进分布只计数
+static std::chrono::steady_clock::time_point g_ftLast{};
+static bool g_ftHas = false;
+static bool g_ftOn = true;
+static bool g_ftIniRead = false;
+static ID3D11DeviceContext* g_ftCtx = nullptr; // 裸指针只作调用入口 (immediate context 与设备同寿)
+static ID3D11Query* g_ftDisj = nullptr;
+static ID3D11Query* g_ftTs0 = nullptr;
+static ID3D11Query* g_ftTs1 = nullptr;
+static bool g_ftQFail = false; // 建查询失败 => 本局只记 CPU
+static int g_ftState = 0;      // 0=没窗 1=ts0 已 End(开窗) 2=ts1 已 End(等三条就绪)
+
+// 对 a 就地排序后给均值/中位/95分位/最大值 (窗口 600 个, 每 600 帧一次, 忽略不计)
+static void ftStats(double* a, int n, double& mean, double& p50, double& p95, double& mx)
+{
+	mean = p50 = p95 = mx = 0.0;
+	if (n <= 0)
+		return;
+	std::sort(a, a + n);
+	double s = 0.0;
+	for (int i = 0; i < n; ++i)
+		s += a[i];
+	mean = s / n;
+	p50 = a[n / 2];
+	p95 = a[(n - 1) * 95 / 100];
+	mx = a[n - 1];
+}
+
+// 建三只查询, 幂等; 任一步失败 => g_ftQFail (日志只打一次)
+static void ftMakeQueries(ID3D11DeviceContext* ctx)
+{
+	if (g_ftQFail || g_ftDisj || !ctx)
+		return;
+	ID3D11Device* dev = nullptr;
+	ctx->GetDevice(&dev);
+	if (!dev)
+	{
+		g_ftQFail = true;
+		return;
+	}
+	HRESULT hr = dev->CreateQuery(D3D11_QUERY_TIMESTAMP_DISJOINT, nullptr, &g_ftDisj);
+	if (SUCCEEDED(hr))
+		hr = dev->CreateQuery(D3D11_QUERY_TIMESTAMP, nullptr, &g_ftTs0);
+	if (SUCCEEDED(hr))
+		hr = dev->CreateQuery(D3D11_QUERY_TIMESTAMP, nullptr, &g_ftTs1);
+	dev->Release();
+	if (FAILED(hr) || !g_ftDisj || !g_ftTs0 || !g_ftTs1)
+	{
+		g_ftQFail = true;
+		logLine("帧时基线: D3D11 时间戳查询创建失败 " + hexHr(hr) + " -> 本局只记 CPU 侧");
+		return;
+	}
+	g_ftCtx = ctx;
+	logLine("帧时基线: GPU 时间戳查询就绪 (TIMESTAMP+DISJOINT), 每帧打点, 结果非阻塞读");
+}
+
+// 每次 Present 调: 开窗 / 收窗 / 读结果, 全程非阻塞
+static void ftGpuPresent()
+{
+	if (!g_ftOn || g_ftQFail || !g_ftCtx)
+		return;
+	if (g_ftState == 0)
+	{
+		g_ftCtx->Begin(g_ftDisj);
+		g_ftCtx->End(g_ftTs0);
+		g_ftState = 1;
+		return;
+	}
+	if (g_ftState == 1)
+	{
+		g_ftCtx->End(g_ftTs1);
+		g_ftCtx->End(g_ftDisj);
+		g_ftState = 2;
+		return;
+	}
+	D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
+	UINT64 t0 = 0, t1 = 0;
+	const UINT fl = D3D11_ASYNC_GETDATA_DONOTFLUSH;
+	if (g_ftCtx->GetData(g_ftDisj, &dj, sizeof(dj), fl) != S_OK ||
+	    g_ftCtx->GetData(g_ftTs0, &t0, sizeof(t0), fl) != S_OK ||
+	    g_ftCtx->GetData(g_ftTs1, &t1, sizeof(t1), fl) != S_OK)
+		return; // GPU 还没跑到这里 -> 下帧再试, 绝不阻塞
+	if (!dj.Disjoint && dj.Frequency && t1 > t0)
+	{
+		const double ms = static_cast<double>(t1 - t0) * 1000.0 /
+		                  static_cast<double>(dj.Frequency);
+		if (ms > 0.0 && ms < 1000.0 && g_ftGpuN < 600)
+		{
+			g_ftGpu[g_ftGpuN++] = ms;
+			++g_ftGpuAll;
+			g_ftGpuSumAll += ms;
+			if (ms > g_ftGpuMaxAll)
+				g_ftGpuMaxAll = ms;
+		}
+	}
+	g_ftCtx->Begin(g_ftDisj);
+	g_ftCtx->End(g_ftTs0);
+	g_ftState = 1;
+}
+
+// 由 ctx 钩子回调: 只做"顺手拿 immediate context 建查询", 不碰任何渲染
+static void ftNoteCtx(ID3D11DeviceContext* ctx)
+{
+	if (g_ftOn && !g_ftQFail && !g_ftDisj)
+		ftMakeQueries(ctx);
+}
+
+static ID3D11DeviceContext* ftPocbCtx(); // 定义在 PocbCtx/g_pocb 之后 (本块在它们之前)
+
 void notePresent(const char* via, IDXGISwapChain* sc)
 {
 	const uint64_t n = g_presentCount.fetch_add(1) + 1;
 	ssrReconPresent(n); // v0.13.0 Step1: 帧末汇总 (ssr=0 时内部早退, 零开销)
+	// ---- 帧时基线 (v0.16.2): 每帧一次, 采样点就放在 Present 这里 ----
+	if (!g_ftIniRead)
+	{
+		g_ftIniRead = true;
+		g_ftOn = iniFlag("frametime", true);
+		if (!g_ftOn)
+			logLine("帧时基线: ini frametime=0 -> 不采样不出统计");
+	}
+	if (g_ftOn)
+	{
+		const auto now = std::chrono::steady_clock::now();
+		if (g_ftHas)
+		{
+			const double ms =
+			    std::chrono::duration<double, std::milli>(now - g_ftLast).count();
+			if (ms >= 1000.0)
+				++g_ftHitch; // 读盘/切场景的长间隔, 不是帧时 -> 只计数不进分布
+			else if (ms > 0.0 && g_ftCpuN < 600)
+			{
+				g_ftCpu[g_ftCpuN++] = ms;
+				++g_ftCpuAll;
+				g_ftCpuSumAll += ms;
+				if (ms > g_ftCpuMaxAll)
+					g_ftCpuMaxAll = ms;
+			}
+		}
+		g_ftLast = now;
+		g_ftHas = true;
+		ID3D11DeviceContext* fc = g_ftCtx;
+		if (!fc)
+			fc = ftPocbCtx(); // PoC-B 已 init 就有 immediate context (最常见路径)
+		if (fc && !g_ftQFail && !g_ftDisj)
+			ftMakeQueries(fc);
+		if (g_ftDisj)
+			ftGpuPresent();
+	}
 	if (n == 1)
 	{
 		g_lastLog = std::chrono::steady_clock::now();
@@ -2328,6 +2515,40 @@ void notePresent(const char* via, IDXGISwapChain* sc)
 		std::snprintf(buf, sizeof(buf), "Present 计数 %llu  近600帧 %.1f FPS",
 		    static_cast<unsigned long long>(n), fps);
 		logLine(buf);
+		// ---- 帧时基线 (v0.16.2): 与上面那行同频出分布统计, 两行分开免得破既有匹配 ----
+		if (g_ftOn && (g_ftCpuN > 0 || g_ftGpuN > 0))
+		{
+			int over = 0;
+			for (int i = 0; i < g_ftCpuN; ++i)
+				if (g_ftCpu[i] > 20.0)
+					++over; // 必须在排序前数 (ftStats 会就地排序)
+			double cMean = 0, cP50 = 0, cP95 = 0, cMax = 0;
+			double gMean = 0, gP50 = 0, gP95 = 0, gMax = 0;
+			const int cN = g_ftCpuN, gN = g_ftGpuN;
+			ftStats(g_ftCpu, cN, cMean, cP50, cP95, cMax);
+			ftStats(g_ftGpu, gN, gMean, gP50, gP95, gMax);
+			g_ftCpuN = 0;
+			g_ftGpuN = 0;
+			char gpu[200];
+			if (gN > 0)
+				std::snprintf(gpu, sizeof(gpu),
+				              "GPU: 均值 %.2f 中位 %.2f p95 %.2f 最大 %.2f ms (样本 %d)",
+				              gMean, gP50, gP95, gMax, gN);
+			else
+				std::snprintf(gpu, sizeof(gpu), "GPU: 无样本 (ctx 没拿到或查询未就绪)");
+			char buf2[512];
+			std::snprintf(buf2, sizeof(buf2),
+			              "帧时基线 CPU: 均值 %.2f 中位 %.2f p95 %.2f 最大 %.2f ms >20ms=%d/%d"
+			              " | %s | 会话 CPU n=%llu 均值 %.2f 最大 %.2f / GPU n=%llu 均值 %.2f"
+			              " 最大 %.2f | 丢弃>=1s %llu",
+			              cMean, cP50, cP95, cMax, over, cN, gpu,
+			              static_cast<unsigned long long>(g_ftCpuAll),
+			              g_ftCpuAll ? g_ftCpuSumAll / static_cast<double>(g_ftCpuAll) : 0.0,
+			              g_ftCpuMaxAll, static_cast<unsigned long long>(g_ftGpuAll),
+			              g_ftGpuAll ? g_ftGpuSumAll / static_cast<double>(g_ftGpuAll) : 0.0,
+			              g_ftGpuMaxAll, static_cast<unsigned long long>(g_ftHitch));
+			logLine(buf2);
+		}
 		g_lastLog = now;
 		g_lastLogCount = n;
 	}
@@ -2721,6 +2942,13 @@ struct PocbCtx
 	double   accGateMs = 0.0;  // event 闸等待累计 (共享路径专有)
 };
 static PocbCtx g_pocb;
+
+// 帧时基线 (v0.16.2) 借 PoC-B 的 immediate context —— 定义必须在 g_pocb 之后,
+// 因为 notePresent 在文件更靠前的位置只能拿到前向声明。
+static ID3D11DeviceContext* ftPocbCtx()
+{
+	return (g_pocb.state.load(std::memory_order_relaxed) == 2) ? g_pocb.ctx : nullptr;
+}
 
 static std::string pocbCode(long v)
 {
@@ -5083,7 +5311,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.16.1 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针) ====");
+	logLine("==== poc-presenter v0.16.2 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

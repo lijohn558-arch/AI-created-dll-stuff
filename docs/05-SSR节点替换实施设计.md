@@ -383,7 +383,7 @@ descriptor/sampler **推迟到 2d**，理由见 D2a-4）；**2c-β** VK `OPAQUE_
 `vkCmdCopyImageToBuffer`/`vkMapMemory` 交叉校验（两函数已在 `POCB_DEV_FNS`，**零新增 VK API**）；
 **2d** SSR v0 passthrough 经 VK 回写 585 | **2a** 日志：`[2a]` 认出 324/520 各 1 行 ✓、`COPY=` 每帧=3 ✓、`[585]`/`[321]` 标注落在 runs==1 / runs>1 的对象上 ✓；**2b** 目视：**水几乎消失**（`324`=段16 前快照不含水 → 段17 读到"没画水的场景"）；`[desc一致]=42/[desc不一致!]=0`，写目标恒 = `[585]` 的 runs==1 对象；**硬约束 5「必须 in-frame 拦截」验通**；锚点 declared-diff 提案先行 | R2 深度格式/导入 |
 | **3 SSR v1** | D4 shader + D3a 覆盖式回写 + 事件闸同步 | 游戏内水面反射呈屏幕空间内容（人工截图对照——观感无自动判据） | R4 相机矩阵来源 |
-| **4 过闸** | 套 `docs/02` §14.6 模板：抓 S5/S4 双帧 → declared-diff 闸（A 全绿 + F 必现 + B 归因）→ 帧时不劣于基线 5%（`docs/00:93`，1660Ti 1080p，S4/S5 各测） | compare JSON + 帧时数据 + 判读入档 | R3 帧时 |
+| **4 过闸** | 套 `docs/02` §14.6 模板：抓 S5/S4 双帧 → declared-diff 闸（A 全绿 + F 必现 + B 归因）→ 帧时不劣于基线 5%（`docs/00:93`，1660Ti 1080p，S4/S5 各测；**基线数取 `v0.16.2` 的 `帧时基线` 行，采法见 `docs/02` §14.14**） | compare JSON + 帧时数据 + 判读入档 | R3 帧时 |
 | **5 收口** | 默认 `ssr=1`、docs/00 §1.1 与 docs/03 §7.1 回填、诚实边界新增 | commit + CI | — |
 
 **declared-diff 预案（Step 4 闸门用，按 `docs/02:509` 先声明）**：
