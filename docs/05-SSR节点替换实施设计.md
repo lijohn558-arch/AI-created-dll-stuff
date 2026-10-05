@@ -392,7 +392,7 @@ vs "源带 `BIND_DEPTH_STENCIL`"；判读与实跑表见 `docs/02` §14.12.1（�
   descriptor/sampler 接 `POCB_DEV_FNS`、**深度改道**（D24 不能 SHARED ⇒ VK 自建 `VK_FORMAT_D24_SFLOAT`
   图 + `vkCmdCopyImage`，对应 R2 风险点 `CreateTexture2D 失败 0x80070057`）、帧时基线重采进 R3。
 
-**✅ 方向 A 第一步（B 步）落地：renderer 模块已拆出（2026-10-05，`v0.17.0`，见 `docs/00` §1.1.1）**：
+**✅ 方向 A 第一步（B 步）落地：renderer 模块已拆出（2026-10-05，`883fa4f` = `v0.17.0`，CI SUCCESS，见 `docs/00` §1.1.1）**：
 - 新增 `src/poc-presenter/vkrenderer.h` + `vkrenderer.cpp`；`build.yml` 改为同编 `main.cpp` + `vkrenderer.cpp`
   链成同一个 `poc-presenter.dll`；`check1.ps1` 相应改为扫三个文件（分文件花括号/注释平衡 + 拆分完整性）。
 - **搬入 renderer**：PoC-B 的 `POCB_*` 宏 / `PocbFns` / `PocbCtx` / `g_pocb` 与全部实现
