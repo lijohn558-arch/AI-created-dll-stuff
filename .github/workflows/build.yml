@@ -75,7 +75,7 @@ jobs:
             echo ::error::Vulkan-Headers 未就位, 缺 third_party\Vulkan-Headers\include\vulkan\vulkan.h
             exit /b 1
           )
-          cl /nologo /std:c++17 /utf-8 /EHsc /O2 /MD /LD /I third_party\Vulkan-Headers\include src\poc-presenter\main.cpp /Fe:poc-presenter.dll user32.lib > cl_poc.log 2>&1
+          cl /nologo /std:c++17 /utf-8 /EHsc /O2 /MD /LD /I third_party\Vulkan-Headers\include src\poc-presenter\main.cpp src\poc-presenter\vkrenderer.cpp /Fe:poc-presenter.dll user32.lib > cl_poc.log 2>&1
           set CLRC=%ERRORLEVEL%
           type cl_poc.log
           powershell -NoProfile -Command "Get-Content cl_poc.log | ForEach-Object { if ($_ -like '*error*') { Write-Output ('::error::' + $_) } }"

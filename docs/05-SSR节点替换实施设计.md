@@ -390,8 +390,19 @@ vs "源带 `BIND_DEPTH_STENCIL`"；判读与实跑表见 `docs/02` §14.12.1（�
   **入向通路（D3D11 写 → VK 读）正式验通，R2 的"入向"半边关闭**。
 - **转入 2d**（R2 剩余项，全部见 D2a-4/D3）：出向回写（`ssr.sentinel=1` 通路 + 共享出向拷贝）、
   descriptor/sampler 接 `POCB_DEV_FNS`、**深度改道**（D24 不能 SHARED ⇒ VK 自建 `VK_FORMAT_D24_SFLOAT`
-  图 + `vkCmdCopyImage`，对应 R2 风险点 `CreateTexture2D 失败 0x80070057`）、帧时基线重采进 R3；
-  并按方向 A（`docs/00` §1.1.1）把 `main.cpp` 拆出 **vk renderer 模块**，2d 的东西都写进它。
+  图 + `vkCmdCopyImage`，对应 R2 风险点 `CreateTexture2D 失败 0x80070057`）、帧时基线重采进 R3。
+
+**✅ 方向 A 第一步（B 步）落地：renderer 模块已拆出（2026-10-05，`v0.17.0`，见 `docs/00` §1.1.1）**：
+- 新增 `src/poc-presenter/vkrenderer.h` + `vkrenderer.cpp`；`build.yml` 改为同编 `main.cpp` + `vkrenderer.cpp`
+  链成同一个 `poc-presenter.dll`；`check1.ps1` 相应改为扫三个文件（分文件花括号/注释平衡 + 拆分完整性）。
+- **搬入 renderer**：PoC-B 的 `POCB_*` 宏 / `PocbFns` / `PocbCtx` / `g_pocb` 与全部实现
+  （`pocbCode` / `pocbFail` / `pocbEnabled` / `pocbInit` / `pocbInject`），以及 2c-β 的 `g_ssrVk*` 状态、
+  候选槽表 + `ssrInVkBuild` / `ssrVkFree` / `ssrInVkFrame`。
+- **留在 main**：Present/vtable 钩面、D3D11 interop（共享镜像 / NT handle / 哈希）、日志/ini、`ftPocbCtx`、`pocbFrame`。
+- 反向依赖（**过渡态**）：main 的匿名 namespace → `namespace pocmain`（文件末尾 `using namespace pocmain;`），
+  renderer 经 `vkrenderer.h` 声明取用 10 个函数 + 9 个全局；**2d 收敛成"入参结构体"后整段删除**。
+- **纯搬迁、行为不变** ⇒ v0.17.0 回归判据（与 2c 收口同）：2000+ 帧 `一致 ≥4 且不一致 = 0`、
+  `PoC-B 失败行 = 0`、`code=-4 = 0`、`[异常] = 0`、PoC-B ≈1ms 不劣化。
 
 ### D3 输出回写与段16 的 16 个 Draw（两个子方案）
 
