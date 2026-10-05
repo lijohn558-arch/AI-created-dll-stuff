@@ -63,7 +63,11 @@
 	X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) \
 	X(vkCmdBindPipeline) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw) X(vkCmdCopyImageToBuffer) \
 	X(vkCmdCopyImage) X(vkCmdPipelineBarrier) \
-	X(vkCreateFence) X(vkDestroyFence) X(vkResetFences) X(vkWaitForFences) X(vkQueueSubmit)
+	X(vkCreateFence) X(vkDestroyFence) X(vkResetFences) X(vkWaitForFences) X(vkQueueSubmit) \
+	X(vkCreateSampler) X(vkDestroySampler) \
+	X(vkCreateDescriptorSetLayout) X(vkDestroyDescriptorSetLayout) \
+	X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) \
+	X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets)
 
 #define POCB_DECL_FN(n) PFN_##n n = nullptr;
 
@@ -131,12 +135,15 @@ void  pocbInject(PocbCtx& c, IDXGISwapChain* sc);    // 每帧: 提交+fence+写
 bool  ssrInVkBuild(PocbCtx& c, int slot);            // 2c-β: 建图+导入+初转 (失败只关自己)
 void  ssrVkFree(PocbCtx& c);                         // 2c-β: 换槽时 vkDeviceWaitIdle+destroy
 void  ssrInVkFrame(PocbCtx& c);                      // 2c-β: 到点读回比对 (节流 前3次+每600次)
+void  ssrOutVkBuild(PocbCtx& c);                     // 2d-1: 出向图建图+导入+录命令 (失败只关自己)
+void  ssrOutVkFrame(PocbCtx& c);                     // 2d-1: 每帧 入向图→出向图 拷贝 + fence
 
 // ---- renderer 依赖 hook 面的符号 (v0.17.0 过渡态, 2d 收敛成参数后删除) ----
 namespace pocmain
 {
 	void logLine(const std::string& msg);
 	std::string pluginDir();                          // ...\Data\SKSE\Plugins
+	std::string hexOf(const void* p);                 // "0x00000130…" (2d 出向日志用)
 	std::string hexHr(long hr);
 	std::string lowerCopy(std::string s);
 	bool  iniFlag(const char* key, bool def);
@@ -158,4 +165,10 @@ namespace pocmain
 	extern bool                    g_ssrInChkCValid;
 	extern unsigned long long      g_ssrInChkCPrev;   // 上一帧 (差一帧归因)
 	extern size_t                  g_ssrInChkPitch;   // D3D11 STAGING 实际 RowPitch (行距归因)
+	// ---- 2d-1 出向回写 (v0.18.0) ----
+	extern std::atomic<bool>       g_ssrVkOutOn;      // ini ssr.vkout (2d 出向独立逃生门)
+	extern ID3D11Texture2D*        g_ssrOutTexC;      // 出向 SHARED 镜像 (desc 照抄 324 ≡ 585)
+	extern HANDLE                  g_ssrOutHC;        // 出向镜像 NT handle (VK 导入源)
+	extern bool                    g_ssrOutReady;     // VK 已把结果填进出向镜像
+	extern long                    g_ssrOutN;         // 已回写 585 的累计次数
 }

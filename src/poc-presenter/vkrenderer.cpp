@@ -81,6 +81,19 @@ static int   g_ssrVkMakeFail = 0;  // 连续建图失败数 (全槽都建不出�
 static bool  g_ssrVkLogFirst = false; // "VK 导入 OK" 那行只打一次 (β2 判据要恰好 1 行)
 static unsigned g_ssrVkW = 0, g_ssrVkH = 0;             // 镜像尺寸 (buffer 宽度用)
 
+// ---- 2d-1 出向回写 (v0.18.0) —— VK 渲完的结果落到第 3 张 SHARED 纹理, 供 D3D11 拷进 585 ----
+// 时序: 入向镜像在**本帧特征B** 被 D3D11 拷 (324→镜像); 本函数在**本帧 Present** 读它并写进出向镜像;
+//       **下一帧特征B** D3D11 再把出向镜像拷进 585 ⇒ 跨 API 不做任何 GPU 栅栏, 全靠
+//       "上一帧已填、本帧才读" 的 1 帧延迟 + CPU fence (vkWaitForFences 在 Readback 已证明可用)。
+// 约束: 出向图绑的是**另一块** NT handle 的内存, 与 g_ssrVkImg 各自独立 —— 不会重演 v0.16.4
+//       "两张 VkImage 同时绑同一块内存" 那个 DEVICE_LOST。
+static VkImage        g_ssrVkImgOut = VK_NULL_HANDLE;
+static VkDeviceMemory g_ssrVkMemOut = VK_NULL_HANDLE;
+static VkCommandBuffer g_ssrVkCmdOut = VK_NULL_HANDLE; // 录一次永久复用 (ONE_TIME 提交完可重录)
+static VkImage        g_ssrVkCmdOutSrc = VK_NULL_HANDLE; // 录制时的入向图 handle (变了才重录)
+static int   g_ssrVkOutState = 0;   // 0=未建 1=OK 2=失败禁用 (只关自己, 不连坐入向)
+static long  g_ssrVkOutN = 0;       // 出向提交次数
+
 // ---------- 原 main.cpp: PoC-B 实现 (pocbCode/pocbFail/pocbEnabled/pocbInit/2c-β/pocbInject) ----------
 static std::string pocbCode(long v)
 {
@@ -1446,6 +1459,22 @@ void ssrVkFree(PocbCtx& c)
 		c.fns.vkFreeMemory(c.vdev, g_ssrVkMem, nullptr);
 		g_ssrVkMem = VK_NULL_HANDLE;
 	}
+	// 2d-1: 入向图没了 ⇒ 出向图绑定的 handle 也一并作废, 录制时记的 src handle 清掉,
+	// 下一帧 ssrOutVkFrame 会走 g_ssrVkCmdOutSrc != g_ssrVkImg 重新建+重录。
+	// (POCB_DEV_FNS 没有 vkFreeCommandBuffers ⇒ 命令 buffer 本身留着重录复用。)
+	if (g_ssrVkImgOut)
+	{
+		c.fns.vkDeviceWaitIdle(c.vdev);
+		c.fns.vkDestroyImage(c.vdev, g_ssrVkImgOut, nullptr);
+		g_ssrVkImgOut = VK_NULL_HANDLE;
+	}
+	if (g_ssrVkMemOut)
+	{
+		c.fns.vkFreeMemory(c.vdev, g_ssrVkMemOut, nullptr);
+		g_ssrVkMemOut = VK_NULL_HANDLE;
+	}
+	g_ssrVkCmdOutSrc = VK_NULL_HANDLE;
+	g_ssrVkOutState = 0;
 }
 
 // 每帧收尾时调用 (只在 D3D11 侧做过读回的那几帧真正干活, 节奏 = 前3次+每600次)。
@@ -1538,6 +1567,310 @@ void ssrInVkFrame(PocbCtx& c)
 		ssrVkFree(c);
 		g_ssrVkSlotIdx = (slot + 1) % g_ssrVkNSlot;
 	}
+}
+
+// ===========================================================================
+// 2d-1 出向回写 (v0.18.0) —— VK 渲完 → 第 3 张 SHARED 纹理 → D3D11 CopyResource(585)
+// ---------------------------------------------------------------------------
+// 时序刻意做成 **1 帧延迟**, 免掉"在 D3D11 钩子里等 VK GPU"和"在 VK 里等 D3D11 GPU"
+// 这两种跨 API 栅栏 (前者会拖住 D3D11 队列, 后者 D3D11 根本没有 VK 能等的 fence):
+//   本帧特征B   : D3D11 CopyResource(324 → 入向镜像)        [2c, 已有]
+//   本帧 Present: VK 读入向镜像 → SSR(v0 passthrough) → 写出向镜像, CPU fence 等完
+//   下帧特征B   : D3D11 CopyResource(出向镜像 → 585)         [2d, 本函数的对端]
+// 代价 = 反射内容比画面晚 1 帧 (16ms); 收益 = 零跨 API GPU 同步、零每帧阻塞点。
+// v0 passthrough 下 585 拿到的就是 324 内容 (与 2b 哨兵同观感), 验的是通路不是画质。
+void ssrOutVkBuild(PocbCtx& c)
+{
+	if (g_ssrVkOutState == 2)
+		return;
+	if (c.state.load() != 2 || !c.vdev || !c.queue || !c.pool || !c.fence)
+		return; // PoC-B 还没就绪, 下一帧再试
+	if (!g_ssrVkOutOn.load(std::memory_order_relaxed) ||
+	    !g_ssrSharedOn.load(std::memory_order_relaxed))
+		return;
+	if (!g_ssrOutTexC || !g_ssrOutHC)
+		return; // D3D11 侧出向镜像还没建, 下一帧再试
+	if (g_ssrVkImg == VK_NULL_HANDLE)
+		return; // 入向图还没建 (出向命令要录它) —— 先让 2c-β 把入向建起来
+	D3D11_TEXTURE2D_DESC od{};
+	g_ssrOutTexC->GetDesc(&od);
+	if (od.Format != DXGI_FORMAT_R16G16B16A16_FLOAT)
+	{
+		logLine("SSR侦察: [2d] 出向镜像格式非 RGBA16F (" + ssrFmtName(od.Format) +
+		        ") → 出向回写停用 (入向 2c 不受影响)");
+		g_ssrVkOutState = 2;
+		return;
+	}
+	auto failOut = [](const std::string& why) {
+		logLine("SSR侦察: [2d] " + why + " → 出向回写停用 (入向 2c 照常)");
+		g_ssrVkOutState = 2;
+		return false;
+	};
+
+	// --- 1) 出向 VkImage: usage = TRANSFER_DST, handle 类型沿用已验通的 D3D11_TEXTURE_BIT ---
+	VkExternalMemoryImageCreateInfo emi{};
+	emi.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+	emi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+	VkImageCreateInfo ici{};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.pNext = &emi;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_R16G16B16A16_SFLOAT; // DXGI R16G16B16A16_FLOAT, 字节序一致
+	ici.extent = VkExtent3D{od.Width, od.Height, 1};
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT; // 只作拷贝目的地 (入向图才是 SRC)
+	ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VkResult vr = c.fns.vkCreateImage(c.vdev, &ici, nullptr, &g_ssrVkImgOut);
+	if (vr != VK_SUCCESS)
+	{
+		failOut("出向 vkCreateImage = " + pocbCode(vr));
+		return;
+	}
+
+	// --- 2) 导入 g_ssrOutHC (与入向那块**不同**的 NT handle ⇒ 不同内存, 不踩 v0.16.4) ---
+	// 尺寸候选沿用 2c-β 归因结论 (req.size / 64KB / 2MB / 朴素), 每个候选都记码;
+	// 一旦全失败只关出向, 入向照跑 —— 出向是新增通路, 没有"必须成"的理由。
+	VkMemoryRequirements req{};
+	c.fns.vkGetImageMemoryRequirements(c.vdev, g_ssrVkImgOut, &req);
+	VkPhysicalDeviceMemoryProperties mp{};
+	c.fns.vkGetPhysicalDeviceMemoryProperties(c.phys, &mp);
+	int types[8];
+	int nty = 0;
+	for (uint32_t i = 0; i < mp.memoryTypeCount && nty < 8; ++i)
+	{
+		if (!(req.memoryTypeBits & (1u << i)))
+			continue;
+		if (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+			types[nty++] = static_cast<int>(i);
+	}
+	for (uint32_t i = 0; i < mp.memoryTypeCount && nty < 8; ++i)
+	{
+		if (!(req.memoryTypeBits & (1u << i)))
+			continue;
+		bool dup = false;
+		for (int j = 0; j < nty; ++j)
+			dup = dup || (types[j] == static_cast<int>(i));
+		if (!dup)
+			types[nty++] = static_cast<int>(i);
+	}
+	const VkDeviceSize raw = (VkDeviceSize)od.Width * (VkDeviceSize)od.Height * 8ULL;
+	VkDeviceSize cand[6];
+	int ncd = 0;
+	auto addSz = [&](VkDeviceSize s) {
+		if (!s)
+			return;
+		for (int i = 0; i < ncd; ++i)
+			if (cand[i] == s)
+				return;
+		if (ncd < 6)
+			cand[ncd++] = s;
+	};
+	addSz(req.size);
+	addSz((req.size + 65535ULL) & ~(VkDeviceSize)65535ULL);
+	addSz((req.size + 2097151ULL) & ~(VkDeviceSize)2097151ULL);
+	addSz(raw);
+	addSz((raw + 65535ULL) & ~(VkDeviceSize)65535ULL);
+	addSz((raw + 2097151ULL) & ~(VkDeviceSize)2097151ULL);
+	if (nty == 0 || ncd == 0)
+	{
+		c.fns.vkDestroyImage(c.vdev, g_ssrVkImgOut, nullptr);
+		g_ssrVkImgOut = VK_NULL_HANDLE;
+		failOut("出向导入无可用内存类型/尺寸候选 (memoryTypeBits=" +
+		        std::to_string(req.memoryTypeBits) + ")");
+		return;
+	}
+	VkImportMemoryWin32HandleInfoKHR imp{};
+	imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+	imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+	imp.handle = g_ssrOutHC; // 只借用不接管 —— 句柄归 D3D11 侧, 不 CloseHandle
+	VkMemoryAllocateInfo mai{};
+	mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	mai.pNext = &imp;
+	bool got = false;
+	std::string codes;
+	int ntry = 0;
+	for (int si = 0; si < ncd && !got; ++si)
+	{
+		for (int ti = 0; ti < nty && !got; ++ti)
+		{
+			++ntry;
+			mai.allocationSize = cand[si];
+			mai.memoryTypeIndex = static_cast<uint32_t>(types[ti]);
+			vr = c.fns.vkAllocateMemory(c.vdev, &mai, nullptr, &g_ssrVkMemOut);
+			if (vr == VK_SUCCESS)
+			{
+				if (c.fns.vkBindImageMemory(c.vdev, g_ssrVkImgOut, g_ssrVkMemOut, 0) == VK_SUCCESS)
+				{
+					got = true;
+					break;
+				}
+				c.fns.vkFreeMemory(c.vdev, g_ssrVkMemOut, nullptr);
+				g_ssrVkMemOut = VK_NULL_HANDLE;
+				if (codes.size() < 160)
+					codes += std::string(codes.empty() ? "" : ",") + "bind失败";
+				continue;
+			}
+			if (codes.size() < 160)
+				codes += (codes.empty() ? "" : ",") + pocbCode(vr);
+		}
+	}
+	if (!got)
+	{
+		c.fns.vkDestroyImage(c.vdev, g_ssrVkImgOut, nullptr);
+		g_ssrVkImgOut = VK_NULL_HANDLE;
+		failOut("出向导入矩阵 " + std::to_string(ntry) + " 次全失败 码=" + codes +
+		        " (size候选" + std::to_string(ncd) + "x类型" + std::to_string(nty) + ")");
+		return;
+	}
+
+	// --- 3) 一条命令: 入向→源 / 出向→目的 / copy / 两边复原 + 交接 GENERAL ---
+	// ONE_TIME_SUBMIT 录完提交完自动回 initial state ⇒ 可直接重录 (POCB_DEV_FNS 没有
+	// vkResetCommandBuffer); 句柄变了 (入向图被重建) 由 g_ssrVkCmdOutSrc 触发重录。
+	if (!g_ssrVkCmdOut)
+	{
+		VkCommandBuffer cmds[1] = {VK_NULL_HANDLE};
+		VkCommandBufferAllocateInfo cbai{};
+		cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		cbai.commandPool = c.pool;
+		cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		cbai.commandBufferCount = 1;
+		if (c.fns.vkAllocateCommandBuffers(c.vdev, &cbai, cmds) != VK_SUCCESS)
+		{
+			c.fns.vkDeviceWaitIdle(c.vdev);
+			c.fns.vkDestroyImage(c.vdev, g_ssrVkImgOut, nullptr);
+			g_ssrVkImgOut = VK_NULL_HANDLE;
+			c.fns.vkFreeMemory(c.vdev, g_ssrVkMemOut, nullptr);
+			g_ssrVkMemOut = VK_NULL_HANDLE;
+			failOut("vkAllocateCommandBuffers(出向)");
+			return;
+		}
+		g_ssrVkCmdOut = cmds[0];
+	}
+	auto barrier = [&](VkImage img, VkPipelineStageFlags ss, VkAccessFlags sa,
+	                   VkPipelineStageFlags ds, VkAccessFlags da, VkImageLayout ol,
+	                   VkImageLayout nl) {
+		VkImageMemoryBarrier imb{};
+		imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		imb.srcAccessMask = sa;
+		imb.dstAccessMask = da;
+		imb.oldLayout = ol;
+		imb.newLayout = nl;
+		imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.image = img;
+		imb.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		c.fns.vkCmdPipelineBarrier(g_ssrVkCmdOut, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &imb);
+	};
+	VkCommandBufferBeginInfo cbb{};
+	cbb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	if (c.fns.vkBeginCommandBuffer(g_ssrVkCmdOut, &cbb) != VK_SUCCESS)
+	{
+		c.fns.vkDeviceWaitIdle(c.vdev);
+		c.fns.vkDestroyImage(c.vdev, g_ssrVkImgOut, nullptr);
+		g_ssrVkImgOut = VK_NULL_HANDLE;
+		c.fns.vkFreeMemory(c.vdev, g_ssrVkMemOut, nullptr);
+		g_ssrVkMemOut = VK_NULL_HANDLE;
+		failOut("vkBeginCommandBuffer(出向)");
+		return;
+	}
+	// ① 入向 GENERAL → TRANSFER_SRC: srcAccess=MEMORY_WRITE 把 D3D11 上一帧的跨 API 写算进去
+	//    (那笔写不归 VK 记账, 用"全部写"让 VK 侧缓存失效才读得到新内容)。
+	barrier(g_ssrVkImg, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+	        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+	        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	// ② 出向 UNDEFINED → TRANSFER_DST: 每帧都整幅重写, oldLayout=UNDEFINED 允许丢弃上一帧
+	barrier(g_ssrVkImgOut, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT,
+	        VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+	        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	{
+		VkImageCopy icp{};
+		icp.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+		icp.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+		icp.extent = VkExtent3D{od.Width, od.Height, 1};
+		c.fns.vkCmdCopyImage(g_ssrVkCmdOut, g_ssrVkImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		                     g_ssrVkImgOut, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &icp);
+	}
+	// ③ 入向复原 GENERAL —— 下一帧 D3D11 要直接往里 CopyResource, 布局不复原就会撞车
+	barrier(g_ssrVkImg, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT,
+	        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+	// ④ 出向 TRANSFER_DST → GENERAL + dstAccess=MEMORY_READ: 跨 API 交接只认 GENERAL,
+	//    让驱动把这次写做完再放行 (真正的交接仍靠 CPU 的 vkWaitForFences)
+	barrier(g_ssrVkImgOut, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT,
+	        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+	if (c.fns.vkEndCommandBuffer(g_ssrVkCmdOut) != VK_SUCCESS)
+	{
+		c.fns.vkDeviceWaitIdle(c.vdev);
+		c.fns.vkDestroyImage(c.vdev, g_ssrVkImgOut, nullptr);
+		g_ssrVkImgOut = VK_NULL_HANDLE;
+		c.fns.vkFreeMemory(c.vdev, g_ssrVkMemOut, nullptr);
+		g_ssrVkMemOut = VK_NULL_HANDLE;
+		failOut("vkEndCommandBuffer(出向)");
+		return;
+	}
+	g_ssrVkCmdOutSrc = g_ssrVkImg;
+	g_ssrVkOutState = 1;
+	logLine("SSR侦察: [2d] 出向图就绪: " + std::to_string(od.Width) + "x" +
+	        std::to_string(od.Height) + " RGBA16F TRANSFER_DST → 导入 handle=" + hexOf(g_ssrOutHC) +
+	        " (矩阵 " + std::to_string(ntry) + " 次) 命令已录 — 本帧只建不提, 下帧起每帧出向");
+}
+
+// 每帧 (pocbInject 尾部, 紧跟 ssrInVkFrame): 入向镜像 → 出向镜像 拷一次 + CPU fence 等完,
+// 置 g_ssrOutReady 让 D3D11 在**下一帧**特征B 拷进 585。失败只关出向。
+void ssrOutVkFrame(PocbCtx& c)
+{
+	if (!g_ssrVkOutOn.load(std::memory_order_relaxed) ||
+	    !g_ssrSharedOn.load(std::memory_order_relaxed))
+		return;
+	if (g_ssrVkOutState == 2 || g_ssrVkState == 2)
+		return;
+	if (c.state.load() != 2 || !c.vdev || !c.queue || !c.fence)
+		return;
+	if (!g_ssrOutTexC || !g_ssrOutHC)
+		return;
+	if (g_ssrVkImg == VK_NULL_HANDLE)
+		return; // 入向还没建 —— 让 ssrInVkFrame 先把入向建起来
+	if (g_ssrVkImgOut == VK_NULL_HANDLE || g_ssrVkCmdOutSrc != g_ssrVkImg)
+	{
+		ssrOutVkBuild(c); // 成功 → 本帧不提 (与 2c-β "只建不比" 同节奏); 失败 → 内部已关闸
+		return;
+	}
+	c.fns.vkResetFences(c.vdev, 1, &c.fence);
+	VkSubmitInfo si{};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &g_ssrVkCmdOut;
+	const auto t0 = std::chrono::steady_clock::now();
+	VkResult vr = c.fns.vkQueueSubmit(c.queue, 1, &si, c.fence);
+	if (vr == VK_SUCCESS)
+		vr = c.fns.vkWaitForFences(c.vdev, 1, &c.fence, VK_TRUE, 5000000000ULL);
+	const double ms = std::chrono::duration<double, std::milli>(
+	    std::chrono::steady_clock::now() - t0).count();
+	if (vr != VK_SUCCESS)
+	{
+		if (vr == VK_ERROR_DEVICE_LOST)
+			logLine("SSR侦察: [异常] [2d] 出向提交 DEVICE_LOST (-4) → 出向回写停用 "
+			        "(PoC-B 可能已被连坐关掉)");
+		else
+			logLine("SSR侦察: [2d] 出向提交失败 " + pocbCode(vr) + " → 出向回写停用");
+		g_ssrVkOutState = 2;
+		g_ssrOutReady = false; // 不就绪 ⇒ D3D11 侧不回写 ⇒ 画面保持游戏原样 (最稳的降级)
+		return;
+	}
+	g_ssrOutReady = true; // 1 帧延迟: D3D11 下一帧特征B 才读, 不存在跨 API GPU 栅栏
+	const long k = ++g_ssrVkOutN;
+	if (k <= 8 || (k % 128) == 0)
+		logLine("SSR侦察: [2d] VK出向#" + std::to_string(k) + " 入向→出向 " +
+		        std::to_string(g_ssrVkW) + "x" + std::to_string(g_ssrVkH) +
+		        " RGBA16F fence=" + std::to_string(ms).substr(0, 5) +
+		        "ms 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed)) +
+		        " [下帧特征B 回写585]");
 }
 
 // 每帧: 提交一次 Vulkan 命令 → fence 等待 → 读回像素 → 拷进 backbuffer
@@ -1648,4 +1981,7 @@ void pocbInject(PocbCtx& c, IDXGISwapChain* sc)
 	// (前3次+每600次), 若算进 c.accMs 就会污染 PoC-B 那条 0.9 ms/帧 的验收基线;
 	// 自己单独计时打进 [2c-β] 行。
 	ssrInVkFrame(c);
+	// 2d-1 出向回写 (v0.18.0) —— **紧跟在读回之后**: 两者共用 c.fence, 顺序提交+顺序等待;
+	// 单独计时, 不算进 c.accMs, 免得污染 PoC-B 那条 ≈0.9ms/帧 的验收基线。
+	ssrOutVkFrame(c);
 }

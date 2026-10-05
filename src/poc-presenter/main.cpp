@@ -426,6 +426,20 @@
  *     · 搬迁即改 linkage: 上述 10 个函数 + 8 个全局去 static, g_pocb 改为 vkrenderer.cpp 里
  *       的全局定义 + 头文件 extern。**行为不变 ⇒ 必须回归**: 2000+ 帧仍应 6/6 一致、
  *       PoC-B 失败行 0、code=-4 计 0、[异常] 0、PoC-B ≈1ms 不劣化。
+ *   **v0.18.0 = Step 2d-1 出向回写 (docs/05 D3) —— 首次把 VK 渲出的内容写回游戏资源**:
+ *     · 通路: 第 3 张 SHARED|NTHANDLE 镜像 (desc 照抄 324 ≡ 585) → VK 按 D3D11_TEXTURE_BIT
+ *       导入 → **本帧 Present** VK 把入向镜像拷进出向镜像 (vkCmdCopyImage + CPU fence)
+ *       → **下一帧特征B** D3D11 CopyResource(出向镜像 → 585), 时机与 2b/2c 同位 (段17 的
+ *       Draw ev39530 还没发生)。全部新代码写进 vkrenderer.cpp (ssrOutVkBuild/ssrOutVkFrame)。
+ *     · **1 帧延迟换零跨 API 栅栏**: 不在 D3D11 钩子里等 VK GPU, 也不在 VK 里等 D3D11 GPU
+ *       (D3D11 没有 VK 能等的 fence) —— 只靠"上一帧已填、本帧才读" + CPU 的 vkWaitForFences。
+ *       代价 = 反射内容比画面晚 1 帧 (16ms), v0 passthrough 下不可见。
+ *     · 逃生门 = ini ssr.vkout (默认 0); 开着时 **2b 哨兵让位** ⇒ 585 内容只可能来自 VK。
+ *     · 自校验 = 节流读回 (前3次+每600次) 比"入向(VK 消费的那帧)"与"出向(VK 写回的)":
+ *       v0 passthrough 下两者应逐字节相等 = 整条 出向通路成立。
+ *     · 隔离: 出向建图/导入/提交任一步失败只打 [2d] 日志 + 关自己, **不连坐入向 2c 与 PoC-B**;
+ *       失败时 g_ssrOutReady=false ⇒ D3D11 侧不回写 ⇒ 画面保持游戏原样 (最稳的降级)。
+ *     · 顺带: POCB_DEV_FNS 扩 descriptor/sampler 8 个函数 (全部 core 1.0, 供 SSR v1 采样用)。
  *   关键日志 (新增):
  *     SSR侦察: ctx vtable=… slot33 … ; slot50 … ; slot47(CopyResource) 原值=… 来自 …
  *     SSR侦察: ctx槽33/50/47 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.16.0 Step2 …)
@@ -439,6 +453,12 @@
  *     SSR侦察: [2c] 色324 SHARED 镜像 OK = 0x… (1920x1080 RGBA16F) handle=0x… 源=0x…
  *     SSR侦察: [2c] 深度520 SHARED 镜像 CreateTexture2D 失败 0x… ← R2 风险点
  *     SSR侦察: [2c] 共享入向就绪 — 色324=OK 深度520=OK; 基线校验和(建好未拷) 色=0x… 深=0x…
+ *     SSR侦察: ini ssr.vkout=1 → 2d 出向回写: VK(读324镜像)→出向镜像→ 下帧特征B …
+ *     SSR侦察: [2d] 出向镜像 OK = 0x… (1920x1080 RGBA16F BindFlags=0x…) handle=0x… 源=0x…
+ *     SSR侦察: [2d] 出向图就绪: 1920x1080 RGBA16F TRANSFER_DST → 导入 handle=0x… 命令已录
+ *     SSR侦察: [2d] VK出向#K 入向→出向 1920x1080 RGBA16F fence=0.0ms 帧=F [下帧特征B 回写585]
+ *     SSR侦察: [2d] 回写#K 585=0x… ← 出向=0x… 帧=F [desc一致]          ← 前8条 + 每128条
+ *     SSR侦察: [2d] 出向读回#K 入向=0x… 出向=0x… **一致✓** …            ← 前3条 + 每600条
  *     SSR侦察: [2c] 入向拷贝#K 色324=0x…→0x… 深520=0x…→0x… [2c读回 色=0x…≠基线✓ …] 帧=F
  *     SSR侦察: 特征B(换绑)#K … [2b哨兵已排队] [2c入向已排队]
  *     SSR侦察: [2c] 重试 深度520 BindFlags=0x… (原 0x…) → OK/仍失败 … ← R2 归因
@@ -1170,6 +1190,19 @@ bool  g_ssrInChkCValid = false;                  // 上一行是否可用 (本�
 unsigned long long g_ssrInChkCPrev = 0;          // 上一次 D3D11 校验和 (差一帧? 用它对)
 size_t g_ssrInChkPitch = 0;                      // D3D11 STAGING 实际 RowPitch (行距?)
 
+// ---- Step 2d-1 (v0.18.0, docs/05 D3): 出向回写 —— VK 渲完的结果拷进 585 ----
+// 第 3 张 SHARED|NTHANDLE 镜像, desc 照抄 324 (= 585 的 desc, 2b 的 [desc一致] 已证)
+// → VK 导入后每帧 Present 拷一次 → **下一帧**特征B CopyResource(出向镜像 → 585)。
+// 1 帧延迟换零跨 API GPU 栅栏 (理由见 vkrenderer.cpp ssrOutVkBuild 头注释)。
+// 逃生门: ini ssr.vkout (默认 0); 开着时 2b 哨兵让位 (585 的内容只可能来自 VK, 归因干净)。
+std::atomic<bool> g_ssrVkOutOn{false}; // ini ssr.vkout
+ID3D11Texture2D* g_ssrOutTexC = nullptr; // 出向 SHARED 镜像
+static ID3D11Texture2D* g_ssrOutStg = nullptr; // 出向镜像 STAGING (节流读回自校验用)
+HANDLE g_ssrOutHC = nullptr;             // 出向镜像 NT handle (VK 导入源)
+bool  g_ssrOutReady = false;             // VK 已填好 → 本帧特征B 可回写 (renderer 写, hook 读)
+long  g_ssrOutN = 0;                     // 2d 回写 585 累计次数
+static long  g_ssrOutChkN = 0;           // 出向读回自校验节流 (前3次 + 每600次, 同 2c)
+
 static SsrCtxEntry* lookupSsrCtx(void** vtbl)
 {
 	if (!vtbl)
@@ -1332,10 +1365,16 @@ static void ssrReconOm(UINT n, ID3D11RenderTargetView* const* ppRTV, ID3D11Depth
 		// 额外要求 g_ssrMainHdr 已学到且 != g_ssrReflRt —— 即"runs==1 与 runs>1 是两个不同
 		// 对象"的正常双强特征格局已确立。菜单/加载期只有一个强特征段, 只会设到其中一个变量,
 		// 该条件不成立 ⇒ 过渡期不会拿菜单对象当 585 去写。
-		if (g_ssrSentinelOn.load(std::memory_order_relaxed) && g_ssrReflRt &&
+		if (g_ssrSentinelOn.load(std::memory_order_relaxed) &&
+		    !g_ssrVkOutOn.load(std::memory_order_relaxed) && g_ssrReflRt &&
 		    g_ssrMainHdr && g_ssrMainHdr != g_ssrReflRt &&
 		    g_ssrLastStr == g_ssrReflRt && g_ssrStrRes)
 			g_ssrSentinelPending = true;
+		// 2d 出向开着时 2b 让位 (上面不 arm) ⇒ 日志里"哨兵="恒 0, 585 的内容只可能来自 VK,
+		// 归因干净; 特征B 那行也就不会出现 [2b哨兵已排队]。
+		if (g_ssrVkOutOn.load(std::memory_order_relaxed) && g_ssrOutReady &&
+		    g_ssrStrRes && g_ssrLastStr == g_ssrReflRt)
+			g_ssrSentinelPending = false; // 双保险: 过渡帧残留的排队标记一并清掉
 		// Step 2c 共享入向 (v0.15.0, docs/05 D2a-a): 与 2b **同一触发点** (特征B), 但开关独立。
 		// 只要求"双强特征格局已确立"(菜单期 g_ssrMainHdr == g_ssrReflRt ⇒ 不 arm, 同 D2a-3a),
 		// **不要求 lastStr == 585** —— 入向拷的是 324/520, 与 585 是谁无关, 段16 缺席帧照拷。
@@ -1708,6 +1747,60 @@ static bool ssrInMakeShared(ID3D11Device* dev, ID3D11Resource* src, ID3D11Textur
 	return true;
 }
 
+// ---- Step 2d-1 (v0.18.0): 出向 SHARED 镜像 —— VK 渲完的结果落这儿, 再由 D3D11 拷进 585 ----
+// desc **照抄 324**: 2b 的 [desc一致] 已经证明 324 与 585 的 desc 逐字段相同 ⇒ 这张镜像
+// 既能被 VK 按 D3D11_TEXTURE_BIT 导入 (入向同法), 也能被 CopyResource 原样拷进 585。
+// 不带 BindFlags 重试矩阵 —— RGBA16F 能建 SHARED 已在 2c 实证过, 失败就一句 [2d] 关闸,
+// 绝不连坐入向 (入向是已收口的 2c 成果)。
+static bool ssrOutMakeShared(ID3D11Device* dev, ID3D11Resource* src)
+{
+	g_ssrOutTexC = nullptr;
+	g_ssrOutHC = nullptr;
+	D3D11_TEXTURE2D_DESC sd{};
+	if (!ssrResObj(src, &sd, nullptr) || sd.Usage != D3D11_USAGE_DEFAULT)
+	{
+		logLine("SSR侦察: [2d] 出向镜像: 源 QI/Usage 不可用 → 出向回写不启用 (入向照常)");
+		return false;
+	}
+	D3D11_TEXTURE2D_DESC td = sd; // 全抄 (含 BindFlags) —— 与入向同法, 满足 CopyResource 最严解释
+	td.CPUAccessFlags = 0;
+	td.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+	ID3D11Texture2D* t = nullptr;
+	HRESULT hr = dev->CreateTexture2D(&td, nullptr, &t);
+	if (FAILED(hr) || !t)
+	{
+		logLine("SSR侦察: [2d] 出向 SHARED 镜像 CreateTexture2D 失败 " + hexHr(hr) + " (" +
+		        std::to_string(td.Width) + "x" + std::to_string(td.Height) + " " +
+		        ssrFmtName(td.Format) + " BindFlags=0x" + uhex64(td.BindFlags).substr(8) +
+		        ") → 出向回写不启用 (入向照常)");
+		return false;
+	}
+	IDXGIResource1* r1 = nullptr;
+	hr = t->QueryInterface(__uuidof(IDXGIResource1), reinterpret_cast<void**>(&r1));
+	if (SUCCEEDED(hr) && r1)
+	{
+		hr = r1->CreateSharedHandle(nullptr,
+		                            DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+		                            nullptr, &g_ssrOutHC);
+		r1->Release();
+	}
+	if (FAILED(hr) || !g_ssrOutHC)
+	{
+		logLine("SSR侦察: [2d] 出向 CreateSharedHandle 失败 " + hexHr(hr) + " (" +
+		        ssrFmtName(td.Format) + ") → 出向回写不启用 (入向照常)");
+		t->Release();
+		g_ssrOutHC = nullptr;
+		return false;
+	}
+	g_ssrOutTexC = t;
+	logLine("SSR侦察: [2d] 出向镜像 OK = " + hexOf(g_ssrOutTexC) + " (" +
+	        std::to_string(td.Width) + "x" + std::to_string(td.Height) + " " +
+	        ssrFmtName(td.Format) + " BindFlags=0x" + uhex64(td.BindFlags).substr(8) +
+	        ") handle=" + hexOf(g_ssrOutHC) + " 源=" + hexOf(src) +
+	        " — desc 照抄324(≡585), VK 侧 ssrOutVkBuild 导入");
+	return true;
+}
+
 // 首次触发时建两张镜像 + 各自 STAGING + 记"未拷"基线校验和。幂等。
 // 延迟到首次触发才建: 324/520 的身份要到进实机场景后才齐 (菜单期两值相等、不 arm)。
 static void ssrInBuild(ID3D11DeviceContext* ctx)
@@ -1761,6 +1854,14 @@ static void ssrInBuild(ID3D11DeviceContext* ctx)
 	};
 	mkStg(tc, &g_ssrInStgC);
 	mkStg(td, &g_ssrInStgD);
+	// ---- 2d-1 出向镜像 (独立门 ssr.vkout, 默认 0 ⇒ 上面那段完全不变) ----
+	if (g_ssrVkOutOn.load(std::memory_order_relaxed))
+	{
+		if (ssrOutMakeShared(dev, g_ssrSceneRes))
+			mkStg(g_ssrOutTexC, &g_ssrOutStg);
+		else
+			g_ssrVkOutOn.store(false, std::memory_order_relaxed); // 建不出 → 关闸, 不再重试
+	}
 	dev->Release();
 	g_ssrInTexC = tc;
 	g_ssrInHC = hc;
@@ -1777,7 +1878,10 @@ static void ssrInBuild(ID3D11DeviceContext* ctx)
 	        std::string(g_ssrInDepthFail ? "FAIL(R2 未过)" : "OK") +
 	        "; 基线校验和(建好未拷) 色=0x" + uhex64(g_ssrInBaseC) +
 	        " 深=0x" + uhex64(g_ssrInBaseD) +
-	        "; 自此每帧特征B 处 CopyResource(324/520 → SHARED 镜像)");
+	        "; 自此每帧特征B 处 CopyResource(324/520 → SHARED 镜像)" +
+	        (g_ssrVkOutOn.load(std::memory_order_relaxed)
+	             ? "; [2d] 出向镜像已一并建好 (ssr.vkout=1, 回写 585 走 VK)"
+	             : ""));
 }
 
 // 触发点: 与 2b 哨兵同位 (特征B → real() 后), 把 324/520 拷进各自 SHARED 镜像。
@@ -1867,7 +1971,8 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 		// 四重保险: 开关 + 两个活引用都在 + 写目标身份确为刚离开的强特征对象 (= g_ssrReflRt
 		// 的本帧实例)。g_ssrStrResObj == g_ssrLastStr 这条防"GetResource 失败导致 strResObj
 		// 残留旧值"的边角 —— 那种情况下 g_ssrStrRes 本来也是空, 但两处都查更稳。
-		if (g_ssrSentinelOn.load(std::memory_order_relaxed) && g_ssrSceneRes && g_ssrStrRes &&
+		if (g_ssrSentinelOn.load(std::memory_order_relaxed) &&
+		    !g_ssrVkOutOn.load(std::memory_order_relaxed) && g_ssrSceneRes && g_ssrStrRes &&
 		    g_ssrStrResObj == g_ssrLastStr && g_ssrLastStr == g_ssrReflRt)
 		{
 			// CopyResource 返回 **void** —— src/dst 尺寸/格式/多重采样/片数不一致时不会给你
@@ -1897,6 +2002,61 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 				              : " [desc不一致! 585=" + (dok2 ? dsc(dd) : std::string("QI失败")) +
 				                    " 324=" + (sok2 ? dsc(sd) : std::string("QI失败")) + "]"));
 		}
+	}
+	// ---- Step 2d-1 出向回写 (v0.18.0, docs/05 D3): VK 上一帧 Present 填好的结果 → 585 ----
+	// 1 帧延迟: 本帧 Present 才由 VK 填出向镜像 ⇒ 这里回写的是**上一帧**的 SSR 结果。
+	// 时机与 2b/2c 同位 —— 段17 的 Draw (ev39530) 尚未发生, 写进 585 正是它要读的那份。
+	// **必须排在 2c 入向之前**: 读回自校验要拿"入向镜像里 VK 消费过的那帧"与"出向镜像"
+	// 比 (v0 passthrough 下两者应逐字节相等), 而 2c 马上就会把入向镜像覆盖成本帧新内容。
+	// 2d 开着时 2b 哨兵让位 ⇒ 585 的内容只可能来自 VK, 归因干净。
+	if (g_ssrVkOutOn.load(std::memory_order_relaxed) && g_ssrOutReady && g_ssrOutTexC &&
+	    g_ssrStrRes && g_ssrStrResObj == g_ssrLastStr && g_ssrLastStr == g_ssrReflRt)
+	{
+		// 与 2b 同一道 desc 预检: CopyResource 返回 void, src/dst 不一致时静默丢弃、日志照打
+		// ⇒ "建得出/排得队"不能证明"写进去了", 必须自己比一遍并打进日志。
+		D3D11_TEXTURE2D_DESC sd{}, dd{};
+		void* so = nullptr;
+		void* dso = nullptr;
+		const bool sok2 = ssrResObj(g_ssrOutTexC, &sd, &so);
+		const bool dok2 = ssrResObj(g_ssrStrRes, &dd, &dso);
+		auto dsc = [](const D3D11_TEXTURE2D_DESC& d) {
+			return std::to_string(d.Width) + "x" + std::to_string(d.Height) + " " +
+			       ssrFmtName(d.Format) + " mips" + std::to_string(d.MipLevels) +
+			       " msaa" + std::to_string(d.SampleDesc.Count);
+		};
+		const bool same = sok2 && dok2 && dsc(sd) == dsc(dd);
+		// 读回自校验 (节流 前3次+每600次, 同 2c): 入向=VK 消费的那帧, 出向=VK 写回的那份。
+		// 只有**两个 STAGING 都在**才比; 阻塞读回, 绝不能每帧做 (docs/05 约束 2)。
+		const long cc = g_ssrOutChkN + 1;
+		if ((g_ssrOutStg && g_ssrInStgC && g_ssrInTexC) &&
+		    ((cc <= 3) || (cc % 600) == 0))
+		{
+			g_ssrOutChkN = cc;
+			long nzi = 0, nzo = 0;
+			const unsigned long long hIn =
+			    ssrInFnv(ctx, g_ssrInTexC, g_ssrInStgC, "2d入向", &nzi);
+			const unsigned long long hOut =
+			    ssrInFnv(ctx, g_ssrOutTexC, g_ssrOutStg, "2d出向", &nzo);
+			logLine("SSR侦察: [2d] 出向读回#" + std::to_string(cc) + " 入向=0x" + uhex64(hIn) +
+			        " 出向=0x" + uhex64(hOut) +
+			        (hIn != 0 && hIn == hOut
+			             ? " **一致✓** (v0 passthrough 逐字节还原 = 出向通路成立)"
+			             : " 不一致✗ (帧错位/行距/时序)") +
+			        " 非零" + std::to_string(nzo) +
+			        " 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1));
+		}
+		g_ssrSelfCopy = true;
+		ctx->CopyResource(g_ssrStrRes, g_ssrOutTexC); // dst=585 <- src=出向镜像
+		g_ssrSelfCopy = false;
+		const long k = ++g_ssrOutN;
+		if (k <= 8 || (k % 128) == 0)
+			logLine("SSR侦察: [2d] 回写#" + std::to_string(k) + " 585=" + hexOf(g_ssrStrResObj) +
+			        " ← 出向=" + hexOf(g_ssrOutTexC) + " 帧=" +
+			        std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1) +
+			        (same ? " [desc一致]"
+			              : " [desc不一致! 585=" +
+			                    (dok2 ? dsc(dd) : std::string("QI失败")) +
+			                    " 出向=" + (sok2 ? dsc(sd) : std::string("QI失败")) + "]"));
 	}
 	// ---- Step 2c 共享入向 (v0.15.0): 与 2b 同一触发点, 独立开关 ----
 	// 放在 real() 之后的理由同 2b (此刻段17 已绑、585 已解绑) —— 入向拷贝不碰 585,
@@ -2066,7 +2226,8 @@ static void ssrReconPresent(uint64_t n)
 		                " distinct=" + std::to_string(objN) + " 特征A=" + std::to_string(fa) +
 		                " 特征B=" + std::to_string(fb) + " COPY=" + std::to_string(copyN) +
 		                " 哨兵=" + std::to_string(g_ssrSentN) +
-		                " 入向=" + std::to_string(g_ssrInN) + " | 累计候选=" +
+		                " 入向=" + std::to_string(g_ssrInN) +
+		                " 出向=" + std::to_string(g_ssrOutN) + " | 累计候选=" +
 		                std::to_string(g_ssrCandN) + " 累计强特征=" + std::to_string(g_ssrStrTot);
 		if (anom)
 			s += " [异常]";
@@ -2118,6 +2279,19 @@ void installProbeOn(ID3D11Device* dev)
 			        "ssr.shared=0)");
 		else if (g_ssrSharedOn.load(std::memory_order_relaxed))
 			logLine("SSR侦察: ini ssr.shared=1 但 ssr=0 → 入向不生效 (ssr 是总门)");
+		// Step 2d-1 出向回写 (v0.18.0) —— **会动渲染** (VK 结果拷进 585), 所以再给一道独立门。
+		// 开着时 2b 哨兵让位 ⇒ 585 内容只可能来自 VK; 逃生门改 0 即退回"不动 585"的 2c 形态。
+		// 1 帧延迟: 本帧 Present 由 VK 填出向镜像, **下一帧**特征B 才拷进 585 (零跨 API 栅栏)。
+		g_ssrVkOutOn.store(iniFlag("ssr.vkout", false), std::memory_order_relaxed);
+		if (g_ssrVkOutOn.load(std::memory_order_relaxed) &&
+		    g_ssrSharedOn.load(std::memory_order_relaxed) &&
+		    g_ssrOn.load(std::memory_order_relaxed))
+			logLine("SSR侦察: ini ssr.vkout=1 → 2d 出向回写: VK(读324镜像)→出向镜像→"
+			        " 下帧特征B CopyResource(出向→585); 2b 哨兵让位; 反射区显示上一帧"
+			        " 场景色错误画面 (与 2b 同观感, 验通路; 逃生门 ssr.vkout=0)");
+		else if (g_ssrVkOutOn.load(std::memory_order_relaxed))
+			logLine("SSR侦察: ini ssr.vkout=1 但 ssr.shared=0 或 ssr=0 → 出向不生效 "
+			        "(需要 ssr=1 + ssr.shared=1 是总门)");
 	}
 	if (!g_probeOn.load(std::memory_order_relaxed))
 	{
@@ -3826,7 +4000,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.17.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp) ====");
+	logLine("==== poc-presenter v0.18.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
