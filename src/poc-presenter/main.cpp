@@ -362,6 +362,12 @@
  *       同一时刻只允许一个 disjoint 活跃 ⇒ 三条全拿到才开下一窗, GPU 样本约帧数的一半。
  *     · 每 600 帧出一行分布统计 (均值/中位/p95/最大 + >20ms 计数), 另有会话累计;
  *       单帧 >=1s (读盘/切场景) 只计数不进分布。逃生门 `ini frametime=0` (默认 1)。
+ *   **v0.16.3 = β3 不一致归因三件套** (2c-β 首跑交叉校验 4/4 全不一致, 一次跑图分清三种归因):
+ *     · 同刻 D3D11 再读一次 —— `同刻D3D11=0x…=VK✓时序差` ⇒ 不是布局/行距, 是两边读的时刻不同;
+ *       `≠帧内(镜像帧内被改)` ⇒ 镜像在特征B 之后又被写过 (时间窗有洞);
+ *     · 前帧 D3D11 校验和 —— `前帧D3D11=0x…=VK✓差一帧` ⇒ VK 提交时机比 D3D11 写早一帧;
+ *     · 按 D3D11 的 STAGING `RowPitch` 重算 VK —— `VK按D3D11行距=0x…=D3D11✓行距归因`
+ *       ⇒ 两边抽样点位差在行距 (归因3), 与共享内存内容无关。
  *   关键日志 (新增):
  *     SSR侦察: ctx vtable=… slot33 … ; slot50 … ; slot47(CopyResource) 原值=… 来自 …
  *     SSR侦察: ctx槽33/50/47 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.16.0 Step2 …)
@@ -387,7 +393,9 @@
  *         (样本 N) | 会话 CPU n=… 均值 … 最大 … / GPU n=… … | 丢弃>=1s …   ← 每 600 帧一行
  *     帧时基线: GPU 时间戳查询就绪 (TIMESTAMP+DISJOINT) … / 创建失败 … -> 本局只记 CPU 侧
  *     SSR侦察: [2c-β] VK 导入 OK: 色镜像 NT handle → VkImage (OPAQUE_WIN32) 1920x1080 RGBA16F …
- *     SSR侦察: [2c-β] 交叉校验#K D3D11=0x… VK=0x… 一致则 **一致✓**、否则 **不一致✗** VK非零=… 本帧VK读回=…ms 帧=F
+ *     SSR侦察: [2c-β] 交叉校验#K D3D11=0x… VK=0x… 一致则 **一致✓**、否则 **不一致✗** VK非零=…
+ *         行距=<D3D11>/<VK> 同刻D3D11=0x…(=VK✓时序差/≠VK/≠帧内) 前帧D3D11=0x…(=VK✓差一帧)
+ *         [VK按D3D11行距=0x…(=D3D11✓行距归因)] 本帧VK读回=…ms 帧=F   ← v0.16.3 归因字段
  *
  * 构建: GitHub Actions (build.yml job "poc-presenter"), 本地不编译
  * 安装: poc-presenter.dll 放入 <游戏>/Data/SKSE/Plugins/
@@ -1114,6 +1122,9 @@ static long  g_ssrVkN = 0;                              // 交叉校验次数
 static unsigned g_ssrVkW = 0, g_ssrVkH = 0;             // 镜像尺寸 (buffer 宽度用)
 static unsigned long long g_ssrInChkC = 0;             // 本帧 D3D11 侧读回的色校验和
 static bool  g_ssrInChkCValid = false;                  // 上一行是否可用 (本帧做过 D3D11 读回)
+// ---- β3 不一致归因三件套 (v0.16.3): 一次跑图就能把"时序/行距/布局"三分开 ----
+static unsigned long long g_ssrInChkCPrev = 0;          // 上一次 D3D11 校验和 (差一帧? 用它对)
+static size_t g_ssrInChkPitch = 0;                      // D3D11 STAGING 实际 RowPitch (行距?)
 
 static SsrCtxEntry* lookupSsrCtx(void** vtbl)
 {
@@ -1532,10 +1543,13 @@ static unsigned long long ssrFnvSample(const void* data, size_t rowPitch, unsign
 // CPU 读回阻塞 (docs/05 约束 2 禁每帧读回) ⇒ 由调用方节流; 内部把 g_ssrSelfCopy 置位,
 // 免得自己这道暂存拷贝被槽47 钩计进 2a 的 COPY=/学习里。
 static unsigned long long ssrInFnv(ID3D11DeviceContext* ctx, ID3D11Texture2D* mir,
-                                   ID3D11Texture2D* stg, const char* nm, long* nz)
+                                   ID3D11Texture2D* stg, const char* nm, long* nz,
+                                   size_t* pitch = nullptr) // v0.16.3: 把实际 RowPitch 带出去
 {
 	if (nz)
 		*nz = 0;
+	if (pitch)
+		*pitch = 0;
 	if (!ctx || !mir || !stg)
 		return 0;
 	const bool prevSelf = g_ssrSelfCopy;
@@ -1552,6 +1566,8 @@ static unsigned long long ssrInFnv(ID3D11DeviceContext* ctx, ID3D11Texture2D* mi
 	D3D11_TEXTURE2D_DESC md{};
 	mir->GetDesc(&md);
 	const int bpp = (md.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 8 : 4;
+	if (pitch)
+		*pitch = m.RowPitch; // β3 归因: D3D11 侧真正用的行距 (与 VK 的 width*8 比)
 	const unsigned long long h = ssrFnvSample(m.pData, m.RowPitch, md.Width, md.Height, bpp, nz);
 	ctx->Unmap(stg, 0);
 	g_ssrSelfCopy = prevSelf;
@@ -1751,12 +1767,14 @@ static void ssrInQueue(ID3D11DeviceContext* ctx)
 	if (chk)
 	{
 		long nz = 0;
-		const unsigned long long h = ssrInFnv(ctx, g_ssrInTexC, g_ssrInStgC, "色", &nz);
+		size_t pit = 0;
+		const unsigned long long h = ssrInFnv(ctx, g_ssrInTexC, g_ssrInStgC, "色", &nz, &pit);
 		// 留给 2c-β: 同一帧内 VK 侧要用**同一个** ssrFnvSample 算一遍与 h 比对。
 		// 时序安全: 这里的 Map 返回已保证 D3D11 把镜像写完了 (CPU 都读到了), 而
 		// 镜像只在特征B 被写、到 Present 之间没人再动它 ⇒ Present 时 VK 读到的是同一份字节。
 		g_ssrInChkC = h;
 		g_ssrInChkCValid = true;
+		g_ssrInChkPitch = pit; // β3 归因: 若 ≠ width*8 ⇒ 两边抽样点位不同 (归因3 行距)
 		s += " [2c读回 色=0x" + uhex64(h) + (h != g_ssrInBaseC ? "≠基线✓" : "=基线✗") +
 		     " 非零" + std::to_string(nz);
 		if (g_ssrInTexD && g_ssrInStgD)
@@ -4281,6 +4299,8 @@ static void ssrInVkFrame(PocbCtx& c)
 {
 	const bool want = g_ssrInChkCValid;
 	const unsigned long long d3dH = g_ssrInChkC;
+	const unsigned long long d3dPrev = g_ssrInChkCPrev;
+	g_ssrInChkCPrev = d3dH;
 	g_ssrInChkCValid = false; // 一次性消费, 免得下一帧拿旧值去比
 	if (!want)
 		return;
@@ -4309,14 +4329,38 @@ static void ssrInVkFrame(PocbCtx& c)
 	}
 	long nzk = 0;
 	// **同一个 ssrFnvSample**, 同样的 64行x16列/8字节抽样 ⇒ 两个值可直接相等比较
-	const unsigned long long vkH =
-	    ssrFnvSample(g_ssrVkBufPtr, (size_t)g_ssrVkW * 8, g_ssrVkW, g_ssrVkH, 8, &nzk);
+	const size_t vkPitch = (size_t)g_ssrVkW * 8;
+	const unsigned long long vkH = ssrFnvSample(g_ssrVkBufPtr, vkPitch, g_ssrVkW, g_ssrVkH, 8, &nzk);
+	// ---- v0.16.3 β3 归因三件套 (首跑 4/4 全不一致, docs/02 §14.13 归因1/2/3) ----
+	// ① 同刻再读一次 D3D11: 若 同刻==VK ⇒ 不是布局/行距, 是**两边读的不是同一时刻**;
+	//    若 同刻≠帧内那次 ⇒ 镜像在特征B 之后还被改过 (时间窗本身有洞)。
+	// ② 前帧 D3D11 校验和: VK==前帧 ⇒ 差一帧 (提交时机在 D3D11 写之前)。
+	// ③ 按 D3D11 的 RowPitch 重算 VK: 相等 ⇒ 两边抽样点位差在行距 (归因3), 与内容无关。
+	unsigned long long d3dNow = 0;
+	long nzNow = 0;
+	if (c.ctx && g_ssrInTexC && g_ssrInStgC)
+		d3dNow = ssrInFnv(c.ctx, g_ssrInTexC, g_ssrInStgC, "2c-β同刻", &nzNow);
+	const unsigned long long vkH2 =
+	    (g_ssrInChkPitch && g_ssrInChkPitch != vkPitch)
+	        ? ssrFnvSample(g_ssrVkBufPtr, g_ssrInChkPitch, g_ssrVkW, g_ssrVkH, 8, nullptr)
+	        : 0;
+	const bool hitNow = (d3dNow != 0 && d3dNow == vkH);
+	const bool hitPrev = (d3dPrev != 0 && vkH == d3dPrev);
+	const bool hitPitch = (vkH2 != 0 && vkH2 == d3dH);
+	const bool nowEqFrame = (d3dNow == d3dH);
 	const double ms = std::chrono::duration<double, std::milli>(
 	    std::chrono::steady_clock::now() - t0).count();
 	const long k = ++g_ssrVkN;
+	std::string diag = " 行距=" + std::to_string((long long)g_ssrInChkPitch) + "/" +
+	                   std::to_string((long long)vkPitch) +
+	                   " 同刻D3D11=0x" + uhex64(d3dNow) +
+	                   (hitNow ? "=VK✓时序差" : (nowEqFrame ? "≠VK" : "≠帧内(镜像帧内被改)")) +
+	                   " 前帧D3D11=0x" + uhex64(d3dPrev) + (hitPrev ? "=VK✓差一帧" : "");
+	if (vkH2 != 0)
+		diag += " VK按D3D11行距=0x" + uhex64(vkH2) + (hitPitch ? "=D3D11✓行距归因" : "");
 	logLine("SSR侦察: [2c-β] 交叉校验#" + std::to_string(k) + " D3D11=0x" + uhex64(d3dH) +
 	        " VK=0x" + uhex64(vkH) + (d3dH == vkH ? " **一致✓**" : " **不一致✗**") +
-	        " VK非零=" + std::to_string(nzk) + " 本帧VK读回=" +
+	        " VK非零=" + std::to_string(nzk) + diag + " 本帧VK读回=" +
 	        std::to_string(ms).substr(0, 5) + "ms" +
 	        " 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed)));
 	// 不一致**不关闸** —— 它正是 2c-β 要采的样本 (布局/字节序/行距三种归因, docs/02 §14.13),
@@ -5333,7 +5377,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.16.2 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime) ====");
+	logLine("==== poc-presenter v0.16.3 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
