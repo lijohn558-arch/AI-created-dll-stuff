@@ -460,6 +460,48 @@ vs "源带 `BIND_DEPTH_STENCIL`"；判读与实跑表见 `docs/02` §14.12.1（�
 - **附带结论**：最终帧仍由 D3D11 Present ⇒ ① **F12 抓帧必然记录这次回写**（「抓帧可查」是验收项 ✅）；
   ② `docs/03:98` 的 3 次拷贝（`461→520` / `321→324` / `461→466`）**在方向 A 下拿不回来**，
   要拿必须走 C 或改写呈现链（见 `docs/00` §1.1.1 口径复核）。
+
+#### D3a-v0 落地（2026-10-05，`v0.18.0` = `ec94958`，CI SUCCESS）—— **出向走 1 帧延迟**
+
+**唯一的技术分歧点是「跨 API 同步怎么等」**，两条直觉路线都不可接受，故取第三条：
+
+| 路线 | 做法 | 否决理由 |
+|---|---|---|
+| ① 在 `hookedOMSetRenderTargets` 里同步跑 VK | 拿到入向镜像 → VK 渲 → 再回写 585 | 入向镜像是**本帧刚拷的**，要让 VK 读到必须先等 D3D11 GPU 跑完 ⇒ 每帧一次全管线 stall，成本不可控 |
+| ② VK 里等 D3D11 | — | **D3D11 给不出 VK 能等的 fence**（现有 `c.copyQ` 只能 CPU 侧 `GetData` 自旋，同样要等 GPU） |
+| **③ 1 帧延迟（采用）** | 见下 | 零跨 API GPU 栅栏，只多 1 帧（16ms）延迟 |
+
+**采用的时序**（代码全在 `vkrenderer.cpp` 的 `ssrOutVkBuild` / `ssrOutVkFrame`）：
+
+```
+本帧特征B  : D3D11 CopyResource(324 → 入向镜像)        [2c, 已有]
+本帧 Present: VK 读入向镜像 → v0 passthrough → 写出向镜像
+             (vkCmdCopyImage + vkWaitForFences, CPU 侧等完)
+下帧特征B  : D3D11 CopyResource(出向镜像 → 585)         [2d, 新增]
+             时机与 2b/2c 同位 ⇒ 段17 的 Draw ev39530 尚未发生
+```
+
+- **第 3 张 SHARED 镜像**：`ssrOutMakeShared`（desc 照抄 324，而 2b 的 `[desc一致]` 已证 324≡585）
+  ⇒ 既可按 `D3D11_TEXTURE_BIT` 导入，又可原样 `CopyResource` 进 585。
+- **隔离**：出向的建图/导入/提交任一步失败只打 `[2d]` 并关自己，**不连坐** 2c 与 PoC-B；
+  失败时 `g_ssrOutReady=false` ⇒ D3D11 侧根本不回写 ⇒ 画面保持游戏原样（最稳的降级）。
+- **归因纯度**：`ssr.vkout=1` 时 **2b 哨兵让位**（arm 与执行都关）⇒ `哨兵=` 恒 0，
+  585 的内容只可能来自 VK。
+- **自校验**（节流 前3次+每600次）：在 2c 入向**覆盖之前**比「入向 = VK 消费的那帧」与
+  「出向 = VK 写回的那份」——v0 passthrough 下两者应**逐字节相等** = 整条出向通路成立。
+- **代价记账**：出向的 submit+fence **单独计时**（`[2d] VK出向#` 的 `fence=` 字段），
+  不进 `c.accMs`，免得污染 PoC-B ≈0.9ms/帧的验收基线。
+
+**2d-1 验收判据**（`run2c.ps1` §#12，须同时满足）：
+`ini ssr.vkout=1` 读到、`[2d] 出向镜像 OK` = 1、`[2d] 出向图就绪` = 1、
+`[2d] 回写#K [desc一致]`（**`[desc不一致!]` 必须 0**）、`[2d] 出向读回` **≥1 次 `一致✓`**、
+帧汇总 `出向=` 持续增长、`哨兵=` 仍为 0、且 2c 的 6/6 一致不回退。
+
+**同版顺带（零行为）**：`POCB_DEV_FNS` 扩 8 个 core 1.0 函数（sampler + descriptor set
+layout/pool/set/update/bind）—— SSR v1 真要采样时直接可用，本版不调用。
+
+**2d 尚未做**：`2d-3` 深度格式探测（`R32_FLOAT`/`R16_FLOAT`/`R32_TYPELESS` 能否 SHARED）
+与 SSR shader 本身，见上方「R2 深度改道实现缺口」。
 a 的段16 结束信号（**Step 1 真机判读已二选一：定特征B** —— 两者真机均 100% 每帧恰 1 次，
 但 B 结构必然触发、A 依赖游戏清屏细节故只作交叉校验，详见 D1 末「Step 1 真机判读」）：
 - **特征A**：`ClearRenderTargetView` 发生在**强特征通道进行期间**。S4 api-scan 实测
