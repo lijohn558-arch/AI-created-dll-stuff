@@ -368,6 +368,18 @@
  *     · 前帧 D3D11 校验和 —— `前帧D3D11=0x…=VK✓差一帧` ⇒ VK 提交时机比 D3D11 写早一帧;
  *     · 按 D3D11 的 STAGING `RowPitch` 重算 VK —— `VK按D3D11行距=0x…=D3D11✓行距归因`
  *       ⇒ 两边抽样点位差在行距 (归因3), 与共享内存内容无关。
+ *   **v0.16.4 = β3 归因二轮: 变体B (usage 对齐 D3D11)** (v0.16.3 真机三件套命中: 时序/行距/
+ *     镜像被改 **全 0** ⇒ 排除归因2/3, 落在归因1 布局; 而仓内对照是 PoC-B 的 512² RGBA8 用
+ *     `usage = COLOR_ATTACHMENT|TRANSFER_SRC` 能与 D3D11 双向对上, 本图只给了 `TRANSFER_SRC`,
+ *     D3D11 侧源却是 `BIND_RENDER_TARGET|SHADER_RESOURCE` ⇒ 驱动给"只读传输图"挑的物理布局
+ *     很可能与 D3D11 的不一致):
+ *     · 同一块导入内存再建**第二张** VkImage (逐字段同主图, 只把 usage 换成
+ *       `COLOR_ATTACHMENT|SAMPLED|TRANSFER_SRC|TRANSFER_DST`), 自己的导入分配 + 初转/读回
+ *       两条命令; 交叉校验时连着提交两次, **一次打两个 hash**:
+ *       `变体B=0x…=D3D11✓usage病因` ⇒ usage 就是病因, 主图改同款 usage 即可;
+ *       `变体B=0x…=主图(usage非病因)` ⇒ 两个图读法一致, 病因在别处 (tiling/handle 类型);
+ *       `变体B=0x…≠两边` ⇒ 变体也读不出 D3D11 的内容, 继续往 tiling 方向查。
+ *     · 变体建不成只记日志并关掉自己, **不拖累主图**; 变体提交失败同样自动退出对比。
  *   关键日志 (新增):
  *     SSR侦察: ctx vtable=… slot33 … ; slot50 … ; slot47(CopyResource) 原值=… 来自 …
  *     SSR侦察: ctx槽33/50/47 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.16.0 Step2 …)
@@ -395,7 +407,8 @@
  *     SSR侦察: [2c-β] VK 导入 OK: 色镜像 NT handle → VkImage (OPAQUE_WIN32) 1920x1080 RGBA16F …
  *     SSR侦察: [2c-β] 交叉校验#K D3D11=0x… VK=0x… 一致则 **一致✓**、否则 **不一致✗** VK非零=…
  *         行距=<D3D11>/<VK> 同刻D3D11=0x…(=VK✓时序差/≠VK/≠帧内) 前帧D3D11=0x…(=VK✓差一帧)
- *         [VK按D3D11行距=0x…(=D3D11✓行距归因)] 本帧VK读回=…ms 帧=F   ← v0.16.3 归因字段
+ *         [VK按D3D11行距=0x…(=D3D11✓行距归因)] [变体B=0x…(=D3D11✓usage病因/=主图(usage非病因)/≠两边)]
+ *         本帧VK读回=…ms 帧=F   ← v0.16.3 归因字段 + v0.16.4 变体B
  *
  * 构建: GitHub Actions (build.yml job "poc-presenter"), 本地不编译
  * 安装: poc-presenter.dll 放入 <游戏>/Data/SKSE/Plugins/
@@ -1119,6 +1132,16 @@ static void*          g_ssrVkBufPtr = nullptr;         // 持久映射 (vkMapMem
 static VkCommandBuffer g_ssrVkCmd = VK_NULL_HANDLE;    // 录一次永久复用 (借用 PoC-B 的 command pool)
 static int   g_ssrVkState = 0;                          // 0=未建 1=OK 2=失败禁用
 static long  g_ssrVkN = 0;                              // 交叉校验次数
+// ---- 变体B (v0.16.4): 同一块导入内存, 再建一个 usage 匹配 D3D11 绑定的 VkImage ----
+// 依据: PoC-B 的 512² RGBA8 用 usage = COLOR_ATTACHMENT|TRANSFER_SRC 能与 D3D11 双向
+// 对上, 而本图只给了 TRANSFER_SRC (D3D11 侧源是 BIND_RENDER_TARGET|SHADER_RESOURCE)
+// ⇒ 驱动给"只读传输图"选的物理布局可能与 D3D11 的不一致 (归因1 的最可能病因)。
+// 一次交叉校验读两个 hash, 一跑定死 usage 是不是病因。
+static VkImage        g_ssrVkImgB = VK_NULL_HANDLE;
+static VkDeviceMemory g_ssrVkMemB = VK_NULL_HANDLE;
+static VkCommandBuffer g_ssrVkCmdB0 = VK_NULL_HANDLE;    // 变体B 初转 (只提交一次)
+static VkCommandBuffer g_ssrVkCmdB = VK_NULL_HANDLE;     // 变体B 读回 (复用)
+static bool           g_ssrVkHasB = false;               // 变体B 建成了才参与对比
 static unsigned g_ssrVkW = 0, g_ssrVkH = 0;             // 镜像尺寸 (buffer 宽度用)
 static unsigned long long g_ssrInChkC = 0;             // 本帧 D3D11 侧读回的色校验和
 static bool  g_ssrInChkCValid = false;                  // 上一行是否可用 (本帧做过 D3D11 读回)
@@ -4221,7 +4244,7 @@ static bool ssrInVkBuild(PocbCtx& c)
 	// 关键: 两条命令的提交次数不同 —— [0] 初转**只提交一次** ⇒ ONE_TIME_SUBMIT;
 	// [1] 读回要**每次交叉校验都重新提交** ⇒ 必须 SIMULTANEOUS_USE, 否则重复提交是
 	// validation 违规 (驱动行为未定义, 校验和会莫名其妙地不一致)。
-	auto barrier = [&](VkCommandBuffer cm, VkPipelineStageFlags ss, VkAccessFlags sa,
+	auto barrier = [&](VkCommandBuffer cm, VkImage img, VkPipelineStageFlags ss, VkAccessFlags sa,
 	                   VkPipelineStageFlags ds, VkAccessFlags da, VkImageLayout ol,
 	                   VkImageLayout nl) {
 		VkImageMemoryBarrier imb{};
@@ -4232,7 +4255,7 @@ static bool ssrInVkBuild(PocbCtx& c)
 		imb.newLayout = nl;
 		imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		imb.image = g_ssrVkImg;
+		imb.image = img;
 		imb.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 		c.fns.vkCmdPipelineBarrier(cm, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &imb);
 	};
@@ -4242,8 +4265,9 @@ static bool ssrInVkBuild(PocbCtx& c)
 	cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 	if (c.fns.vkBeginCommandBuffer(cmds[0], &cbb) != VK_SUCCESS)
 		return fail("vkBeginCommandBuffer(初转)");
-	barrier(cmds[0], VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-	        0, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+	barrier(cmds[0], g_ssrVkImg, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+	        VK_IMAGE_LAYOUT_GENERAL);
 	if (c.fns.vkEndCommandBuffer(cmds[0]) != VK_SUCCESS)
 		return fail("vkEndCommandBuffer(初转)");
 	// [1] GENERAL → TRANSFER_SRC → copy → TRANSFER_SRC → GENERAL (回到 GENERAL 以备下一帧)
@@ -4252,7 +4276,7 @@ static bool ssrInVkBuild(PocbCtx& c)
 		return fail("vkBeginCommandBuffer(读回)");
 	// srcAccess=MEMORY_WRITE: 跨 API 的这次写不归 VK 记账, 用"全部写"把 VK 侧缓存失效掉;
 	// 而 D3D11 侧的 Map 返回已保证 D3D11 队列真的跑完了 (CPU 都读到过) ⇒ 不存在时序竞态。
-	barrier(cmds[1], VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+	barrier(cmds[1], g_ssrVkImg, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
 	        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
 	        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	{
@@ -4265,11 +4289,150 @@ static bool ssrInVkBuild(PocbCtx& c)
 		c.fns.vkCmdCopyImageToBuffer(cmds[1], g_ssrVkImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		                             g_ssrVkBuf, 1, &bic);
 	}
-	barrier(cmds[1], VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+	barrier(cmds[1], g_ssrVkImg, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT,
 	        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
 	if (c.fns.vkEndCommandBuffer(cmds[1]) != VK_SUCCESS)
 		return fail("vkEndCommandBuffer(读回)");
+
+	// --- 4.5) 变体B (v0.16.4): 同一块导入内存, 再建一张 usage 对齐 D3D11 绑定的 VkImage ---
+	// 依据 (仓内对照): PoC-B 的 512x512 RGBA8 用 usage = COLOR_ATTACHMENT|TRANSFER_SRC 与
+	// D3D11 双向是能对上的; 本图只给了 TRANSFER_SRC, 而 D3D11 侧源是 BIND_RENDER_TARGET|
+	// BIND_SHADER_RESOURCE ⇒ 驱动给"只读传输图"挑的物理布局可能与 D3D11 的不一致。
+	// 这正是归因1 (布局) 最可能的病因。变体与主图读**同一块内存**, 交叉校验一次打两个
+	// hash ⇒ 一轮跑图就能判死 "usage 是不是病因", 不用靠猜改一个参数跑一次。
+	{
+		VkImageCreateInfo pic = ici; // 逐字段复制主图 (含 external memory 链), 只换 usage
+		pic.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+		            VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		VkResult vb = c.fns.vkCreateImage(c.vdev, &pic, nullptr, &g_ssrVkImgB);
+		if (vb != VK_SUCCESS)
+			logLine("SSR侦察: [2c-β] 变体B vkCreateImage = " + pocbCode(vb) + " → 本轮只比主图");
+		else
+		{
+			VkMemoryRequirements breq{};
+			c.fns.vkGetImageMemoryRequirements(c.vdev, g_ssrVkImgB, &breq);
+			VkDeviceSize bc[6];
+			int nbc = 0;
+			auto addB = [&](VkDeviceSize s) {
+				if (!s)
+					return;
+				for (int i = 0; i < nbc; ++i)
+					if (bc[i] == s)
+						return;
+				if (nbc < 6)
+					bc[nbc++] = s;
+			};
+			addB((VkDeviceSize)cand[hitSz]); // 主图赢的尺寸 = 该句柄的真实分配, 放最前
+			addB(breq.size);
+			addB((breq.size + 65535ULL) & ~(VkDeviceSize)65535ULL);
+			addB((breq.size + 2097151ULL) & ~(VkDeviceSize)2097151ULL);
+			addB(raw);
+			addB((raw + 65535ULL) & ~(VkDeviceSize)65535ULL);
+			int tryTy[8];
+			int ntyT = 0;
+			tryTy[ntyT++] = hitTy; // 主图赢的类型优先
+			for (int t = 0; t < nty && ntyT < 8; ++t)
+				if (types[t] != hitTy)
+					tryTy[ntyT++] = types[t];
+			bool bgot = false;
+			VkDeviceMemory bmem = VK_NULL_HANDLE;
+			VkDeviceSize bsz = 0;
+			int bty = -1;
+			{
+				VkImportMemoryWin32HandleInfoKHR imp{};
+				imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+				imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+				imp.handle = g_ssrInHC;
+				VkMemoryAllocateInfo mai{};
+				mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+				mai.pNext = &imp;
+				for (int si = 0; si < nbc && !bgot; ++si)
+				{
+					for (int ti = 0; ti < ntyT && !bgot; ++ti)
+					{
+						mai.allocationSize = bc[si];
+						mai.memoryTypeIndex = static_cast<uint32_t>(tryTy[ti]);
+						if (c.fns.vkAllocateMemory(c.vdev, &mai, nullptr, &bmem) != VK_SUCCESS)
+							continue;
+						// 分配成 ≠ 绑成 (尺寸不够时 bind 会失败) ⇒ 释放换下一组合
+						if (c.fns.vkBindImageMemory(c.vdev, g_ssrVkImgB, bmem, 0) == VK_SUCCESS)
+						{
+							bgot = true;
+							bsz = bc[si];
+							bty = tryTy[ti];
+							break;
+						}
+						c.fns.vkFreeMemory(c.vdev, bmem, nullptr);
+						bmem = VK_NULL_HANDLE;
+					}
+				}
+			}
+			if (!bgot)
+			{
+				logLine("SSR侦察: [2c-β] 变体B 导入失败 (矩阵 " + std::to_string(nbc) + "x" +
+				        std::to_string(ntyT) + " 全败) → 本轮只比主图");
+				c.fns.vkDestroyImage(c.vdev, g_ssrVkImgB, nullptr);
+				g_ssrVkImgB = VK_NULL_HANDLE;
+			}
+			else
+			{
+				g_ssrVkMemB = bmem;
+				VkCommandBuffer cmdsB[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+				cbai.commandBufferCount = 2;
+				if (c.fns.vkAllocateCommandBuffers(c.vdev, &cbai, cmdsB) != VK_SUCCESS)
+				{
+					logLine("SSR侦察: [2c-β] 变体B vkAllocateCommandBuffers 失败 → 只比主图");
+					c.fns.vkDestroyImage(c.vdev, g_ssrVkImgB, nullptr);
+					c.fns.vkFreeMemory(c.vdev, bmem, nullptr);
+					g_ssrVkImgB = VK_NULL_HANDLE;
+					g_ssrVkMemB = VK_NULL_HANDLE;
+				}
+				else
+				{
+					VkCommandBufferBeginInfo bbb{};
+					bbb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+					bbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+					if (c.fns.vkBeginCommandBuffer(cmdsB[0], &bbb) == VK_SUCCESS)
+					{
+						barrier(cmdsB[0], g_ssrVkImgB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+						        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+						        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+						c.fns.vkEndCommandBuffer(cmdsB[0]);
+					}
+					bbb.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+					if (c.fns.vkBeginCommandBuffer(cmdsB[1], &bbb) == VK_SUCCESS)
+					{
+						barrier(cmdsB[1], g_ssrVkImgB, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+						        VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+						        VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+						        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+						{
+							VkBufferImageCopy bic{};
+							bic.bufferRowLength = 0;
+							bic.bufferImageHeight = 0;
+							bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+							bic.imageExtent = VkExtent3D{md.Width, md.Height, 1};
+							c.fns.vkCmdCopyImageToBuffer(cmdsB[1], g_ssrVkImgB,
+							                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+							                             g_ssrVkBuf, 1, &bic);
+						}
+						barrier(cmdsB[1], g_ssrVkImgB, VK_PIPELINE_STAGE_TRANSFER_BIT,
+						        VK_ACCESS_TRANSFER_WRITE_BIT,
+						        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT,
+						        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+						c.fns.vkEndCommandBuffer(cmdsB[1]);
+					}
+					g_ssrVkCmdB0 = cmdsB[0];
+					g_ssrVkCmdB = cmdsB[1];
+					g_ssrVkHasB = true;
+					logLine("SSR侦察: [2c-β] 变体B 建成: usage=COLOR_ATTACHMENT|SAMPLED|"
+					        "TRANSFER 尺寸=" + std::to_string((long long)bsz) + " 类型=" +
+					        std::to_string(bty) + " → 交叉校验将同时打两个 hash");
+				}
+			}
+		}
+	}
 
 	// 提交初转并等完 —— 之后 g_ssrVkImg 的既定布局就是 GENERAL, 读回命令的前提恒成立
 	c.fns.vkResetFences(c.vdev, 1, &c.fence);
@@ -4284,13 +4447,31 @@ static bool ssrInVkBuild(PocbCtx& c)
 	}
 	if (vr != VK_SUCCESS)
 		return fail("初转 vkQueueSubmit/vkWaitForFences = " + pocbCode(vr));
+	// 变体B 的初转同理 (只跑一次), 失败只关变体, 不拖累主图
+	if (g_ssrVkHasB)
+	{
+		c.fns.vkResetFences(c.vdev, 1, &c.fence);
+		VkSubmitInfo sib{};
+		sib.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		sib.commandBufferCount = 1;
+		sib.pCommandBuffers = &g_ssrVkCmdB0;
+		vr = c.fns.vkQueueSubmit(c.queue, 1, &sib, c.fence);
+		if (vr == VK_SUCCESS)
+			vr = c.fns.vkWaitForFences(c.vdev, 1, &c.fence, VK_TRUE, 5000000000ULL);
+		if (vr != VK_SUCCESS)
+		{
+			logLine("SSR侦察: [2c-β] 变体B 初转失败 " + pocbCode(vr) + " → 只比主图");
+			g_ssrVkHasB = false;
+		}
+	}
 
 	g_ssrVkState = 1;
 	logLine("SSR侦察: [2c-β] VK 导入 OK: 色镜像 NT handle → VkImage (OPAQUE_WIN32) " +
 	        std::to_string(md.Width) + "x" + std::to_string(md.Height) +
 	        " RGBA16F, 读回buffer=" +
 	        std::to_string((long long)md.Width * md.Height * 8) +
-	        "B host-coherent, 命令已录 (初转+读回各一条)");
+	        "B host-coherent, 命令已录 (初转+读回各一条)" +
+	        (g_ssrVkHasB ? ", 含变体B (usage 对齐 D3D11)" : ""));
 	return true;
 }
 
@@ -4331,6 +4512,30 @@ static void ssrInVkFrame(PocbCtx& c)
 	// **同一个 ssrFnvSample**, 同样的 64行x16列/8字节抽样 ⇒ 两个值可直接相等比较
 	const size_t vkPitch = (size_t)g_ssrVkW * 8;
 	const unsigned long long vkH = ssrFnvSample(g_ssrVkBufPtr, vkPitch, g_ssrVkW, g_ssrVkH, 8, &nzk);
+	// ---- 变体B (v0.16.4): 同块内存的第二张图 (usage 对齐 D3D11) 再读一次 → 第二个 hash ----
+	unsigned long long vkHB = 0;
+	bool vrBOk = false;
+	if (g_ssrVkHasB && g_ssrVkCmdB && g_ssrVkBufPtr)
+	{
+		c.fns.vkResetFences(c.vdev, 1, &c.fence);
+		VkSubmitInfo sib{};
+		sib.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		sib.commandBufferCount = 1;
+		sib.pCommandBuffers = &g_ssrVkCmdB;
+		VkResult vrB = c.fns.vkQueueSubmit(c.queue, 1, &sib, c.fence);
+		if (vrB == VK_SUCCESS)
+			vrB = c.fns.vkWaitForFences(c.vdev, 1, &c.fence, VK_TRUE, 5000000000ULL);
+		if (vrB == VK_SUCCESS)
+		{
+			vkHB = ssrFnvSample(g_ssrVkBufPtr, vkPitch, g_ssrVkW, g_ssrVkH, 8, nullptr);
+			vrBOk = true;
+		}
+		else
+		{
+			logLine("SSR侦察: [2c-β] 变体B 读回提交失败 " + pocbCode(vrB) + " → 关掉变体对比");
+			g_ssrVkHasB = false;
+		}
+	}
 	// ---- v0.16.3 β3 归因三件套 (首跑 4/4 全不一致, docs/02 §14.13 归因1/2/3) ----
 	// ① 同刻再读一次 D3D11: 若 同刻==VK ⇒ 不是布局/行距, 是**两边读的不是同一时刻**;
 	//    若 同刻≠帧内那次 ⇒ 镜像在特征B 之后还被改过 (时间窗本身有洞)。
@@ -4358,6 +4563,15 @@ static void ssrInVkFrame(PocbCtx& c)
 	                   " 前帧D3D11=0x" + uhex64(d3dPrev) + (hitPrev ? "=VK✓差一帧" : "");
 	if (vkH2 != 0)
 		diag += " VK按D3D11行距=0x" + uhex64(vkH2) + (hitPitch ? "=D3D11✓行距归因" : "");
+	if (vrBOk)
+	{
+		// 变体B 与哪边相等就写哪边: 与帧内 D3D11 相等 ⇒ usage 就是归因1 的病因;
+		// 与主图相等 ⇒ 两边读法一样, usage 不是病因 (继续查 tiling/handle 类型)。
+		const bool hbFrame = (d3dH != 0 && vkHB == d3dH);
+		const bool hbSame = (vkHB == vkH);
+		diag += " 变体B=0x" + uhex64(vkHB) +
+		        (hbFrame ? "=D3D11✓usage病因" : (hbSame ? "=主图(usage非病因)" : "≠两边"));
+	}
 	logLine("SSR侦察: [2c-β] 交叉校验#" + std::to_string(k) + " D3D11=0x" + uhex64(d3dH) +
 	        " VK=0x" + uhex64(vkH) + (d3dH == vkH ? " **一致✓**" : " **不一致✗**") +
 	        " VK非零=" + std::to_string(nzk) + diag + " 本帧VK读回=" +
@@ -5377,7 +5591,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.16.3 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套) ====");
+	logLine("==== poc-presenter v0.16.4 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 变体B usage对齐) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
