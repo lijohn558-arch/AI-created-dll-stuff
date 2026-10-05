@@ -2389,14 +2389,36 @@ static void ftMakeQueries(ID3D11DeviceContext* ctx)
 		g_ftQFail = true;
 		return;
 	}
-	HRESULT hr = dev->CreateQuery(D3D11_QUERY_TIMESTAMP_DISJOINT, nullptr, &g_ftDisj);
+	// D3D11 的 CreateQuery 只吃 (DESC*, ppQuery) —— 查询类型写在 desc.Query 里 (D3D10 才是三参)
+	D3D11_QUERY_DESC qd{};
+	qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+	HRESULT hr = dev->CreateQuery(&qd, &g_ftDisj);
 	if (SUCCEEDED(hr))
-		hr = dev->CreateQuery(D3D11_QUERY_TIMESTAMP, nullptr, &g_ftTs0);
+	{
+		qd.Query = D3D11_QUERY_TIMESTAMP;
+		hr = dev->CreateQuery(&qd, &g_ftTs0);
+	}
 	if (SUCCEEDED(hr))
-		hr = dev->CreateQuery(D3D11_QUERY_TIMESTAMP, nullptr, &g_ftTs1);
+		hr = dev->CreateQuery(&qd, &g_ftTs1);
 	dev->Release();
 	if (FAILED(hr) || !g_ftDisj || !g_ftTs0 || !g_ftTs1)
 	{
+		// 半成品必须放掉: ftMakeQueries 靠 g_ftDisj 判重, 留着半只会让本局再也建不起来
+		if (g_ftDisj)
+		{
+			g_ftDisj->Release();
+			g_ftDisj = nullptr;
+		}
+		if (g_ftTs0)
+		{
+			g_ftTs0->Release();
+			g_ftTs0 = nullptr;
+		}
+		if (g_ftTs1)
+		{
+			g_ftTs1->Release();
+			g_ftTs1 = nullptr;
+		}
 		g_ftQFail = true;
 		logLine("帧时基线: D3D11 时间戳查询创建失败 " + hexHr(hr) + " -> 本局只记 CPU 侧");
 		return;
