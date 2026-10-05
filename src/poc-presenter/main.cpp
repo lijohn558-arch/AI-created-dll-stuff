@@ -382,7 +382,8 @@
  *       【已废弃】真机结果: 变体B 与主图 hash **完全相同** ⇒ usage 非病因; 且**双图并存
  *       (两张 VkImage 同时绑同一块导入内存) 让驱动返回 VK_ERROR_DEVICE_LOST (-4)**,
  *       PoC-B 被连坐关闭注入 ⇒ 画面上的 VK 三角消失。见 §14.13.3 与 v0.16.5。
- *   **v0.16.5 = 轮换单图槽** (治 v0.16.4 的 DEVICE_LOST + 接着查归因1 的病因):
+ *   **v0.16.5 = 轮换单图槽** (治 v0.16.4 的 DEVICE_LOST + 接着查归因1 的病因;
+ *     真机结果 → v0.16.6, 见下):
  *     · **任何时刻只有一张 VkImage 持有导入内存**: 每次交叉校验机会先"按槽建图+初转"
  *       (本帧不比 —— UNDEFINED→GENERAL 按规范可能丢内容), 下一次机会才读回比对,
  *       读完 `vkDeviceWaitIdle` + 销毁, 换下一槽。
@@ -397,6 +398,19 @@
  *     · 建图失败 (如 external + LINEAR 不被支持) 只记日志换槽; 连挂 4 个槽才关整条通路;
  *       读回提交返回 `-4` 单独打 `[异常]` 行便于判读 (PoC-B 会被连坐, 三角会消失)。
  *     · 换槽/建图失败**不拖累 PoC-B**, 只记日志跳过; 读回成功后 `vkDeviceWaitIdle` + 销毁本槽。
+ *   **v0.16.6 = 病因定死, 收敛到唯一正确参数** (v0.16.5 真机跑图, docs/02 §14.13.5):
+ *     · **槽0 `D3D11句柄` 命中: `D3D11=0x7581B71D2B801E3D VK=0x7581B71D2B801E3D **一致✓**`**
+ *       ⇒ 归因1 的病因 = **handle 类型用错**: `OPAQUE_WIN32` 的语义是"我不解析这个句柄的
+ *       布局信息", 而被导入对象就是 D3D11 纹理 ⇒ 必须用 `D3D11_TEXTURE_BIT` 才让驱动按
+ *       D3D11 的布局解读。旁证: 同一 handleType 下 `VK报size=17694720` 第 1/1 组合就导成,
+ *       而 OPAQUE 要换到对齐值 `16588800` (第5/5) 才成 —— 正是 v0.16.1 那个 `-2` 的来由。
+ *     · 槽1 `LINEAR` 不一致 (没丢设备, 也没解决问题); 槽3 `对照原样` 没跑到。
+ *     · 槽2 `全程GENERAL` 读回 19.43ms → **同秒 `PoC-B 失败: … code=-4` 关闭注入 ⇒ 三角消失**:
+ *       "不转 layout、直接在 GENERAL 下跨 API 并发读"这个姿势有害 ⇒ **该槽已删**。
+ *       注意这次 DEVICE_LOST 是 **PoC-B 的提交**报出来的 (`PoC-B 失败: … code=-4`),
+ *       2c-β 自己那次提交是成功的 ⇒ 判读必须抓 `PoC-B 失败 … code=-4` 这一行。
+ *     · 改法: 槽表只剩 `D3D11句柄` 一个参数 (`NSlot=1` ⇒ `g_ssrVkRotate=false`), **图常驻**,
+ *       每次交叉校验机会都出一行对比 (样本翻倍), 用 ≥4 次 `一致✓` 确认后 2c 收口。
  *   关键日志 (新增):
  *     SSR侦察: ctx vtable=… slot33 … ; slot50 … ; slot47(CopyResource) 原值=… 来自 …
  *     SSR侦察: ctx槽33/50/47 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.16.0 Step2 …)
@@ -1156,7 +1170,15 @@ static VkCommandBuffer g_ssrVkCmd0 = VK_NULL_HANDLE;    // 布局初转命令 (�
 // VK_ERROR_DEVICE_LOST (-4), PoC-B 被连坐关闭注入 (画面上的 VK 三角消失)。
 // 改法: 每次交叉校验只测一个候选参数 —— 建图+初转 → **本帧不比** (初转按规范可能丢内容)
 // → 下次交叉校验才读回比对 → 读完立刻 vkDeviceWaitIdle + 销毁 → 换下一槽。
-// 槽序: 头号嫌疑 (handle 类型) 在前, 自带对照 (原样参数) 收尾。
+// ---- v0.16.5 真机跑图结果 (docs/02 §14.13.5) ⇒ v0.16.6 收敛到唯一正确参数 ----
+//   · 槽0 `D3D11句柄` (handleType=D3D11_TEXTURE_BIT) **命中: VK hash == D3D11 hash**
+//     ⇒ 归因1 的病因定死 = handle 类型用错 (OPAQUE_WIN32 的语义是"不解析句柄布局")。
+//   · 槽1 `LINEAR` 不一致 (没丢设备, 但也没解决问题)。
+//   · 槽2 `全程GENERAL` 读回 19.43ms → **同秒 PoC-B 报 DEVICE_LOST(-4) 关闭注入** ⇒
+//     "不转 layout 直接在 GENERAL 下跨 API 并发读"这个姿势有害, 已删除。
+//   · 槽3 `对照原样` 没跑到 (PoC-B 已先挂)。
+// ⇒ v0.16.6: 表里只剩 `D3D11句柄` 一个参数, NSlot=1 ⇒ 不轮换、图常驻 (g_ssrVkRotate=false),
+//   每次交叉校验机会都出一行对比 (样本翻倍); 将来要再试参数就往表里加, NSlot>1 自动恢复轮换。
 struct SsrVkSlot
 {
 	const char* tag;
@@ -1164,13 +1186,11 @@ struct SsrVkSlot
 	bool linear;    // VK_IMAGE_TILING_LINEAR (默认 OPTIMAL)
 	bool noTrans;   // 读回不转 TRANSFER_SRC, 全程 GENERAL 只做内存栅栏
 };
-static const SsrVkSlot g_ssrVkSlots[4] = {
+static const SsrVkSlot g_ssrVkSlots[1] = {
     {"D3D11句柄", VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT, false, false},
-    {"LINEAR", VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT, true, false},
-    {"全程GENERAL", VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT, false, true},
-    {"对照原样", VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT, false, false},
 };
-static const int g_ssrVkNSlot = 4;
+static const int g_ssrVkNSlot = 1;
+static const bool g_ssrVkRotate = (g_ssrVkNSlot > 1); // 多槽才"读完即毁换槽"; 单槽图常驻
 static int   g_ssrVkSlotIdx = 0;   // 当前在测的槽 (读完一次换下一个)
 static int   g_ssrVkMakeFail = 0;  // 连续建图失败数 (全槽都建不出才关闸)
 static bool  g_ssrVkLogFirst = false; // "VK 导入 OK" 那行只打一次 (β2 判据要恰好 1 行)
@@ -4495,8 +4515,12 @@ static void ssrInVkFrame(PocbCtx& c)
 	        std::to_string(ms).substr(0, 5) + "ms" +
 	        " 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed)));
 	// 不一致**不关闸** —— 它正是 2c-β 要采的样本 (各槽参数的字节视图对比, docs/02 §14.13.3)。
-	ssrVkFree(c);            // 读完即毁: 下一次交叉校验换下一槽
-	g_ssrVkSlotIdx = (slot + 1) % g_ssrVkNSlot;
+	// 单槽 (v0.16.6): 图常驻, 每次交叉校验机会都出一行对比; 多槽才"读完即毁换下一槽"。
+	if (g_ssrVkRotate)
+	{
+		ssrVkFree(c);
+		g_ssrVkSlotIdx = (slot + 1) % g_ssrVkNSlot;
+	}
 }
 
 // 每帧: 提交一次 Vulkan 命令 → fence 等待 → 读回像素 → 拷进 backbuffer
@@ -5509,7 +5533,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.16.5 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 轮换单图槽(handle类型/LINEAR/全程GENERAL)) ====");
+	logLine("==== poc-presenter v0.16.6 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 轮换单图槽(handle类型/LINEAR/全程GENERAL) 定案D3D11_TEXTURE_BIT单图常驻) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
