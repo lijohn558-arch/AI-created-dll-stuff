@@ -47,8 +47,11 @@
 	X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceQueueFamilyProperties) \
 	X(vkGetPhysicalDeviceMemoryProperties)
 
-#define POCB_INST_FNS(X) \
-	POCB_INST_REQ_FNS(X) X(vkGetPhysicalDeviceProperties2) X(vkEnumerateDeviceExtensionProperties)
+// 可选项 (不进 REQ): vkGetPhysicalDeviceProperties2 = 1.0 实例没有;vkGetPhysicalDeviceImageFormatProperties2
+// = 1.1 才有, v0.18.3 的 2d-4 KMT 探测用它查"这个 handle type 配这个格式能不能导入", 查不到就只看导入实测。
+#define POCB_INST_FNS(X)                                                                 \
+	POCB_INST_REQ_FNS(X) X(vkGetPhysicalDeviceProperties2)                            \
+	X(vkEnumerateDeviceExtensionProperties) X(vkGetPhysicalDeviceImageFormatProperties2)
 
 #define POCB_DEV_FNS(X) \
 	X(vkDestroyDevice) X(vkGetDeviceQueue) X(vkDeviceWaitIdle) \
@@ -138,6 +141,7 @@ void  ssrVkFree(PocbCtx& c);                         // 2c-β: 换槽时 vkDevic
 void  ssrInVkFrame(PocbCtx& c);                      // 2c-β: 到点读回比对 (节流 前3次+每600次)
 void  ssrOutVkBuild(PocbCtx& c);                     // 2d-1: 出向图建图+导入+录命令 (失败只关自己)
 void  ssrOutVkFrame(PocbCtx& c);                     // 2d-1: 每帧 入向图→出向图 拷贝 + fence
+bool  ssrKmtProbeVk(HANDLE h, const D3D11_TEXTURE2D_DESC& sd); // 2d-4: 路线 1′ KMT 导入探测 (纯发现)
 
 // ---- renderer 依赖 hook 面的符号 (v0.17.0 过渡态, 2d 收敛成参数后删除) ----
 namespace pocmain

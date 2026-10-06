@@ -454,14 +454,19 @@ vs "源带 `BIND_DEPTH_STENCIL`"；判读与实跑表见 `docs/02` §14.12.1（�
 >   准确病因 = **`D24 家族 × SHARED_NTHANDLE` 这个组合**，而非「格式不在白名单」。
 >   （2c-α 矩阵 `MiscFlags` 恒为 `SHARED|NTHANDLE`、只动了 `BindFlags` ⇒ **少排除一个轴**；
 >   本块新加的「源格式 × 单独 `SHARED`」那格正是为闭这个环。）
-> - **新增候选路线 1′（待探测，结论出来前不写死实现）**：D24 走 legacy `SHARED` →
+> - **候选路线 1′ —— `v0.18.3` 已落地探测（2d-4，待实跑）**：D24 走 legacy `SHARED` →
 >   `IDXGIResource::GetSharedHandle`（KMT handle）→ VK
 >   `VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT` 直接导入，**省掉每帧那 1 次全屏 PS**。
->   前置未知 = ① 驱动是否给该 handle type 配出 `VkImage`(D24/S8)；② 跨 API 同步原语
->   （现 NT 路径的 fence 在 KMT 资源上是否等效）。当前定案的 `D3D11_TEXTURE_BIT` 只认 NT
->   ⇒ 走 1′ 要**另开一条导入分支**，成本与收益待估后再定。
-> - **C-8（归 `v0.18.3`）**：`格式探测 结论` 行后半句「源格式 … 不可共享」与第 1 格实测
->   自相矛盾，应改为「不可 **NT** 共享」；**判读一律以七格明细为准**。
+>   探测两问分开答：`#1/#2` = D24 源格式 × 单独 `SHARED` × `BindFlags{0x00, 0x48}` 建得出吗 /
+>   老式 handle 拿得到吗；`#3` = `vkGetPhysicalDeviceImageFormatProperties2` 查该 handle type 配
+>   `D24_UNORM_S8_UINT` 的 `externalMemoryFeatures`（**是否含 `IMPORTABLE_BIT`**）；
+>   `#4` = 实测「建图 → 导入 → 绑定」，建完立刻销毁（**纯发现**，不写任何 `g_ssrIn*` 状态）。
+>   落地时仍要解决第 ② 项：**跨 API 同步原语**（NT 路径的 fence 在 KMT 资源上是否等效；另 O-1 已证明
+>   「零跨 API 栅栏」会差一帧，v0.18.3 已用入向拷贝后 `Flush()` 收敛）。当前定案的 `D3D11_TEXTURE_BIT`
+>   只认 NT ⇒ 走 1′ 要**另开一条导入分支**，成本与收益**看本轮实跑结论**（`docs/02` §14.19）再定。
+> - **C-8（`v0.18.3` 已改，待实跑）**：`格式探测 结论` 行后半句改为按**第 1 格实测**分支
+>   （`建=OK 老式OK` ⇒ 写「可单独 SHARED、只是拿不到 NT handle ⇒ 病因 = D24 家族 × SHARED_NTHANDLE 组合」）；
+>   **判读一律以七格明细为准**。
 
 ### D3 输出回写与段16 的 16 个 Draw（两个子方案）
 
@@ -536,8 +541,11 @@ layout×2 + pool×2 + allocate/update/**bind**×3）—— SSR v1 真要采样�
 **2d 余下**：`2d-3` 深度格式探测**已出结论（`v0.18.2` 真机 2026-10-06，`ssrDepthFormatProbe` +
 `run2c` §#13 → 行数 7 / NT 可用 6 / 结论 1，见本块末「2d-3 实测结论」与 `docs/02` §14.18.1）**：
 **路线 1 前置 6/6 成立**、R2 归因更正为 `D24 家族 × SHARED_NTHANDLE` 组合。下一步二选一 =
-① 直接落路线 1（`R32_FLOAT` × `0x28` 全屏 PS），或 ② 先探路线 1′（KMT 直入，省掉每帧那 1 次
-全屏 draw）再落；SSR shader 本身未做，见上方「R2 深度改道实现缺口」。
+① 直接落路线 1（`R32_FLOAT` × `0x28` 全屏 PS），或 ② 走路线 1′（KMT 直入，省掉每帧那 1 次
+全屏 draw）—— **② 的前置探测已随 `v0.18.3` 的 2d-4 落地**（`ssrKmtProbe` + `ssrKmtProbeVk`，
+判据 `run2c` §#14，本轮跑完即可定），SSR shader 本身未做，见上方「R2 深度改道实现缺口」。
+（同批的 **O-1** 已定位为「零跨 API 栅栏 ⇒ VK 读到上一帧入向，恒差一帧」，用入向拷贝后
+`ctx->Flush()` 收敛，验收 = `run2c` §#12 12e 不一致 5 → 0，见 `docs/02` §14.19。）
 **D3a 的段16 结束信号**（**Step 1 真机判读已二选一：定特征B** —— 两者真机均 100% 每帧恰 1 次，
 但 B 结构必然触发、A 依赖游戏清屏细节故只作交叉校验，详见 D1 末「Step 1 真机判读」）：
 - **特征A**：`ClearRenderTargetView` 发生在**强特征通道进行期间**。S4 api-scan 实测

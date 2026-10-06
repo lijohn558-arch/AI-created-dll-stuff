@@ -1873,6 +1873,154 @@ void ssrOutVkFrame(PocbCtx& c)
 		        " [下帧特征B 回写585]");
 }
 
+// ---- 2d-4 路线 1′ 探测 (v0.18.3, docs/05 D2a-4 末「路线 1′」/ docs/02 §14.19) ----
+// 问题: D24 家族走**单独 SHARED (不带 NTHANDLE)** 能拿老式 handle (2d-3 第 1 格已证),
+// 那 VK 侧用 VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT 能不能把它导成 VkImage?
+// 能 ⇒ 深度原样进 VK, 省掉路线 1 那每帧一次全屏 PS; 不能 ⇒ 回到路线 1 (R32_FLOAT 全屏 PS)。
+// **纯发现**: 建出来的立刻 destroy, 不写 g_ssrIn* 与 g_ssrOut* 任何状态、不改本轮回写行为;
+// 由 main.cpp 的静态 flag 控制整轮只跑一次。老式 handle 归 DXGI/D3D11 所有 ⇒ 这里**不 CloseHandle**。
+// 两问分开答: #3 = 查支持度 (vkGetPhysicalDeviceImageFormatProperties2, 1.1+ 才有这个函数),
+// #4 = 实测 建图→导入→绑定 (查询缺席/说不行时照样实测 D24 那格, 不因查询缺席就下结论)。
+bool ssrKmtProbeVk(HANDLE h, const D3D11_TEXTURE2D_DESC& sd)
+{
+	// 早退也把 #3/#4 两行都补齐 (判读按"行数 = 4"数, 少一行会被当成探测没跑完)
+	auto fail = [](const char* step, long code) -> bool {
+		logLine("SSR侦察: [2d-4]   KMT探测#3 VK 支持度查询跳过 @" + std::string(step));
+		logLine("SSR侦察: [2d-4]   KMT探测#4 VK 导入实测跳过 @" + std::string(step) + " " +
+		        pocbCode(code));
+		return false;
+	};
+	if (!h)
+		return fail("D3D11 没给出老式 handle", 0);
+	PocbCtx& c = g_pocb;
+	if (c.state.load() != 2 || !c.inst || !c.phys || !c.vdev || !c.queue)
+		return fail("g_pocb 未就绪 (VK 还没 init 完)", 0);
+	if (sd.SampleDesc.Count != 1)
+		return fail("源是多重采样, 本探测没做 msaa 映射", 0);
+
+	// 源是 Format=44 (R24G8_TYPELESS) ⇒ VK 侧只可能落在 D24/S8 这一族
+	const VkFormat cand[2] = {VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT};
+
+	// --- ① 支持度查询 ---
+	std::string qres;
+	bool needTry[2] = {true, false}; // D24 那格无论如何都实测; D32S8 只有查询说可导才试
+	for (int i = 0; i < 2; ++i)
+	{
+		if (i)
+			qres += "; ";
+		qres += (i == 0 ? "D24/S8" : "D32S8");
+		if (!c.fns.vkGetPhysicalDeviceImageFormatProperties2)
+		{
+			qres += "=查询跳过(函数缺席)";
+			continue;
+		}
+		VkPhysicalDeviceExternalImageFormatInfo ei{};
+		ei.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO;
+		ei.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT;
+		VkPhysicalDeviceImageFormatInfo2 ifi{};
+		ifi.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
+		ifi.pNext = &ei;
+		ifi.format = cand[i];
+		ifi.type = VK_IMAGE_TYPE_2D;
+		ifi.tiling = VK_IMAGE_TILING_OPTIMAL;
+		ifi.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		VkPhysicalDeviceExternalImageFormatProperties ep{};
+		ep.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_PROPERTIES;
+		VkPhysicalDeviceImageFormatProperties2 fp{};
+		fp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_PROPERTIES_2;
+		fp.pNext = &ep;
+		const VkResult qr = c.fns.vkGetPhysicalDeviceImageFormatProperties2(c.phys, &ifi, &fp);
+		if (qr != VK_SUCCESS)
+			qres += "=" + pocbCode(qr);
+		else
+		{
+			const uint32_t f = ep.externalMemoryProperties.externalMemoryFeatures;
+			qres += std::string(" features=0x") + uhex64(f).substr(12) +
+			        (f & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT ? " 可导入" : " 不可导入");
+			if (f & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+				needTry[i] = true;
+		}
+	}
+	logLine("SSR侦察: [2d-4]   KMT探测#3 VK 支持度查询 handleType=D3D11_TEXTURE_KMT_BIT: " + qres);
+
+	// --- ② 实测: 建图 → 导入老式 handle → 绑定 (全成才算数) ---
+	VkPhysicalDeviceMemoryProperties mp{};
+	c.fns.vkGetPhysicalDeviceMemoryProperties(c.phys, &mp);
+	std::string ires;
+	bool ok = false;
+	for (int i = 0; i < 2 && !ok; ++i)
+	{
+		if (!needTry[i])
+			continue;
+		const char* tag = (i == 0) ? "D24/S8" : "D32S8";
+		VkExternalMemoryImageCreateInfo pem{};
+		pem.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+		pem.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT;
+		VkImageCreateInfo ici{};
+		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		ici.pNext = &pem;
+		ici.imageType = VK_IMAGE_TYPE_2D;
+		ici.format = cand[i];
+		ici.extent = VkExtent3D{sd.Width, sd.Height, 1};
+		ici.mipLevels = sd.MipLevels ? sd.MipLevels : 1u;
+		ici.arrayLayers = sd.ArraySize ? sd.ArraySize : 1u;
+		ici.samples = VK_SAMPLE_COUNT_1_BIT;
+		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+		ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		VkImage img = VK_NULL_HANDLE;
+		const VkResult cr = c.fns.vkCreateImage(c.vdev, &ici, nullptr, &img);
+		std::string sub;
+		if (cr != VK_SUCCESS || img == VK_NULL_HANDLE)
+			sub = "createImage=" + pocbCode(cr);
+		else
+		{
+			VkMemoryRequirements req{};
+			c.fns.vkGetImageMemoryRequirements(c.vdev, img, &req);
+			const int tDev = pocbMemType(mp, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+			const int tAny = pocbMemType(mp, req.memoryTypeBits, 0);
+			VkDeviceMemory mem = VK_NULL_HANDLE;
+			VkResult ar = VK_ERROR_OUT_OF_HOST_MEMORY;
+			int tries = 0;
+			for (int ti = 0; ti < 2 && ar != VK_SUCCESS; ++ti)
+			{
+				const int t = (ti == 0) ? tDev : tAny;
+				if (t < 0 || (ti == 1 && tAny == tDev) || !req.size)
+					continue;
+				++tries;
+				VkImportMemoryWin32HandleInfoKHR imp{};
+				imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+				imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT;
+				imp.handle = h;
+				VkMemoryAllocateInfo mai{};
+				mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+				mai.pNext = &imp;
+				mai.allocationSize = req.size;
+				mai.memoryTypeIndex = static_cast<uint32_t>(t);
+				ar = c.fns.vkAllocateMemory(c.vdev, &mai, nullptr, &mem);
+			}
+			sub = std::string("alloc=") +
+			      (tries ? pocbCode(ar) : std::string("跳过(无可用内存类型)")) +
+			      " VK报size=" + std::to_string((long long)req.size);
+			if (ar == VK_SUCCESS)
+			{
+				const VkResult br = c.fns.vkBindImageMemory(c.vdev, img, mem, 0);
+				sub += " bind=" + pocbCode(br);
+				ok = (br == VK_SUCCESS);
+			}
+			if (mem)
+				c.fns.vkFreeMemory(c.vdev, mem, nullptr);
+			c.fns.vkDestroyImage(c.vdev, img, nullptr);
+		}
+		ires += (ires.empty() ? "" : "; ");
+		ires += std::string(tag) + " " + sub;
+	}
+	logLine("SSR侦察: [2d-4]   KMT探测#4 VK 导入实测(建图→导入→绑定, 建完立刻销毁) → " +
+	        (ires.empty() ? std::string("无候选格式可试") : ires));
+	return ok;
+}
+
 // 每帧: 提交一次 Vulkan 命令 → fence 等待 → 读回像素 → 拷进 backbuffer
 void pocbInject(PocbCtx& c, IDXGISwapChain* sc)
 {

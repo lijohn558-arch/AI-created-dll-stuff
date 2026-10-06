@@ -1747,6 +1747,8 @@ static void ssrDepthFormatProbe(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& s
 	        std::to_string(sd.Width) + "x" + std::to_string(sd.Height) +
 	        " — 纯发现用, 建出来的立刻 Release, 不改本轮回写行为");
 	std::string okBuilt, okNt;
+	// C-8 (v0.18.3): 记下第 1 格 (源格式 × 单独 SHARED) 的实测结果, 结论行后半句照它写。
+	bool srcBuiltOk = false, srcOldOk = false;
 	for (int i = 0; i < static_cast<int>(sizeof(cells) / sizeof(cells[0])); ++i)
 	{
 		const Cell& c = cells[i];
@@ -1762,6 +1764,8 @@ static void ssrDepthFormatProbe(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& s
 		{
 			addTag(okBuilt, c.tag);
 			res = "建=OK";
+			if (i == 0)
+				srcBuiltOk = true;
 			HRESULT hr2 = E_FAIL;
 			HANDLE h = nullptr;
 			IDXGIResource1* r1 = nullptr;
@@ -1782,7 +1786,11 @@ static void ssrDepthFormatProbe(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& s
 				// 但 VK 的 D3D11_TEXTURE_BIT 只认 NT handle, 这种导不了。
 				HANDLE hOld = nullptr;
 				if (SUCCEEDED(r1->GetSharedHandle(&hOld)) && hOld)
+				{
 					res += " handle=老式OK(NT=FAIL " + hexHr(hr2) + ")";
+					if (i == 0)
+						srcOldOk = true;
+				}
 				else
 					res += " handle=FAIL " + hexHr(hr2);
 			}
@@ -1807,15 +1815,122 @@ static void ssrDepthFormatProbe(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& s
 		        ((c.misc & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) ? "SHARED|NTHANDLE" : "SHARED") +
 		        " → " + res);
 	}
+	// C-8 (v0.18.3): 结论行后半句必须按第 1 格**实测**写。v0.18.2 把它写死成"源格式 不可共享",
+	// 与同一批第 1 格 "建=OK 老式handle=OK" 自相矛盾 (§14.18.1 查出), 会把人带回
+	// "病因 = 格式不在 D3D11 SHARED 白名单" 这个已被推翻的口径 —— 真实病因是
+	// "D24 家族 × SHARED_NTHANDLE 这个组合" (只动 BindFlags 那轮矩阵少排除了一个轴)。
+	std::string tail;
+	if (okNt.empty())
+		tail = " → 路线1 前置不成立, 退回路线2 (仅颜色 SSR + 屏幕边缘 fallback)";
+	else
+	{
+		std::string srcPart;
+		if (srcBuiltOk && srcOldOk)
+			srcPart = "可单独 SHARED 共享(老式 handle 拿得到)、只是拿不到 NT handle ⇒ 对当前走 "
+			          "D3D11_TEXTURE_BIT 的导入路径无用, 病因是 D24 家族 × SHARED_NTHANDLE 组合";
+		else
+			srcPart = "不可共享 (BindFlags 矩阵 + 本表第1格双重确认)";
+		tail = " → 路线1 前置成立: D3D11 侧 shader 把深度转进 " + okNt +
+		       " 的 SHARED 镜像, 再走 2c-β 同一条导入; 源格式 " + ssrFmtName(sd.Format) + " " + srcPart;
+	}
 	logLine("SSR侦察: [2d-3]   格式探测 结论: 建得出 = " +
 	        (okBuilt.empty() ? std::string("无") : okBuilt) +
 	        "; 建得出且拿得到 NT handle (VK D3D11_TEXTURE_BIT 可导入) = " +
-	        (okNt.empty() ? std::string("无") : okNt) +
-	        (okNt.empty()
-	             ? std::string(" → 路线1 前置不成立, 退回路线2 (仅颜色 SSR + 屏幕边缘 fallback)")
-	             : std::string(" → 路线1 前置成立: D3D11 侧 shader 把深度转进 ") + okNt +
-	                   " 的 SHARED 镜像, 再走 2c-β 同一条导入; 源格式 " + ssrFmtName(sd.Format) +
-	                   " 不可共享 (BindFlags 矩阵 + 本表第1格双重确认)"));
+	        (okNt.empty() ? std::string("无") : okNt) + tail);
+}
+
+// ---- 2d-4 路线 1' 探测 (v0.18.3, docs/05 D2a-4 末「路线 1'」/ docs/02 §14.19) ----
+// D3D11 侧两问: 源格式 × **单独 SHARED (故意不带 NTHANDLE)** 在 BindFlags {0x00, 0x48} 下
+// ① CreateTexture2D 建得出吗 ② 拿得到老式 handle 吗 (IDXGIResource::GetSharedHandle)。
+// 拿到就把 handle 交给 vkrenderer 的 ssrKmtProbeVk 走 VK 半边 (#3 支持度查询 / #4 实测导入)。
+// 拿到 handle 的那张纹理**活到 VK 半边跑完才 Release** —— 中途释放会让 handle 悬垂。
+// **纯发现**: 不写任何 g_ssrIn* 与 g_ssrOut* 状态、不改本轮回写行为; 与 2d-3 同点触发、整轮只跑一次。
+// 结果读法: 若 #1/#2 老式 handle OK 且 #4 导入+绑定 OK ⇒ 深度可原样进 VK, 省掉路线1 的每帧全屏 PS。
+static void ssrKmtProbe(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& sd, const char* nm)
+{
+	static bool s_probed = false;
+	if (s_probed || !dev)
+		return;
+	if (std::string(nm).find("深度") == std::string::npos)
+		return; // 只为深度改道取数 (色324 实测本来就能 NT 共享, 走不到这条分支)
+	s_probed = true;
+
+	const UINT bfCand[2] = {0u, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DEPTH_STENCIL}; // 0x00 / 0x48
+	HANDLE hKmt = nullptr;
+	ID3D11Texture2D* kept = nullptr; // 拿到 handle 的那张, 活到 VK 半边跑完
+	logLine("SSR侦察: [2d-4] 路线1' 探测开始 (D24 走老式 SHARED → KMT handle → VK 直入, 目标是省掉"
+	        " 路线1 的每帧全屏 PS) 源=" + ssrFmtName(sd.Format) + "(Format=" +
+	        std::to_string(static_cast<int>(sd.Format)) + ") " + std::to_string(sd.Width) + "x" +
+	        std::to_string(sd.Height) + " — 纯发现, 不改本轮回写行为");
+	for (int i = 0; i < 2; ++i)
+	{
+		D3D11_TEXTURE2D_DESC td = sd; // 尺寸/mips/msaa 照抄源, 只换 BindFlags/MiscFlags
+		td.BindFlags = bfCand[i];
+		td.CPUAccessFlags = 0;
+		td.MiscFlags = D3D11_RESOURCE_MISC_SHARED; // ← 老式 SHARED, **不带** NTHANDLE (2c 的失败轴)
+		ID3D11Texture2D* t = nullptr;
+		const HRESULT hr = dev->CreateTexture2D(&td, nullptr, &t);
+		std::string res;
+		if (SUCCEEDED(hr) && t)
+		{
+			res = "建=OK";
+			IDXGIResource* r0 = nullptr;
+			HANDLE h = nullptr;
+			HRESULT hr2 = t->QueryInterface(__uuidof(IDXGIResource), reinterpret_cast<void**>(&r0));
+			if (SUCCEEDED(hr2) && r0)
+				hr2 = r0->GetSharedHandle(&h);
+			if (r0)
+				r0->Release();
+			if (SUCCEEDED(hr2) && h)
+			{
+				res += " 老式handle=OK";
+				if (!kept) // 第一张拿到的留用, 第二张当场放
+				{
+					hKmt = h;
+					kept = t;
+					t = nullptr;
+				}
+			}
+			else
+				res += " 老式handle=FAIL " + hexHr(hr2);
+			if (t)
+				t->Release();
+		}
+		else
+		{
+			if (t)
+			{
+				t->Release();
+				t = nullptr;
+			}
+			res = "建=FAIL " + hexHr(hr);
+		}
+		logLine("SSR侦察: [2d-4]   KMT探测#" + std::to_string(i + 1) + " D3D11 源格式 BindFlags=0x" +
+		        uhex64(bfCand[i]).substr(8) + " misc=SHARED → " + res);
+	}
+	bool vkOk = false;
+	if (hKmt)
+		vkOk = ssrKmtProbeVk(hKmt, sd);
+	else
+	{
+		logLine("SSR侦察: [2d-4]   KMT探测#3 VK 支持度查询跳过 (D3D11 侧没拿到老式 handle)");
+		logLine("SSR侦察: [2d-4]   KMT探测#4 VK 导入实测跳过 (D3D11 侧没拿到老式 handle)");
+	}
+	if (kept)
+	{
+		kept->Release(); // VK 半边已把自己建的 VkImage/VkDeviceMemory 销毁完, 这里才放
+		kept = nullptr;
+	}
+	std::string concl;
+	if (!hKmt)
+		concl = "路线1' 前置不成立 (D3D11 侧连老式 handle 都拿不到) → 回到路线1 (R32_FLOAT 全屏 PS)";
+	else if (vkOk)
+		concl = "路线1' 前置成立 (老式 handle + VK 导入 + 绑定 全过) → 深度可原样直入 VK, "
+		        "省掉路线1 的每帧全屏 PS —— 落地前仍按 D2a-4 另开导入分支评估";
+	else
+		concl = "路线1' 前置不成立 (老式 handle 拿到了, VK 侧没走通, 看 #3/#4 卡在哪一步) "
+		        "→ 回到路线1 (R32_FLOAT 全屏 PS)";
+	logLine("SSR侦察: [2d-4]   KMT探测 结论: " + concl);
 }
 
 // 建 1 张 SHARED|NTHANDLE 镜像 (desc 照抄源) 并取 NT handle。失败只降级、不抛。
@@ -1875,6 +1990,7 @@ static bool ssrInMakeShared(ID3D11Device* dev, ID3D11Resource* src, ID3D11Textur
 			        std::to_string(static_cast<int>(sd.Format)) +
 			        ") 不在 D3D11 SHARED 白名单 —— R2 病因=格式, 深度不能走 D3D11 SHARED, 需改道");
 			ssrDepthFormatProbe(dev, sd, nm); // 2d-3: 在 BindFlags 矩阵旁再加一列格式 (纯发现)
+			ssrKmtProbe(dev, sd, nm);        // 2d-4: 路线 1' 老式 SHARED → KMT → VK 直入 (纯发现)
 			*out = nullptr;
 			return false;
 		}
@@ -2063,6 +2179,14 @@ static void ssrInQueue(ID3D11DeviceContext* ctx)
 	if (g_ssrDepthRes && g_ssrInTexD)
 		ctx->CopyResource(g_ssrInTexD, g_ssrDepthRes); // 520 → 深度镜像
 	g_ssrSelfCopy = false;
+	// O-1 (v0.18.3): 把"入向已可见"的隐含假设补成**每帧**成立。
+	// 原来只有 2c 的阻塞读回 (前3次 + 每600次, 见下方 ssrInFnv 的 Map) 才把 D3D11 队列等完 ⇒
+	// 非读回帧到 Present 时 D3D11 这条 CopyResource 可能还没交到 GPU, VK 就按零跨API栅栏的
+	// 设计读了入向镜像, 读到的是**上一帧**那份 ⇒ [2d] 出向读回 出现"出向 = 2 帧前的入向"差一帧
+	// 不一致 (v0.18.2 实测 9 行里 5 行如此, 而每帧都阻塞读回的头 3 行全一致 = 证据链)。
+	// Flush 只提交不等待: 尽早把拷贝交给 GPU, 让本帧 Present 时 VK 读到本帧这份。
+	// 验收 = run2c #12e 的 一致/不一致计数 (预期从 4/5 变成全一致); 代价看帧时基线是否劣化 5%。
+	ctx->Flush();
 	const long k = ++g_ssrInN;
 	const long c = ++g_ssrInLogN;
 	const bool logThis = (k <= 8) || (k % 128) == 0;
@@ -4199,7 +4323,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.2 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++) ====");
+	logLine("==== poc-presenter v0.18.3 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
