@@ -80,8 +80,8 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
 本步**不碰 Vulkan、不改变画面**，只产出日志。
 
-> **状态（2026-10-06）：插件 `poc-presenter` v0.18.5（⏳ 代码批已推、CI 出包中；路线 1′ KMT 导入分支落地，
-> 待真机回归 → 判读 §14.21）；上一轮 v0.18.4 ✅ CI SUCCESS + 真机 [PASS] 全绿（O-1 EVENT 闸归零，
+> **状态（2026-10-06）：插件 `poc-presenter` v0.18.5（`882903b`，CI SUCCESS + 真机 [PASS] 全绿，
+> 判读 §14.21 / §14.21.1）；上一轮 v0.18.4 ✅ CI SUCCESS + 真机 [PASS] 全绿（O-1 EVENT 闸归零，
 > 判读 §14.20 / §14.20.1）—— 阶段1 已全绿收口（2026-10-04）、阶段2 进行中：
 > SSR Step1/2a/2b/2c 已收口 + **2d-1 出向回写两轮真机回归均 [PASS] 全绿**（`ssr.vkout`；
 > `v0.18.0` §14.15.1、代码批 `v0.18.1` §14.17 = 6001 帧），其中 C-6 把 2d 回写从 **28.77 → 0.68
@@ -96,14 +96,21 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 > **2c 入向 EVENT 闸**（`ssrInQueue` End + `ssrInGateWait` 提交 VK 前等掉）把 12e 不一致
 > **3/8 → 0/9 归零**、闸行 41 / 超时 0、闸等待均值 1.78ms（>1ms ⇒ 单列登记 R3 基线观测项），
 > 帧时会话 CPU 16.85 持平 / GPU +0.18% / PoC-B +3.4% ⇒ **无性能回退**。
-> **第六轮 `v0.18.5`（代码批已推，CI 出包中）＝ 路线 1′ KMT 导入分支落地**（`docs/05` D2a-4）：
+> **第六轮 `v0.18.5`（`882903b`，CI SUCCESS）也 [PASS] 全绿（§14.21.1，4440 帧）＝ 路线 1′ KMT 导入分支落地**（`docs/05` D2a-4）：
 > 深度镜像在 NTHANDLE 三次全败后改走**单独 `D3D11_RESOURCE_MISC_SHARED` + `IDXGIResource::GetSharedHandle`
 > 老式句柄**（不 CloseHandle），VK 侧**另开持久导入分支** `ssrKmtVkBuild/ssrKmtVkFrame`
 > （`VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT` + `DEDICATED_ONLY` 必须的 dedicated 分配 +
 > `DEPTH|STENCIL` 视图 + 节流读回），三档候选比对（全量 4B / 低 24 位 / 紧密 3B）验跨 API 字节；
 > 同步原语评估结论 = **EVENT 闸与 handleType 无关，KMT 分支直接继承 v0.18.4 的闸，老式 handle 只在建图时
-> 导入一次**；run2c 新增 §#15，任一步失败只关自己（深度降级、色通路/2c/2d 不受影响）⇒ 待真机回归后入档
-> `docs/02` §14.21。下一步 = **SSR v1 shader 采样**；renderer 已拆成
+> 导入一次**；run2c 新增 §#15，任一步失败只关自己（深度降级、色通路/2c/2d 不受影响）。
+> **实跑结论（§14.21.1，4440 帧）**：深度镜像走成 **老式 SHARED（`BindFlags 0x48` 首档即成）→ KMT**、
+> 导入 `usage=TRANS_SRC|SAMPLED alloc=dedicated view=OK 读回=OK`、**跨 API 读回 8/8 全量 4B 逐字节一致
+> （不一致 0，连 stencil 字节都相同）⇒ 路线 1′ 成立、深度原样直入 VK，路线 1 的每帧全屏 PS 不再需要**；
+> 代价只在 **8 个节流帧的 `提交+等fence` 30.2~41.7ms（折合 0.065ms/帧，稳态 `>20ms` 3/600 与 v0.18.4
+> 持平）**，登记为 R3 新观测项；EVENT 闸均值 **1.783 → 1.420ms（-20%，仍 >1ms 继续单列）**；
+> 回归面 §#13=7/6/1、§#14=4/2/1、2c-β 8/8、12e 7/7、desc/哨兵/异常 全 0、PoC-B 0.88、
+> 帧时末窗中位 **16.66/16.70**（v0.18.4 = 16.78/16.67）⇒ **无性能回退**。
+> 下一步 = **SSR v1 shader 采样**；renderer 已拆成
 > `vkrenderer.h/cpp` 独立模块（v0.17.0）；CI 双 job 出包。**（下述 0.9.3 及以前为 PoC-A/B 期历史记录）**
 > —— 带 renderdoc 局（7201 次 / 60 FPS，判读 §7.6）+ 无 renderdoc/GFE 局（★ 中、6001 次 / 60 FPS，判读 §7.7）
 > 闭合第一环「Present 可拦」；**PoC-B v0.1 于 0.9.1 局闭合第二环「写」**：Vulkan 离屏 512×512 → 读回 →
