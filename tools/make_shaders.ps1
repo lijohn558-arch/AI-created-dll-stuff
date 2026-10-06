@@ -69,7 +69,7 @@ $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine("// pocb_shaders.h — 由 tools\make_shaders.ps1 生成, 请勿手改")
 [void]$sb.AppendLine("//")
 [void]$sb.AppendLine("// 源: src\poc-presenter\shaders\*.vert/*.frag (GLSL 450 -> SPIR-V 1.x)")
-[void]$sb.AppendLine("//      pocb.* = PoC-B 注入三角; ssr.* = SSR v1 全屏三角 + 采样 (v0.18.6)")
+[void]$sb.AppendLine("//      pocb.* = PoC-B 注入三角; ssr.* = SSR v1 全屏三角 + 采样 (v0.18.7: 平滑批 + 底色 binding2)")
 [void]$sb.AppendLine("// 再生成: powershell -NoProfile -ExecutionPolicy Bypass -File tools\make_shaders.ps1")
 [void]$sb.AppendLine("//")
 [void]$sb.AppendLine("// SPIR-V 规范要求 module 大小是 4 的倍数, 且 pCode 按 uint32 对齐 => 这里存字。")

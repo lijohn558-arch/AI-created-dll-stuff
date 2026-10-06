@@ -204,4 +204,11 @@ namespace pocmain
 	extern float                   g_ssrV1Strength;   // ini ssr.strength 反射合成强度
 	extern float                   g_ssrV1Dist;       // ini ssr.dist  ray march 最大距离 (以 near 为单位)
 	extern float                   g_ssrV1Rev;        // ini ssr.rev   反向深度开关 (近->1 时置 1)
+	// ---- v0.18.7: A 平滑批 (倒影破碎) + B 水色保留 (第4张底色镜像) ----
+	extern int                     g_ssrV1Smooth;     // ini ssr.smooth 法线差分邻域 (px, 1..16)
+	extern int                     g_ssrV1Blur;       // ini ssr.blur   反射 5tap 空间平滑 0/1
+	extern int                     g_ssrV1Debug;      // ini ssr.debug  0 正常 / 1 法线 / 2 命中 / 3 深度
+	extern std::atomic<bool>       g_ssrBaseOn;       // ini ssr.base585 底色镜像独立门 (默认 1)
+	extern ID3D11Texture2D*        g_ssrBaseTex;      // 底色 SHARED 镜像 (585 段16 后 = 含水画面)
+	extern HANDLE                  g_ssrBaseH;        // 底色镜像 NT handle (VK 导入源)
 }

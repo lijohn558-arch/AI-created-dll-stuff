@@ -97,6 +97,19 @@ static bool  g_ssrVkCanSample = true; // 入向 VkImage 带 SAMPLED 建得出吗
 static bool  g_ssrV1AttachOk = true;  // 出向 VkImage 带 COLOR_ATTACHMENT 建得出吗 (v0.18.6)
 static long  g_ssrVkOutN = 0;       // 出向提交次数
 
+// ---- v0.18.7 B 水色保留: 第 4 张 SHARED 镜像 (585 段16 后 = 含水画面) 的 VK 导入 ----
+// 为什么需要: v1 的合成底色原先 = 324 快照 (段16 **之前**, 没画水) ⇒ fresnel 正对时 92% 是
+// "没水的画面", 水看起来仍然透明无色。底色换成段16 后的 585 ⇒ 水色回来, 只在上面叠反射。
+// 生命周期与出向图同款: D3D11 每帧 CopyResource(585 → 底色镜像), VK 导入后当 binding2 采样;
+// **失败只关自己** (p3.w=0 ⇒ 着色器退回采 uColor, 行为 = v0.18.6)。
+static VkImage        g_ssrVkImgBase = VK_NULL_HANDLE; // 从底色镜像 NT handle 导入的 VkImage
+static VkDeviceMemory g_ssrVkMemBase = VK_NULL_HANDLE;
+static HANDLE         g_ssrVkBaseSrc = nullptr; // 录制/导入时的 handle (D3D11 侧换了才重建)
+static int   g_ssrVkBaseState = 0; // 0=未建 1=OK 2=失败禁用 (只关自己)
+static bool  g_ssrVkBaseLog = false; // "底色图就绪/失败" 只打一次
+static VkDevice g_ssrVkBaseDev = VK_NULL_HANDLE; // 建图用的 device (换设备要整套丢弃重建)
+static VkCommandBuffer g_ssrVkCmdB = VK_NULL_HANDLE; // 底色布局初转命令 (分配一次, POCB_DEV_FNS 没有 vkFreeCommandBuffers)
+
 // ---------- 原 main.cpp: PoC-B 实现 (pocbCode/pocbFail/pocbEnabled/pocbInit/2c-β/pocbInject) ----------
 static VkImage        g_ssrV1RecSrc = VK_NULL_HANDLE; // 录命令时用的入向图 (纯拷贝录制 = NULL)
 static long           g_ssrV1N = 0;                   // v1 渲染计数 (节流日志用, ssrOutVkFrame 也读)
@@ -108,6 +121,8 @@ static bool ssrV1Dirty(); // v1 依赖变了 (深度图/模式/入向图) ⇒ �
 static void ssrV1Free(PocbCtx& c); // 销毁 v1 全套 (换设备/关闸时)
 static void ssrV1DropViewC(PocbCtx& c); // 入向图要换/要销毁前, 先摘掉 v1 指着它的 color view
 static void ssrV1DropViewD(PocbCtx& c); // 深度 KMT 图要换/要销毁前, 先摘掉 v1 指着它的 depth view
+static void ssrV1DropViewB(PocbCtx& c); // v0.18.7: 底色图要换/要销毁前, 先摘掉 v1 指着它的 view
+static void ssrBaseVkBuild(PocbCtx& c); // v0.18.7 B: 底色镜像导入 (每帧 ssrOutVkFrame 开头调)
 
 static std::string pocbCode(long v)
 {
@@ -1504,6 +1519,23 @@ void ssrVkFree(PocbCtx& c)
 		c.fns.vkFreeMemory(c.vdev, g_ssrVkMemOut, nullptr);
 		g_ssrVkMemOut = VK_NULL_HANDLE;
 	}
+	// v0.18.7 B: 底色图 (第4张) 一并退 —— ssrV1Free 已把指着它的 view 销毁, 这里才是图本体
+	if (g_ssrVkImgBase)
+	{
+		c.fns.vkDeviceWaitIdle(c.vdev);
+		c.fns.vkDestroyImage(c.vdev, g_ssrVkImgBase, nullptr);
+		g_ssrVkImgBase = VK_NULL_HANDLE;
+	}
+	if (g_ssrVkMemBase)
+	{
+		c.fns.vkFreeMemory(c.vdev, g_ssrVkMemBase, nullptr);
+		g_ssrVkMemBase = VK_NULL_HANDLE;
+	}
+	g_ssrVkBaseSrc = nullptr;
+	g_ssrVkBaseState = 0; // 拆干净了 ⇒ 下次从头再试 (含上次失败的用法)
+	g_ssrVkBaseLog = false;
+	g_ssrVkBaseDev = VK_NULL_HANDLE;
+	g_ssrVkCmdB = VK_NULL_HANDLE; // 初转命令属于 c.pool ⇒ 拆干净后不再复用 (无 vkFree; 只在换槽时走到)
 	g_ssrVkCmdOutSrc = VK_NULL_HANDLE;
 	g_ssrVkOutState = 0;
 }
@@ -1833,6 +1865,273 @@ void ssrOutVkBuild(PocbCtx& c)
 	        " — 本帧只建不提, 下帧起每帧出向");
 }
 
+// ---- v0.18.7 B: 底色镜像导入 (585 段16 后 = 含水画面, v1 合成的底色) ----
+// 建法与 ssrOutVkBuild 同款 (NT handle + [尺寸候选 x 内存类型] 导入矩阵), 两点不同:
+//   · usage 只要 SAMPLED (它只当 sampler2D, 不当拷贝目的) —— 建不出 ⇒ 整个底色关自己;
+//   · 不录常驻命令: v1 的出向命令里自带 GENERAL→SHADER_READ→GENERAL 成对迁移 (与入向色同口径)。
+// 每帧 ssrOutVkFrame 开头调, 幂等: 就绪即返回; D3D11 侧底色镜像建得晚也能自动补上。
+// **只关自己**: 任一步失败 ⇒ 底色不用, 着色器退回采 uColor (v0.18.6 行为), 倒影照出。
+static void ssrBaseVkBuild(PocbCtx& c)
+{
+	if (g_ssrVkBaseState == 2)
+		return;
+	// 换设备: 旧 device 上的句柄**不能**拿来 destroy (同 ssrV1Drop 的道理) ⇒ 整套只丢不毁,
+	// 连同旧 pool 里的初转命令 buffer 一起作废 (无 vkFreeCommandBuffers, 换设备必须重分配)。
+	if (g_ssrVkBaseDev && c.vdev && g_ssrVkBaseDev != c.vdev)
+	{
+		ssrV1DropViewB(c);
+		g_ssrVkImgBase = VK_NULL_HANDLE;
+		g_ssrVkMemBase = VK_NULL_HANDLE;
+		g_ssrVkCmdB = VK_NULL_HANDLE;
+		g_ssrVkBaseSrc = nullptr;
+		g_ssrVkBaseState = 0;
+		g_ssrVkBaseLog = false;
+		g_ssrVkBaseDev = VK_NULL_HANDLE;
+		logLine("SSR侦察: [base] 检测到 VkDevice 变更 → 丢弃旧底色句柄重建");
+	}
+	// D3D11 侧重建过底色镜像 (handle 变了) ⇒ 先摘 v1 指着旧图的 view, 再退旧图旧显存
+	if (g_ssrVkImgBase != VK_NULL_HANDLE && g_ssrVkBaseSrc != g_ssrBaseH)
+	{
+		ssrV1DropViewB(c);
+		c.fns.vkDeviceWaitIdle(c.vdev);
+		c.fns.vkDestroyImage(c.vdev, g_ssrVkImgBase, nullptr);
+		g_ssrVkImgBase = VK_NULL_HANDLE;
+		c.fns.vkFreeMemory(c.vdev, g_ssrVkMemBase, nullptr);
+		g_ssrVkMemBase = VK_NULL_HANDLE;
+		logLine("SSR侦察: [base] D3D11 侧底色镜像换了 handle → 退掉旧底色图重建");
+	}
+	if (g_ssrVkImgBase != VK_NULL_HANDLE)
+		return; // 已就绪
+	if (c.state.load() != 2 || !c.vdev || !c.queue || !c.pool || !c.fence)
+		return; // PoC-B 还没就绪, 下帧再试
+	if (!g_ssrBaseOn.load(std::memory_order_relaxed) ||
+	    !g_ssrVkOutOn.load(std::memory_order_relaxed) ||
+	    !g_ssrSharedOn.load(std::memory_order_relaxed) ||
+	    !g_ssrV1On.load(std::memory_order_relaxed))
+		return;
+	if (!g_ssrBaseTex || !g_ssrBaseH)
+		return; // D3D11 侧底色镜像还没建 (ssrInBuild 触发得晚) —— 下帧再试, 不算失败
+	D3D11_TEXTURE2D_DESC bd{};
+	g_ssrBaseTex->GetDesc(&bd);
+	auto giveup = [&](const std::string& why) {
+		if (!g_ssrVkBaseLog)
+		{
+			g_ssrVkBaseLog = true;
+			logLine("SSR侦察: [base] " + why + " → 底色关自己 (v1 退回 324 底色, 倒影照出)");
+		}
+		g_ssrVkBaseState = 2;
+	};
+	if (bd.Format != DXGI_FORMAT_R16G16B16A16_FLOAT)
+	{
+		giveup("底色镜像格式非 RGBA16F (" + ssrFmtName(bd.Format) + ")");
+		return;
+	}
+	auto kill = [&]() {
+		if (g_ssrVkImgBase)
+		{
+			c.fns.vkDestroyImage(c.vdev, g_ssrVkImgBase, nullptr);
+			g_ssrVkImgBase = VK_NULL_HANDLE;
+		}
+		if (g_ssrVkMemBase)
+		{
+			c.fns.vkFreeMemory(c.vdev, g_ssrVkMemBase, nullptr);
+			g_ssrVkMemBase = VK_NULL_HANDLE;
+		}
+	};
+
+	// --- 1) VkImage: usage = SAMPLED (v1 只采样它) ---
+	VkExternalMemoryImageCreateInfo emi{};
+	emi.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+	emi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+	VkImageCreateInfo ici{};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.pNext = &emi;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_R16G16B16A16_SFLOAT; // DXGI R16G16B16A16_FLOAT, 字节序一致
+	ici.extent = VkExtent3D{bd.Width, bd.Height, 1};
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VkResult vr = c.fns.vkCreateImage(c.vdev, &ici, nullptr, &g_ssrVkImgBase);
+	if (vr != VK_SUCCESS)
+	{
+		g_ssrVkImgBase = VK_NULL_HANDLE;
+		giveup("底色图带 SAMPLED vkCreateImage = " + pocbCode(vr));
+		return;
+	}
+
+	// --- 2) 导入 NT handle (与入向/出向**不同**的 NT handle ⇒ 不同内存, 不踩 v0.16.4) ---
+	VkMemoryRequirements req{};
+	c.fns.vkGetImageMemoryRequirements(c.vdev, g_ssrVkImgBase, &req);
+	VkPhysicalDeviceMemoryProperties mp{};
+	c.fns.vkGetPhysicalDeviceMemoryProperties(c.phys, &mp);
+	int types[8];
+	int nty = 0;
+	for (uint32_t i = 0; i < mp.memoryTypeCount && nty < 8; ++i)
+	{
+		if (!(req.memoryTypeBits & (1u << i)))
+			continue;
+		if (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+			types[nty++] = static_cast<int>(i);
+	}
+	for (uint32_t i = 0; i < mp.memoryTypeCount && nty < 8; ++i)
+	{
+		if (!(req.memoryTypeBits & (1u << i)))
+			continue;
+		bool dup = false;
+		for (int j = 0; j < nty; ++j)
+			dup = dup || (types[j] == static_cast<int>(i));
+		if (!dup)
+			types[nty++] = static_cast<int>(i);
+	}
+	const VkDeviceSize raw = (VkDeviceSize)bd.Width * (VkDeviceSize)bd.Height * 8ULL; // RGBA16F = 8B/px
+	VkDeviceSize cand[6];
+	int ncd = 0;
+	auto addSz = [&](VkDeviceSize s) {
+		if (!s)
+			return;
+		for (int i = 0; i < ncd; ++i)
+			if (cand[i] == s)
+				return;
+		if (ncd < 6)
+			cand[ncd++] = s;
+	};
+	addSz(req.size);
+	addSz((req.size + 65535ULL) & ~(VkDeviceSize)65535ULL);
+	addSz((req.size + 2097151ULL) & ~(VkDeviceSize)2097151ULL);
+	addSz(raw);
+	addSz((raw + 65535ULL) & ~(VkDeviceSize)65535ULL);
+	addSz((raw + 2097151ULL) & ~(VkDeviceSize)2097151ULL);
+	if (nty == 0 || ncd == 0)
+	{
+		kill();
+		giveup("底色导入无可用内存类型/尺寸候选 (memoryTypeBits=" +
+		       std::to_string(req.memoryTypeBits) + ")");
+		return;
+	}
+	VkImportMemoryWin32HandleInfoKHR imp{};
+	imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+	imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+	imp.handle = g_ssrBaseH; // 只借用不接管 —— 句柄归 D3D11 侧, 不 CloseHandle
+	VkMemoryAllocateInfo mai{};
+	mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	mai.pNext = &imp;
+	bool got = false;
+	std::string codes;
+	int ntry = 0;
+	for (int si = 0; si < ncd && !got; ++si)
+	{
+		for (int ti = 0; ti < nty && !got; ++ti)
+		{
+			++ntry;
+			mai.allocationSize = cand[si];
+			mai.memoryTypeIndex = static_cast<uint32_t>(types[ti]);
+			vr = c.fns.vkAllocateMemory(c.vdev, &mai, nullptr, &g_ssrVkMemBase);
+			if (vr == VK_SUCCESS)
+			{
+				if (c.fns.vkBindImageMemory(c.vdev, g_ssrVkImgBase, g_ssrVkMemBase, 0) == VK_SUCCESS)
+				{
+					got = true;
+					break;
+				}
+				c.fns.vkFreeMemory(c.vdev, g_ssrVkMemBase, nullptr);
+				g_ssrVkMemBase = VK_NULL_HANDLE;
+				if (codes.size() < 160)
+					codes += std::string(codes.empty() ? "" : ",") + "bind失败";
+				continue;
+			}
+			if (codes.size() < 160)
+				codes += (codes.empty() ? "" : ",") + pocbCode(vr);
+		}
+	}
+	if (!got)
+	{
+		kill();
+		giveup("底色导入矩阵 " + std::to_string(ntry) + " 次全失败 码=" + codes +
+		       " (size候选" + std::to_string(ncd) + "x类型" + std::to_string(nty) + ")");
+		return;
+	}
+
+	// --- 3) 布局初转 (UNDEFINED→GENERAL) 单独一条, 建好时立即提交并等完 ---
+	// 按规范这次转换可能丢掉 D3D11 刚拷进来的内容 ⇒ 本帧 v1 仍按"上一帧底色"采样, 下帧起是新的
+	// (与入向色图初转同一处理口径, 对观感无影响)。命令 buffer 分配一次 (POCB_DEV_FNS 没有 vkFree)。
+	if (!g_ssrVkCmdB)
+	{
+		VkCommandBufferAllocateInfo cbai{};
+		cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		cbai.commandPool = c.pool;
+		cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		cbai.commandBufferCount = 1;
+		if (c.fns.vkAllocateCommandBuffers(c.vdev, &cbai, &g_ssrVkCmdB) != VK_SUCCESS)
+		{
+			g_ssrVkCmdB = VK_NULL_HANDLE;
+			kill();
+			giveup("底色初转 vkAllocateCommandBuffers 失败");
+			return;
+		}
+	}
+	{
+		VkCommandBufferBeginInfo cbb{};
+		cbb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		if (c.fns.vkBeginCommandBuffer(g_ssrVkCmdB, &cbb) != VK_SUCCESS)
+		{
+			kill();
+			giveup("底色初转 vkBeginCommandBuffer 失败");
+			return;
+		}
+		VkImageMemoryBarrier imb{};
+		imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		imb.srcAccessMask = 0;
+		imb.dstAccessMask = 0;
+		imb.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imb.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+		imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.image = g_ssrVkImgBase;
+		imb.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		c.fns.vkCmdPipelineBarrier(g_ssrVkCmdB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1,
+		                           &imb);
+		if (c.fns.vkEndCommandBuffer(g_ssrVkCmdB) != VK_SUCCESS)
+		{
+			kill();
+			giveup("底色初转 vkEndCommandBuffer 失败");
+			return;
+		}
+		c.fns.vkResetFences(c.vdev, 1, &c.fence);
+		VkSubmitInfo si{};
+		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		si.commandBufferCount = 1;
+		si.pCommandBuffers = &g_ssrVkCmdB;
+		vr = c.fns.vkQueueSubmit(c.queue, 1, &si, c.fence);
+		if (vr == VK_SUCCESS)
+			vr = c.fns.vkWaitForFences(c.vdev, 1, &c.fence, VK_TRUE, 5000000000ULL);
+		if (vr != VK_SUCCESS)
+		{
+			kill();
+			giveup("底色初转 vkQueueSubmit/vkWaitForFences = " + pocbCode(vr));
+			return;
+		}
+	}
+
+	g_ssrVkBaseSrc = g_ssrBaseH;
+	g_ssrVkBaseDev = c.vdev;
+	g_ssrVkBaseState = 1;
+	if (!g_ssrVkBaseLog)
+	{
+		g_ssrVkBaseLog = true;
+		logLine("SSR侦察: [base] 底色图就绪: " + std::to_string(bd.Width) + "x" +
+		        std::to_string(bd.Height) + " RGBA16F 导入 handle=" + hexOf(g_ssrBaseH) +
+		        " (矩阵 " + std::to_string(ntry) + " 次) usage=SAMPLED — 每帧特征B 抢段16 后的 585, "
+		        "本帧起当 v1 合成底色 (水色由此回来)");
+	}
+}
+
 // 每帧 (pocbInject 尾部, 紧跟 ssrInVkFrame): 入向镜像 → 出向镜像 拷一次 + CPU fence 等完,
 // 置 g_ssrOutReady 让 D3D11 在**下一帧**特征B 拷进 585。失败只关出向。
 void ssrOutVkFrame(PocbCtx& c)
@@ -1848,6 +2147,9 @@ void ssrOutVkFrame(PocbCtx& c)
 		return;
 	if (g_ssrVkImg == VK_NULL_HANDLE)
 		return; // 入向还没建 —— 让 ssrInVkFrame 先把入向建起来
+	// v0.18.7 B: 底色镜像 (第4张) 的导入放这里 —— 每帧幂等; 建成/失败都会让签名变 ⇒ 下面
+	// ssrV1Dirty() 自动重录 (成功后多采一个 binding2, 失败后退回采 uColor)。
+	ssrBaseVkBuild(c);
 	if (g_ssrVkImgOut == VK_NULL_HANDLE || g_ssrVkCmdOutSrc != g_ssrVkImg)
 	{
 		ssrOutVkBuild(c); // 成功 → 本帧不提 (与 2c-β "只建不比" 同节奏); 失败 → 内部已关闸
@@ -2570,6 +2872,8 @@ static VkImageView     g_ssrV1ViewC = VK_NULL_HANDLE; // 采样用的入向色 v
 static VkImage         g_ssrV1CSrc = VK_NULL_HANDLE;  // 上面那个 view 属于哪张入向图
 static VkImageView     g_ssrV1ViewD = VK_NULL_HANDLE; // 采样用的深度 view (**只要 depth aspect**;
 static VkImage         g_ssrV1DSrc = VK_NULL_HANDLE;  //  KMT 那张是 DEPTH|STENCIL, 采样要分开)
+static VkImageView     g_ssrV1ViewB = VK_NULL_HANDLE; // v0.18.7: 底色 view (585 段16 后); 没底色 = 空
+static VkImage         g_ssrV1BSrc = VK_NULL_HANDLE;  // 上面那个 view 属于哪张底色图
 static VkImage         g_ssrV1RecDep = VK_NULL_HANDLE; // 录命令时用的深度图
 static unsigned long long g_ssrV1RecSig = 0;           // 录命令时的依赖签名 (见 ssrV1Sig)
 static bool            g_ssrV1DepLog = false;          // "深度没就绪先跑 2d" 只打一次
@@ -2603,6 +2907,11 @@ static unsigned long long ssrV1Sig()
 	cv.f = g_ssrV1Strength; s = mix(s, cv.u);
 	cv.f = g_ssrV1Dist; s = mix(s, cv.u);
 	cv.f = g_ssrV1Rev; s = mix(s, cv.u);
+	// v0.18.7: 底色图 (没建/建失败 = NULL, 着色器 p3.w 跟着变) + 三个新调参也要重录
+	s = mix(s, (unsigned long long)(uintptr_t)g_ssrVkImgBase);
+	s = mix(s, (unsigned long long)(unsigned)g_ssrV1Smooth);
+	s = mix(s, (unsigned long long)(unsigned)g_ssrV1Blur);
+	s = mix(s, (unsigned long long)(unsigned)g_ssrV1Debug);
 	return s ? s : 1;
 }
 
@@ -2627,6 +2936,7 @@ static void ssrV1Free(PocbCtx& c)
 	if (g_ssrV1ViewOut) { c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewOut, nullptr); g_ssrV1ViewOut = VK_NULL_HANDLE; }
 	if (g_ssrV1ViewC) { c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewC, nullptr); g_ssrV1ViewC = VK_NULL_HANDLE; }
 	if (g_ssrV1ViewD) { c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewD, nullptr); g_ssrV1ViewD = VK_NULL_HANDLE; }
+	if (g_ssrV1ViewB) { c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewB, nullptr); g_ssrV1ViewB = VK_NULL_HANDLE; }
 	if (g_ssrV1Dpool) { c.fns.vkDestroyDescriptorPool(c.vdev, g_ssrV1Dpool, nullptr); g_ssrV1Dpool = VK_NULL_HANDLE; }
 	if (g_ssrV1Dsl) { c.fns.vkDestroyDescriptorSetLayout(c.vdev, g_ssrV1Dsl, nullptr); g_ssrV1Dsl = VK_NULL_HANDLE; }
 	if (g_ssrV1SmpC) { c.fns.vkDestroySampler(c.vdev, g_ssrV1SmpC, nullptr); g_ssrV1SmpC = VK_NULL_HANDLE; }
@@ -2634,6 +2944,7 @@ static void ssrV1Free(PocbCtx& c)
 	g_ssrV1OutImg = VK_NULL_HANDLE;
 	g_ssrV1CSrc = VK_NULL_HANDLE;
 	g_ssrV1DSrc = VK_NULL_HANDLE;
+	g_ssrV1BSrc = VK_NULL_HANDLE;
 	g_ssrV1RecSrc = VK_NULL_HANDLE;
 	g_ssrV1RecDep = VK_NULL_HANDLE;
 	g_ssrV1RecSig = 0;
@@ -2663,6 +2974,17 @@ static void ssrV1DropViewD(PocbCtx& c)
 	g_ssrV1DSrc = VK_NULL_HANDLE;
 }
 
+// v0.18.7: 底色图要被销毁/换掉之前先调 (同上, 只是换底色 view)
+static void ssrV1DropViewB(PocbCtx& c)
+{
+	if (g_ssrV1ViewB)
+	{
+		c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewB, nullptr);
+		g_ssrV1ViewB = VK_NULL_HANDLE;
+	}
+	g_ssrV1BSrc = VK_NULL_HANDLE;
+}
+
 // 换设备: 旧 device 上的句柄**不能**拿来 destroy, 也不该在新 device 上引用 —— 只丢不毁
 static void ssrV1Drop()
 {
@@ -2676,6 +2998,7 @@ static void ssrV1Drop()
 	g_ssrV1ViewOut = VK_NULL_HANDLE;
 	g_ssrV1ViewC = VK_NULL_HANDLE;
 	g_ssrV1ViewD = VK_NULL_HANDLE;
+	g_ssrV1ViewB = VK_NULL_HANDLE;
 	g_ssrV1Dpool = VK_NULL_HANDLE;
 	g_ssrV1Dsl = VK_NULL_HANDLE;
 	g_ssrV1SmpC = VK_NULL_HANDLE;
@@ -2684,6 +3007,7 @@ static void ssrV1Drop()
 	g_ssrV1OutImg = VK_NULL_HANDLE;
 	g_ssrV1CSrc = VK_NULL_HANDLE;
 	g_ssrV1DSrc = VK_NULL_HANDLE;
+	g_ssrV1BSrc = VK_NULL_HANDLE;
 	g_ssrV1RecSrc = VK_NULL_HANDLE;
 	g_ssrV1RecDep = VK_NULL_HANDLE;
 	g_ssrV1RecSig = 0;
@@ -2824,6 +3148,33 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		g_ssrV1DSrc = g_ssrKmtImg;
 	}
 
+	// --- 3b) v0.18.7 底色 view: 底色图由 ssrBaseVkBuild 每帧幂等建, 这里只负责 view ---
+	// 没底色 (关着/建失败) ⇒ 不建 view, 描述符 binding2 指向色 view + p3.w=0 ⇒ 着色器不采它。
+	if (g_ssrVkImgBase != VK_NULL_HANDLE && (!g_ssrV1ViewB || g_ssrV1BSrc != g_ssrVkImgBase))
+	{
+		if (g_ssrV1ViewB)
+			c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewB, nullptr);
+		VkImageViewCreateInfo v{};
+		v.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		v.image = g_ssrVkImgBase;
+		v.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		v.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+		v.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		if (c.fns.vkCreateImageView(c.vdev, &v, nullptr, &g_ssrV1ViewB) != VK_SUCCESS)
+		{
+			// 只关底色这半边: 不 return, v1 照跑 (退回 324 底色), 下次 dirty 再试
+			g_ssrV1ViewB = VK_NULL_HANDLE;
+			g_ssrV1BSrc = VK_NULL_HANDLE;
+			logLine("SSR侦察: [base] 底色 view 建不出 → 本帧退回 324 底色 (v1 照跑, 倒影不受影响)");
+		}
+		else
+			g_ssrV1BSrc = g_ssrVkImgBase;
+	}
+	else if (g_ssrVkImgBase == VK_NULL_HANDLE && g_ssrV1ViewB)
+	{
+		ssrV1DropViewB(c); // 底色图被退掉 (关闸/handle 变) ⇒ 摘 view, 描述符下次填回色
+	}
+
 	// --- 4) 采样器: 色线性 / 深 NEAREST, 都 clamp-to-edge (出屏兜底靠 clamp) ---
 	if (!g_ssrV1SmpC || !g_ssrV1SmpD)
 	{
@@ -2846,19 +3197,23 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 			return fail("vkCreateSampler(深度) 建不出");
 	}
 
-	// --- 5) 描述符: 两个 COMBINED_IMAGE_SAMPLER (binding 0 色 / binding 1 深) ---
+	// --- 5) 描述符: 三个 COMBINED_IMAGE_SAMPLER (binding 0 色 / 1 深 / 2 底色) ---
+	// v0.18.7: binding2 没底色时指向**色 view** (描述符必须始终有效), 由 push constant p3.w
+	// 告诉着色器采不采它 —— 免得出现"没底色却采了空 view"的未定义行为。
 	if (!g_ssrV1Dsl)
 	{
-		VkDescriptorSetLayoutBinding b[2]{};
+		VkDescriptorSetLayoutBinding b[3]{};
 		b[0].binding = 0;
 		b[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		b[0].descriptorCount = 1;
 		b[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 		b[1] = b[0];
 		b[1].binding = 1;
+		b[2] = b[0];
+		b[2].binding = 2;
 		VkDescriptorSetLayoutCreateInfo li{};
 		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-		li.bindingCount = 2;
+		li.bindingCount = 3;
 		li.pBindings = b;
 		if (c.fns.vkCreateDescriptorSetLayout(c.vdev, &li, nullptr, &g_ssrV1Dsl) != VK_SUCCESS)
 			return fail("vkCreateDescriptorSetLayout 建不出");
@@ -2867,7 +3222,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 	{
 		VkDescriptorPoolSize ps{};
 		ps.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		ps.descriptorCount = 2;
+		ps.descriptorCount = 3;
 		VkDescriptorPoolCreateInfo pi{};
 		pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		pi.maxSets = 1;
@@ -2888,14 +3243,17 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		// 先填一次 (view 变了会在下面重新填; 未填的 set 绝不能提交)
 	}
 	{
-		VkDescriptorImageInfo di[2]{};
+		VkDescriptorImageInfo di[3]{};
 		di[0].sampler = g_ssrV1SmpC;
 		di[0].imageView = g_ssrV1ViewC;
 		di[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		di[1].sampler = g_ssrV1SmpD;
 		di[1].imageView = g_ssrV1ViewD;
 		di[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		VkWriteDescriptorSet w[2]{};
+		di[2].sampler = g_ssrV1SmpC;
+		di[2].imageView = g_ssrV1ViewB ? g_ssrV1ViewB : g_ssrV1ViewC;
+		di[2].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		VkWriteDescriptorSet w[3]{};
 		w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		w[0].dstSet = g_ssrV1Set;
 		w[0].dstBinding = 0;
@@ -2905,7 +3263,10 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		w[1] = w[0];
 		w[1].dstBinding = 1;
 		w[1].pImageInfo = &di[1];
-		c.fns.vkUpdateDescriptorSets(c.vdev, 2, w, 0, nullptr);
+		w[2] = w[0];
+		w[2].dstBinding = 2;
+		w[2].pImageInfo = &di[2];
+		c.fns.vkUpdateDescriptorSets(c.vdev, 3, w, 0, nullptr);
 	}
 
 	// --- 6) framebuffer (出向图 view / 尺寸变了要重建) ---
@@ -2923,7 +3284,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 			return fail("vkCreateFramebuffer 建不出");
 	}
 
-	// --- 7) shader / pipeline layout (push constant 48B: p0 相机, p1 模式, p2 尺寸) / pipeline ---
+	// --- 7) shader / pipeline layout (push constant 64B: p0 相机, p1 模式, p2 尺寸, p3 v0.18.7) / pipeline ---
 	if (!g_ssrV1Vs)
 	{
 		VkShaderModuleCreateInfo sm{};
@@ -2947,7 +3308,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		VkPushConstantRange pcr{};
 		pcr.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 		pcr.offset = 0;
-		pcr.size = 48;
+		pcr.size = 64; // v0.18.7: 48B → 64B (多一格 p3 = smooth/blur/debug/底色开关)
 		VkPipelineLayoutCreateInfo li{};
 		li.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 		li.setLayoutCount = 1;
@@ -3022,7 +3383,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 	}
 
 	g_ssrV1State = 1;
-	logLine("SSR侦察: [v1] SSR v1 就绪: 全屏三角 + 2 sampler + push constant 48B "
+	logLine("SSR侦察: [v1] SSR v1 就绪: 全屏三角 + 3 binding(色/深/底色) + push constant 64B "
 	        "mode=" + std::to_string(g_ssrV1Mode) +
 	        " fov=" + std::to_string(g_ssrV1Fov) +
 	        " near=" + std::to_string(g_ssrV1Near) +
@@ -3030,6 +3391,10 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 	        " steps=" + std::to_string(static_cast<int>(g_ssrV1Steps)) +
 	        " dist=" + std::to_string(static_cast<int>(g_ssrV1Dist)) +
 	        " strength=" + std::to_string(g_ssrV1Strength) +
+	        " smooth=" + std::to_string(g_ssrV1Smooth) +
+	        " blur=" + std::to_string(g_ssrV1Blur) +
+	        " debug=" + std::to_string(g_ssrV1Debug) +
+	        " 底色=" + std::string(g_ssrV1ViewB ? "585段16后(含水)" : "324(ssr.base585 关/没建)") +
 	        " — 输入=324色+520深度, 输出=出向镜像(下帧特征B 进 585)");
 	return true;
 }
@@ -3108,6 +3473,13 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 	        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
 	        g_ssrKmtCanRead ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
 	        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	// ③ 底色 (v0.18.7 B): GENERAL → SHADER_READ_ONLY, 口径与色图完全一致 (跨 API 写用
+	//    MEMORY_WRITE + ALL_COMMANDS 兜住)。没底色 (viewB 空) 就整段跳过 —— 只关自己。
+	if (g_ssrV1ViewB)
+		barrier(g_ssrVkImgBase, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+		        VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		        VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+		        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
 	VkRenderPassBeginInfo rb{};
 	rb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -3134,11 +3506,13 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 	c.fns.vkCmdSetScissor(g_ssrVkCmdOut, 0, 1, &sc);
 	{
 		// 相机参数在这里算好塞进 push constant: 着色器只做反推 (见 ssr.frag viewZ)
+		// v0.18.7: 多一格 p3 = (smooth 邻域 / blur / debug / 底色开关)
 		struct
 		{
 			float p0[4];
 			float p1[4];
 			float p2[4];
+			float p3[4];
 		} pc;
 		pc.p0[0] = std::tan(g_ssrV1Fov * 3.14159265358979f / 360.0f); // tan(垂直FOV/2)
 		pc.p0[1] = static_cast<float>(w) / static_cast<float>(h ? h : 1);
@@ -3153,6 +3527,10 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		pc.p2[1] = static_cast<float>(h);
 		pc.p2[2] = g_ssrV1Rev; // 反向深度开关 (ssr.rev=1 时着色器把深度翻回标准口径)
 		pc.p2[3] = 0.0f;
+		pc.p3[0] = static_cast<float>(g_ssrV1Smooth); // 法线差分邻域 (px) —— 抗"倒影破碎"主力
+		pc.p3[1] = static_cast<float>(g_ssrV1Blur);   // 反射色 5tap 空间平滑
+		pc.p3[2] = static_cast<float>(g_ssrV1Debug);  // 0 正常 / 1 法线 / 2 命中 / 3 深度
+		pc.p3[3] = g_ssrV1ViewB ? 1.0f : 0.0f;        // 底色开关 (没底色 ⇒ 采 uColor 当底色)
 		c.fns.vkCmdPushConstants(g_ssrVkCmdOut, g_ssrV1Pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
 		                         sizeof(pc), &pc);
 	}
@@ -3168,6 +3546,12 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 	        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
 	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT,
 	        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+	// ④ 底色复原 GENERAL: 下帧特征B D3D11 要 CopyResource(585 → 底色镜像) 进它 (跨 API 只认 GENERAL)
+	if (g_ssrV1ViewB)
+		barrier(g_ssrVkImgBase, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		        VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+		        VK_ACCESS_MEMORY_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		        VK_IMAGE_LAYOUT_GENERAL);
 	return true;
 }
 

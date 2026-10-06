@@ -1298,6 +1298,19 @@ float g_ssrV1Steps = 32.0f;         // ini ssr.steps ray march 步数 (越大越
 float g_ssrV1Strength = 1.0f;       // ini ssr.strength 反射合成强度 (fresnel 之上再乘)
 float g_ssrV1Dist = 500.0f;         // ini ssr.dist  ray march 最大距离 (**以 near 为单位**)
 float g_ssrV1Rev = 0.0f;            // ini ssr.rev   游戏用反向深度 (近平面->1) 时置 1
+int   g_ssrV1Smooth = 4;            // ini ssr.smooth 法线差分邻域 (px) —— v0.18.7 抗"倒影破碎"
+int   g_ssrV1Blur = 1;              // ini ssr.blur   反射色 5-tap 空间平滑 0/1
+int   g_ssrV1Debug = 0;             // ini ssr.debug  0 正常 / 1 法线 / 2 命中 / 3 深度
+
+// ---- v0.18.7 B 水色保留 (docs/05 D4 补遗): 585 在被出向回写覆盖**之前**抢一份当合成底色 ----
+// 为什么必须有它: 合成底色原先 = 324 快照 = 段16 (水体 pass) **之前**的画面, 里面没画水;
+// fresnel 正对相机时反射权重只有 ~0.08 ⇒ 92% 来自"没水的画面" ⇒ 水看起来仍然几乎透明无色。
+// 这张镜像 = 段16 画完水之后的 585 (含水), 与 324 同款 SHARED|NTHANDLE, VK 导入后当 binding2。
+// 逃生门 = ini ssr.base585 (默认 1); 建不出 → 退回 324 底色 (只关自己, v1/2d 照跑)。
+std::atomic<bool> g_ssrBaseOn{false}; // ini ssr.base585
+ID3D11Texture2D* g_ssrBaseTex = nullptr; // 底色 SHARED 镜像 (585 段16 后 = 含水画面)
+HANDLE g_ssrBaseH = nullptr;          // 底色镜像 NT handle (VK 导入源)
+long   g_ssrBaseN = 0;                // 底色拷贝计数 (节流日志, 前8条+每128条)
 
 static SsrCtxEntry* lookupSsrCtx(void** vtbl)
 {
@@ -2179,16 +2192,22 @@ static bool ssrInMakeShared(ID3D11Device* dev, ID3D11Resource* src, ID3D11Textur
 // ---- Step 2d-1 (v0.18.0): 出向 SHARED 镜像 —— VK 渲完的结果落这儿, 再由 D3D11 拷进 585 ----
 // desc **照抄 324**: 2b 的 [desc一致] 已经证明 324 与 585 的 desc 逐字段相同 ⇒ 这张镜像
 // 既能被 VK 按 D3D11_TEXTURE_BIT 导入 (入向同法), 也能被 CopyResource 原样拷进 585。
-// 不带 BindFlags 重试矩阵 —— RGBA16F 能建 SHARED 已在 2c 实证过, 失败就一句 [2d] 关闸,
+// 不带 BindFlags 重试矩阵 —— RGBA16F 能建 SHARED 已在 2c 实证过, 失败就按调用方给的降级文案关闸,
 // 绝不连坐入向 (入向是已收口的 2c 成果)。
-static bool ssrOutMakeShared(ID3D11Device* dev, ID3D11Resource* src)
+// SHARED 镜像通用建法 (C-2 同理的收敛): 2d 出向镜像 与 v0.18.7 底色镜像 的建法完全一样
+// —— 照抄源 desc (含 BindFlags, 满足 CopyResource 最严解释) + SHARED|NTHANDLE + CreateSharedHandle
+// —— 只有日志标签与降级文案不同, 故一份实现两个调用面, 避免两份独立演进导致判读口径分叉。
+// tag = 日志方括号 (如 "[2d]" / "[base]"), name = 镜像名, dgr = 失败降级文案, tail = 成功行尾巴。
+static bool ssrMakeSharedTo(ID3D11Device* dev, ID3D11Resource* src, ID3D11Texture2D** outTex,
+                            HANDLE* outH, const char* tag, const char* name, const char* dgr,
+                            const char* tail)
 {
-	g_ssrOutTexC = nullptr;
-	g_ssrOutHC = nullptr;
+	*outTex = nullptr;
+	*outH = nullptr;
 	D3D11_TEXTURE2D_DESC sd{};
 	if (!ssrResObj(src, &sd, nullptr) || sd.Usage != D3D11_USAGE_DEFAULT)
 	{
-		logLine("SSR侦察: [2d] 出向镜像: 源 QI/Usage 不可用 → 出向回写不启用 (入向照常)");
+		logLine(std::string("SSR侦察: ") + tag + " " + name + "镜像: 源 QI/Usage 不可用 → " + dgr);
 		return false;
 	}
 	D3D11_TEXTURE2D_DESC td = sd; // 全抄 (含 BindFlags) —— 与入向同法, 满足 CopyResource 最严解释
@@ -2198,10 +2217,10 @@ static bool ssrOutMakeShared(ID3D11Device* dev, ID3D11Resource* src)
 	HRESULT hr = dev->CreateTexture2D(&td, nullptr, &t);
 	if (FAILED(hr) || !t)
 	{
-		logLine("SSR侦察: [2d] 出向 SHARED 镜像 CreateTexture2D 失败 " + hexHr(hr) + " (" +
-		        std::to_string(td.Width) + "x" + std::to_string(td.Height) + " " +
+		logLine(std::string("SSR侦察: ") + tag + " " + name + " SHARED 镜像 CreateTexture2D 失败 " +
+		        hexHr(hr) + " (" + std::to_string(td.Width) + "x" + std::to_string(td.Height) + " " +
 		        ssrFmtName(td.Format) + " BindFlags=0x" + uhex64(td.BindFlags).substr(8) +
-		        ") → 出向回写不启用 (入向照常)");
+		        ") → " + dgr);
 		return false;
 	}
 	IDXGIResource1* r1 = nullptr;
@@ -2210,24 +2229,30 @@ static bool ssrOutMakeShared(ID3D11Device* dev, ID3D11Resource* src)
 	{
 		hr = r1->CreateSharedHandle(nullptr,
 		                            DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
-		                            nullptr, &g_ssrOutHC);
+		                            nullptr, outH);
 		r1->Release();
 	}
-	if (FAILED(hr) || !g_ssrOutHC)
+	if (FAILED(hr) || !*outH)
 	{
-		logLine("SSR侦察: [2d] 出向 CreateSharedHandle 失败 " + hexHr(hr) + " (" +
-		        ssrFmtName(td.Format) + ") → 出向回写不启用 (入向照常)");
+		logLine(std::string("SSR侦察: ") + tag + " " + name + " CreateSharedHandle 失败 " + hexHr(hr) +
+		        " (" + ssrFmtName(td.Format) + ") → " + dgr);
 		t->Release();
-		g_ssrOutHC = nullptr;
+		*outH = nullptr;
 		return false;
 	}
-	g_ssrOutTexC = t;
-	logLine("SSR侦察: [2d] 出向镜像 OK = " + hexOf(g_ssrOutTexC) + " (" +
+	*outTex = t;
+	logLine("SSR侦察: " + std::string(tag) + " " + name + "镜像 OK = " + hexOf(*outTex) + " (" +
 	        std::to_string(td.Width) + "x" + std::to_string(td.Height) + " " +
 	        ssrFmtName(td.Format) + " BindFlags=0x" + uhex64(td.BindFlags).substr(8) +
-	        ") handle=" + hexOf(g_ssrOutHC) + " 源=" + hexOf(src) +
-	        " — desc 照抄324(≡585), VK 侧 ssrOutVkBuild 导入");
+	        ") handle=" + hexOf(*outH) + " 源=" + hexOf(src) + " " + tail);
 	return true;
+}
+
+// 2d 出向镜像 (v0.18.0): desc 照抄 324 (≡585), VK 侧 ssrOutVkBuild 导入
+static bool ssrOutMakeShared(ID3D11Device* dev, ID3D11Resource* src)
+{
+	return ssrMakeSharedTo(dev, src, &g_ssrOutTexC, &g_ssrOutHC, "[2d]", "出向",
+	                       "出向回写不启用 (入向照常)", "— desc 照抄324(≡585), VK 侧 ssrOutVkBuild 导入");
 }
 
 // 首次触发时建两张镜像 + 各自 STAGING + 记"未拷"基线校验和。幂等。
@@ -2295,6 +2320,19 @@ static void ssrInBuild(ID3D11DeviceContext* ctx)
 		else
 			g_ssrVkOutOn.store(false, std::memory_order_relaxed); // 建不出 → 关闸, 不再重试
 	}
+	// ---- v0.18.7 B 底色镜像 (独立门 ssr.base585): 抢段16 画完水之后的 585 当合成底色 ----
+	// 源优先用本帧活的 585 (g_ssrStrRes, 身份已在本帧特征B 核过), 没有就退回 324 (desc 等价)。
+	// 与出向镜像同一份实现, 失败只关自己: 底色退回 324 (v1 照常出倒影, 只是水仍偏透明)。
+	if (g_ssrBaseOn.load(std::memory_order_relaxed) &&
+	    g_ssrVkOutOn.load(std::memory_order_relaxed) &&
+	    g_ssrV1On.load(std::memory_order_relaxed))
+	{
+		ID3D11Resource* srcB = g_ssrStrRes ? g_ssrStrRes : g_ssrSceneRes;
+		if (!ssrMakeSharedTo(dev, srcB, &g_ssrBaseTex, &g_ssrBaseH, "[base]", "底色",
+		                     "底色合成不启用 (v1 退回 324 底色)",
+		                     "— 源=585(段16 后, 含水), 每帧特征B 在 2d 回写之前抢一份"))
+			g_ssrBaseOn.store(false, std::memory_order_relaxed); // 建不出 → 关闸, 不再重试
+	}
 	dev->Release();
 	g_ssrInTexC = tc;
 	g_ssrInHC = hc;
@@ -2316,6 +2354,9 @@ static void ssrInBuild(ID3D11DeviceContext* ctx)
 	        "; 自此每帧特征B 处 CopyResource(324/520 → SHARED 镜像)" +
 	        (g_ssrVkOutOn.load(std::memory_order_relaxed)
 	             ? "; [2d] 出向镜像已一并建好 (ssr.vkout=1, 回写 585 走 VK)"
+	             : "") +
+	        (g_ssrBaseOn.load(std::memory_order_relaxed)
+	             ? "; [base] 底色镜像已一并建好 (ssr.base585=1, 段16 后的 585 当合成底色)"
 	             : ""));
 }
 
@@ -2514,6 +2555,24 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 			                        std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1);
 			copyResDescChecked(ctx, g_ssrStrRes, g_ssrSceneRes, pfx, "585", "324", k);
 		}
+	}
+	// ---- v0.18.7 B: 段16 刚画完水, 585 此刻**含水** ⇒ 在 2d 回写覆盖它之前抢一份当合成底色 ----
+	// 位置是硬约束: 下面那条 CopyResource(585 ← 出向) 会把水覆盖掉, 排晚了就抢不到。
+	// 一次性门借 g_ssrInPending (特征B 置位, 本函数末尾才消费) ⇒ 每帧恰好拷一次;
+	// 身份三重判据与 2d 回写同一套 (g_ssrStrResObj == g_ssrLastStr == g_ssrReflRt)。
+	// 时序安全: 这条拷贝排在 ssrInQueue 的 EVENT 闸 End **之前** ⇒ VK 同帧 Present 读底色时
+	// 已被闸等完 (与 324/520 那两条同一口径, 零跨 API 栅栏的设计不变)。
+	if (g_ssrBaseOn.load(std::memory_order_relaxed) &&
+	    g_ssrVkOutOn.load(std::memory_order_relaxed) &&
+	    g_ssrV1On.load(std::memory_order_relaxed) && g_ssrInPending && g_ssrBaseTex &&
+	    g_ssrStrRes && g_ssrStrResObj == g_ssrLastStr && g_ssrLastStr == g_ssrReflRt)
+	{
+		const long kb = ++g_ssrBaseN;
+		const std::string pfxB = "SSR侦察: [base] 底色#" + std::to_string(kb) +
+		                         " 585=" + hexOf(g_ssrStrResObj) + " → 底色镜像=" +
+		                         hexOf(g_ssrBaseTex) + " 帧=" +
+		                         std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1);
+		copyResDescChecked(ctx, g_ssrBaseTex, g_ssrStrRes, pfxB, "底色", "585", kb);
 	}
 	// ---- Step 2d-1 出向回写 (v0.18.0, docs/05 D3): VK 上一帧 Present 填好的结果 → 585 ----
 	// 1 帧延迟: 本帧 Present 才由 VK 填出向镜像 ⇒ 这里回写的是**上一帧**的 SSR 结果。
@@ -2818,6 +2877,11 @@ void installProbeOn(ID3D11Device* dev)
 		g_ssrV1Strength = static_cast<float>(iniNum("ssr.strength", 1.0));
 		g_ssrV1Dist = static_cast<float>(iniNum("ssr.dist", 500.0));
 		g_ssrV1Rev = static_cast<float>(iniNum("ssr.rev", 0.0));
+		// ---- v0.18.7 A 平滑批 + B 底色门 (破碎倒影 / 水色缺失 两个观感问题的开关) ----
+		g_ssrBaseOn.store(iniFlag("ssr.base585", true), std::memory_order_relaxed);
+		g_ssrV1Smooth = static_cast<int>(iniNum("ssr.smooth", 4.0));
+		g_ssrV1Blur = static_cast<int>(iniNum("ssr.blur", 1.0));
+		g_ssrV1Debug = static_cast<int>(iniNum("ssr.debug", 0.0));
 		if (g_ssrV1Near < 0.01f || g_ssrV1Far <= g_ssrV1Near)
 		{
 			logLine("SSR侦察: ssr.near/ssr.far 不合法 (" + std::to_string(g_ssrV1Near) +
@@ -2841,6 +2905,20 @@ void installProbeOn(ID3D11Device* dev)
 			g_ssrV1Strength = 0.0f;
 		if (g_ssrV1Strength > 4.0f)
 			g_ssrV1Strength = 4.0f;
+		if (g_ssrV1Smooth < 1 || g_ssrV1Smooth > 16)
+		{
+			logLine("SSR侦察: ssr.smooth 不合法 (" + std::to_string(g_ssrV1Smooth) +
+			        ") → 回退 4 (邻域 1..16 px)");
+			g_ssrV1Smooth = 4;
+		}
+		if (g_ssrV1Blur != 0)
+			g_ssrV1Blur = 1;
+		if (g_ssrV1Debug < 0 || g_ssrV1Debug > 3)
+		{
+			logLine("SSR侦察: ssr.debug 不合法 (" + std::to_string(g_ssrV1Debug) +
+			        ") → 回退 0 (0 正常/1 法线/2 命中/3 深度)");
+			g_ssrV1Debug = 0;
+		}
 		if (g_ssrV1On.load(std::memory_order_relaxed) &&
 		    g_ssrVkOutOn.load(std::memory_order_relaxed) &&
 		    g_ssrSharedOn.load(std::memory_order_relaxed) &&
@@ -2853,6 +2931,10 @@ void installProbeOn(ID3D11Device* dev)
 			        " dist=" + std::to_string(static_cast<int>(g_ssrV1Dist)) +
 			        " strength=" + std::to_string(g_ssrV1Strength) +
 			        " rev=" + std::to_string(static_cast<int>(g_ssrV1Rev)) +
+			        " smooth=" + std::to_string(g_ssrV1Smooth) +
+			        " blur=" + std::to_string(g_ssrV1Blur) +
+			        " debug=" + std::to_string(g_ssrV1Debug) + " base585=" +
+			        std::to_string(g_ssrBaseOn.load(std::memory_order_relaxed) ? 1 : 0) +
 			        "; dist 单位 = near; 逃生门 ssr.v1=0 (R4 = 反推 inv(投影), "
 			        "倒影位置/比例不对先调 fov, 深度反向先试 ssr.rev=1)");
 		else if (g_ssrV1On.load(std::memory_order_relaxed))
@@ -4570,7 +4652,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.6 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) + v0.18.5: 路线1' 导入分支落地(深度改单独SHARED老式handle→VK KMT 直入, [2d-5] 深度跨API三候选比对) + v0.18.6: SSR v1 shader 采样(ssr.vert/ssr.frag 全屏三角, descriptor+2 sampler+push constant 相机, 出向由 2d 原样拷改为 shader 产出, R4=反推inv投影, 门 ssr.v1/ssr.mode/ssr.fov/ssr.near/ssr.far/ssr.steps/ssr.dist/ssr.strength) ====");
+	logLine("==== poc-presenter v0.18.7 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) + v0.18.5: 路线1' 导入分支落地(深度改单独SHARED老式handle→VK KMT 直入, [2d-5] 深度跨API三候选比对) + v0.18.6: SSR v1 shader 采样(ssr.vert/ssr.frag 全屏三角, descriptor+2 sampler+push constant 相机, 出向由 2d 原样拷改为 shader 产出, R4=反推inv投影, 门 ssr.v1/ssr.mode/ssr.fov/ssr.near/ssr.far/ssr.steps/ssr.dist/ssr.strength) + v0.18.7: A 平滑批(法线差分邻域 ssr.smooth + 反射 5tap 空间平滑 ssr.blur + 诊断 ssr.debug 0正常/1法线/2命中/3深度, push constant 48B→64B) + B 水色保留(第4张 SHARED 底色镜像 = 段16 后的 585 含水画面, 每帧特征B 在 2d 回写前抢一份, VK 侧 binding2 当合成底色, 门 ssr.base585) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

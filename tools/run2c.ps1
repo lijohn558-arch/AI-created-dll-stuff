@@ -53,7 +53,7 @@ if ($bn -eq "") { $out.Add("  [FAIL] 没有 banner 行") }
 else {
     $m2 = [regex]::Match($bn, "poc-presenter (v[0-9.]+)")
     if ($m2.Success) { $ver = $m2.Groups[1].Value }
-    $out.Add("  expect v0.18.6: " + $(if ($ver -eq "v0.18.6") { "OK" } else { "MISMATCH -> " + $ver }))
+    $out.Add("  expect v0.18.7: " + $(if ($ver -eq "v0.18.7") { "OK" } else { "MISMATCH -> " + $ver }))
     $out.Add("  banner 含 ssr.shared: " + $(if ($bn.Contains("ssr.shared")) { "OK" } else { "FAIL (banner 没升)" }))
     $out.Add("  banner 含 Step2c-β: " + $(if ($bn.Contains("Step2c-β")) { "OK" } else { "FAIL (banner 没含 2c-β)" }))
     $out.Add("  banner 含 ssr.sentinel: " + $(if ($bn.Contains("ssr.sentinel")) { "OK" } else { "FAIL" }))
@@ -301,7 +301,7 @@ $out.Add("      [节奏跟随 D3D11 侧 [2c读回 深=] (前3次+每600次); 建
 foreach ($x in (Pick "[2d-5] 深度KMT读回#" 6)) { $out.Add("      " + $x) }
 $out.Add("")
 
-$out.Add("==== #16 SSR v1 shader 采样 (v0.18.6) ====")
+$out.Add("==== #16 SSR v1 shader 采样 (v0.18.7: 平滑批 + 底色) ====")
 $nV1Ini = Cnt "ini ssr.v1=1 →"
 $out.Add("  ini ssr.v1=1 读到 = $nV1Ini   [开了=1; 0 = 本轮只回归 (v1 关着, 也是合法一轮)]")
 $nV1Rdy = Cnt "[v1] SSR v1 就绪"
@@ -311,12 +311,21 @@ $nV1Dep = Cnt "[v1] 深度KMT 图还没就绪"
 $nV1Att = Cnt "[v1] 出向图带 COLOR_ATTACHMENT"
 $nV1Sam = Cnt "[v1] 入向图带 SAMPLED"
 $nV1Dev = CntBoth "[v1]" "VkDevice 变更"
+# ---- v0.18.7 B 底色 (第4张 SHARED 镜像 = 585 段16 后的含水画面) ----
+$nBaseMk  = Cnt "[base] 底色镜像 OK"     # D3D11 侧镜像建成 (建一次)
+$nBaseRdy = Cnt "[base] 底色图就绪"      # VK 侧导入成 (建一次)
+$nBaseWr  = Cnt "[base] 底色#"           # 每帧特征B 抢拷 (前8条+每128条)
+$nBaseBad = Cnt "[desc不一致! 底色"      # CopyResource 会静默丢弃
+$nBaseOff = (Cnt "底色关自己") + (Cnt "底色合成不启用")
 $out.Add("  [v1] SSR v1 就绪 = $nV1Rdy   [v1] 渲染# 行 = $nV1Rdr   [就绪 0/1; 开了 v1 且就绪 => 渲染行应 >0]")
 $out.Add("  降级: 关自己 = $nV1Off   深度没就绪 = $nV1Dep   出向无COLOR_ATTACHMENT = $nV1Att   入向无SAMPLED = $nV1Sam   换设备 = $nV1Dev")
 $out.Add("      [降级一律只关自己: 出向退回 2d 原样拷, 2c/2d/深度分支与 #12~#15 判据不受影响]")
 foreach ($x in (Pick "[v1]" 8)) { $out.Add("      " + $x) }
-$out.Add("      [入参来自 ini ssr.mode/ssr.fov/ssr.near/ssr.far/ssr.steps/ssr.dist/ssr.strength/ssr.rev; R4 = 反推 inv(投影)]")
-$out.Add("      [观感判据是人眼: 水面该出现屏幕空间倒影; 对不上先调 ssr.fov/ssr.near/ssr.far (本项无自动判据)]")
+$out.Add("      [入参来自 ini ssr.mode/ssr.fov/ssr.near/ssr.far/ssr.steps/ssr.dist/ssr.strength/ssr.rev/ssr.smooth/ssr.blur/ssr.debug/ssr.base585; R4 = 反推 inv(投影)]")
+$out.Add("      [观感判据是人眼: 水面该出现屏幕空间倒影且**水色还在**; 对不上先调 ssr.fov/ssr.near/ssr.far (本项无自动判据)]")
+$out.Add("  [base] 底色镜像 OK = $nBaseMk   底色图就绪(VK导入) = $nBaseRdy   底色# 拷贝行 = $nBaseWr   降级行 = $nBaseOff   [前三项 0/1, 拷贝行 >0]")
+$out.Add("      [底色 = 段16 画完水之后的 585, 当 v1 合成底色 ⇒ 水色由此回来; 缺它则退回 324 底色 = 水仍偏透明]")
+foreach ($x in (Pick "[base]" 5)) { $out.Add("      " + $x) }
 $out.Add("")
 
 $out.Add("==== 末 10 行原始日志 ====")
@@ -340,7 +349,7 @@ if ($hookN -ne 1) {
     $out.Add("  [根因] " + $root)
     $out.Add("         -> 本页其余 FAIL 均为该根因的下游; 换 DLL、重跑图之前先确认 ini 五个开关")
 }
-if ($ver -ne "v0.18.6") { $fail.Add("#0 banner 不是 v0.18.6 -> DLL 没换") }
+if ($ver -ne "v0.18.7") { $fail.Add("#0 banner 不是 v0.18.7 -> DLL 没换") }
 if ($n_shr -ne 1) { $fail.Add("#1 ini ssr.shared=1 未读到 -> ini 没写或 ssr=0") }
 if ($n_sen -gt 0) { $fail.Add("#1 ssr.sentinel 还开着 -> 应为0, 否则水会消失干扰判读") }
 if ($n_c -ne 1) { $fail.Add("#2 色镜像 OK 行 != 1") }
@@ -418,12 +427,25 @@ if ($nKmtRoute -ge 1) {
 } elseif ($dOK -and $r2 -gt 0) {
     $warn.Add("#3 深度镜像 OK 却没标路线1' -> 走的是 NTHANDLE 老路 (D24 家族实测不该通, 换源格式了?)")
 }
-# --- #16 SSR v1 shader 采样 (v0.18.6) ---
-if ($nV1Rdr -gt 0 -and $nV1Rdy -eq 0) { $fail.Add("#16 有 [v1] 渲染# 行却没有 [v1] SSR v1 就绪 行 -> 状态不一致 (就绪行漏打或 DLL 不是 v0.18.6)") }
+# --- #16 SSR v1 shader 采样 (v0.18.7: 平滑批 + 底色) ---
+if ($nV1Rdr -gt 0 -and $nV1Rdy -eq 0) { $fail.Add("#16 有 [v1] 渲染# 行却没有 [v1] SSR v1 就绪 行 -> 状态不一致 (就绪行漏打或 DLL 不是 v0.18.7)") }
 if ($nV1Rdy -gt 1) { $warn.Add("#16 [v1] 就绪行 = $nV1Rdy > 1 -> v1 资源被反复重建 (依赖签名抖动? 看有无换设备/换分辨率行)") }
 if ($nV1Ini -gt 0 -and $nV1Rdy -eq 0 -and $nV1Off -eq 0 -and $nV1Dep -eq 0) { $warn.Add("#16 ini ssr.v1=1 但既没就绪也没降级行 -> v1 压根没走到建图 (出向/入向图没建, 或 ssr/ssr.shared/ssr.vkout 有没开的)") }
 if (($nV1Off + $nV1Att + $nV1Sam) -gt 0) { $warn.Add("#16 v1 关自己 / usage 退回 -> 按行文归因; 出向已退回 2d 原样拷 (只关自己)") }
 if ($nV1Dep -gt 0) { $warn.Add("#16 深度 KMT 图没就绪, v1 没起来 -> 看 #15 (路线1' 分支), 深度是 v1 的输入之一") }
+# --- #16 底色 (v0.18.7 B: 水色保留) ---
+if ($nBaseBad -gt 0) { $fail.Add("#16 底色拷贝 desc不一致 $nBaseBad 次 -> CopyResource 静默丢弃, 水色不会回来 (看 [base] 底色# 行的 desc 字段)") }
+if ($nBaseMk -gt 1) { $warn.Add("#16 [base] 底色镜像 OK = $nBaseMk > 1 -> 建了不止一次 (g_ssrInBuilt 被重跑?)") }
+if ($nBaseRdy -gt 1) { $warn.Add("#16 [base] 底色图就绪 = $nBaseRdy > 1 -> 反复重建 (D3D11 侧 handle 换过? 看'换了 handle'行)") }
+if ($nV1Rdy -gt 0 -and $nBaseMk -gt 0 -and $nBaseRdy -eq 0) {
+    $warn.Add("#16 底色镜像建成但 VK 没导入 -> 看上方 [base] 失败行; v1 退回 324 底色 (只关自己, 倒影照出, 水色仍偏透明)")
+}
+if ($nBaseRdy -gt 0 -and $nBaseWr -eq 0) {
+    $warn.Add("#16 底色图就绪却没有 [base] 底色# 拷贝行 -> 特征B 一次性门 (g_ssrInPending) 或身份判据没过, 底色内容不会更新 (画面会是旧的)")
+}
+if ($nV1Rdy -gt 0 -and $nBaseMk -eq 0 -and $nBaseOff -eq 0) {
+    $warn.Add("#16 一行 [base] 都没有 -> 底色没开 (ini ssr.base585=0, 或 ssr.v1/ssr.vkout 没开) => 水色仍会偏透明, 属预期")
+}
 if ($warn.Count -gt 0) {
     $out.Add("  [已知/告警] " + $warn.Count + " 项:")
     foreach ($w in $warn) { $out.Add("    ~ " + $w) }
@@ -438,8 +460,10 @@ if ($fail.Count -eq 0) {
     if ($nVkoIni -gt 0) {
         $out.Add("  2d-1 出向回写落地: 回写 $nOutWr 行 desc一致 $nOutDescOk, 出向读回 一致 $nOutOk / 不一致 $nOutBad; 入向EVENT闸等了 $nGate 次 (超时 $nGateTo)")
         if ($nV1Rdy -gt 0) {
-            $out.Add("  SSR v1 落地 (v0.18.6): 全屏三角渲染 $nV1Rdr 次 (就绪 $nV1Rdy; 降级: 关自己 $nV1Off / 深度没就绪 $nV1Dep)")
-            $out.Add("  下一步: 目视水面倒影是否呈屏幕空间内容 (人眼判据) -> 判读入档 docs/02 §14.22; 观感对不上先调 ini ssr.fov/ssr.near/ssr.far")
+            $out.Add("  SSR v1 落地 (v0.18.7): 全屏三角渲染 $nV1Rdr 次 (就绪 $nV1Rdy; 降级: 关自己 $nV1Off / 深度没就绪 $nV1Dep)")
+            $out.Add("  底色通路: 镜像 $nBaseMk / VK导入 $nBaseRdy / 每帧拷贝行 $nBaseWr (desc不一致 $nBaseBad; 降级 $nBaseOff)")
+            $out.Add("  下一步: 目视①水面倒影是否呈屏幕空间内容 ②水色是否回来 (不再近乎透明) (人眼判据) -> 判读入档 docs/02 §14.23;")
+            $out.Add("          观感对不上先调 ini ssr.fov/ssr.near/ssr.far; 倒影仍碎 -> 调 ssr.smooth (1..16) / ssr.blur; 定位用 ssr.debug=1法线/2命中/3深度")
         } else {
             $out.Add("  下一步: v1 没起 (ini ssr.v1 没开 / ssr.shared / ssr.vkout 有没开的 / 深度没就绪) -> 开 ssr.v1=1 再跑一轮; 兜底 = 2d 原样拷 (v0.18.5 行为)")
         }
