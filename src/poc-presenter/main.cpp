@@ -1767,26 +1767,29 @@ static void ssrDepthFormatProbe(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& s
 			IDXGIResource1* r1 = nullptr;
 			hr2 = t->QueryInterface(__uuidof(IDXGIResource1), reinterpret_cast<void**>(&r1));
 			if (SUCCEEDED(hr2) && r1)
-			{
 				hr2 = r1->CreateSharedHandle(nullptr,
 				                             DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
 				                             nullptr, &h);
-				r1->Release();
-			}
 			if (SUCCEEDED(hr2) && h)
 			{
 				res += " handle=OK(NT)";
 				addTag(okNt, c.tag);
 			}
-			else
+			else if (r1)
 			{
-				// 老式 handle 那格: 证明"格式本身可共享", 但 VK 的 D3D11_TEXTURE_BIT 导不了它
+				// 老式 handle = **IDXGIResource::GetSharedHandle** (不是 ID3D11Device 的方法,
+				// 首版写成 dev->GetSharedHandle 被 CI 抓成 C2039): 证明"格式本身可共享",
+				// 但 VK 的 D3D11_TEXTURE_BIT 只认 NT handle, 这种导不了。
 				HANDLE hOld = nullptr;
-				if (SUCCEEDED(dev->GetSharedHandle(t, &hOld)) && hOld)
+				if (SUCCEEDED(r1->GetSharedHandle(&hOld)) && hOld)
 					res += " handle=老式OK(NT=FAIL " + hexHr(hr2) + ")";
 				else
 					res += " handle=FAIL " + hexHr(hr2);
 			}
+			else
+				res += " handle=FAIL(拿不到 IDXGIResource1) " + hexHr(hr2);
+			if (r1)
+				r1->Release();
 			t->Release();
 		}
 		else
