@@ -2193,6 +2193,11 @@ tools\rdc_run.ps1 -Script rdc_seg16_state.py -Scene S4
    `desc/哨兵/异常` 全 0、PoC-B 0.88、帧时中位 16.66/16.70 ≈ v0.18.4 的 16.78/16.67
    ⇒ 本轮**唯一行为改动只增加了 8 次节流读回**，其余全是回归对照。
 
+**画面（用户目视回报，与 §14.15.1 / §14.17 / §14.18.1 相同）**：**水体几乎完全透明 + 严重拖影**
+—— `ssr.vkout=1` 的 v0 passthrough「换掉 585 内容 = **预期，非回归**」（`324` 快照在段16 之前不含水
+⇒ 段17 读到没画水的场景 ⇒ 水消失；回写的是**上一帧**场景色 ⇒ 移动时拖影）；`ssr.sentinel=0` 故 2b
+回写未开。**该观感由 SSR v1 shader 出真反射后自然消失**，在那之前不作判据。
+
 **下一步**：进 **SSR v1 shader 采样**（`DEPTH|STENCIL` 视图已备、`POCB_DEV_FNS` 的
 descriptor/sampler 函数表已备、`ssrKmtVkFrame` 的节流读回在 shader 上线后转为回归对照）。
 
