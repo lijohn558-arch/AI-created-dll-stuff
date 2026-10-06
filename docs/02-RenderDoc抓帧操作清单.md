@@ -1102,6 +1102,31 @@ GET https://api.github.com/repos/{owner}/{repo}/check-runs/{id}/annotations
 拼。）`build.yml` 的编译步已有 `| Select-Object { if ($_ -like '*error*') { '::error::' + $_ } }`
 这层转换，所以编译错误会完整出现在注解里。脚本：`Temp\opencode\cianno3.ps1` → `ci1ddanno2.txt`。
 
+**坑：本机系统 DNS 解析器故障（2026-10-06）—— 与「GitHub 被墙」是两回事**：
+`Get-DnsClientServerAddress` 显示以太网 DNS = `192.168.199.1`（路由器）**不应答**，
+连 `Resolve-DnsName www.baidu.com -QuickTimeout` 都超时 ⇒ `Invoke-RestMethod` 全挂。
+**只读绕法（不改系统配置、无需管理员）**：
+
+1. 指定公共 DNS 查一次 A 记录：`Resolve-DnsName api.github.com -Server 223.5.5.5 -Type A -QuickTimeout`
+   → `20.205.243.168`（备选 `119.29.29.29`、`1.1.1.1`；`api.github.com` 的 IP 会变，**每次现查**）；
+2. **直连 IP 发请求 + 手工带 Host + 跳过证书校验**（`Invoke-RestMethod` 做不到，必须用 `WebRequest`）：
+
+   ```powershell
+   [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+   $old = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+   [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }   # 用完复原 $old
+   $req = [System.Net.WebRequest]::Create("https://<ip>/repos/<r>/commits/<40位sha>/check-runs")
+   $req.Method = "GET"; $req.Host = "api.github.com"; $req.Timeout = 20000
+   ([System.Net.HttpWebRequest]$req).UserAgent = "ps-5.1"    # ← 见下「坑2」
+   ```
+
+> **坑2**：`$req.Headers.Add("User-Agent", "ps-5.1")` 在 PS 5.1 抛
+> 「必须使用适当的属性或方法修改 User-Agent 标头。参数名: name」⇒ 改用 `.UserAgent`
+> 属性（变量要先转成 `HttpWebRequest`，否则属性不存在）。
+
+脚本：`Temp\opencode\ci_once.ps1`（一次性判 RESULT）与 `Temp\opencode\ciwait_ip.ps1`（轮询后台），
+均已实测拿到 `RESULT SUCCESS`（`86aa133`）。
+
 ### 14.12 SSR Step 2c-α（共享入向·D3D11 侧）跑图判读（`v0.15.0` 已实跑，**2026-10-04**）
 
 > **实跑结论：色全绿、深度 R2 未过**（详见本节末"实跑结果"）。归因重试 + 2c-β 版 = `v0.16.0`。
@@ -1736,7 +1761,7 @@ tools\rdc_run.ps1 -Script rdc_seg16_state.py -Scene S4
 `cc % 600 == 0` 永不命中，「每 600 次采一次」从未发生（对比 2c：`++g_ssrInLogN` **进门就推进**，
 所以有 9 行）。不影响 §#12 判据（≥1 一致即可），但**会话后段的帧从未被采过**。修法见 `docs/待修复事项总结.md` C-7（**v0.18.2 已修**）。
 
-### 14.18 v0.18.2 判读模板（C-7 读回节流 + 2d-3 深度格式探测，**代码已改完，待真机**）
+### 14.18 v0.18.2 判读模板（C-7 读回节流 + 2d-3 深度格式探测，**2026-10-06 实跑 PASS → §14.18.1**）
 
 **这一轮验什么**：`v0.18.2` 只加两个**诊断类**功能，除下面两项外**其余行为必须与 §14.17 逐格一致**
 （等价于一次回归对照）：
@@ -1778,3 +1803,83 @@ tools\rdc_run.ps1 -Script rdc_seg16_state.py -Scene S4
 
 **已知不拦判读**：R2 固定 2 项告警（深度镜像 FAIL + 归因格式 ×2，`0x80070057`、Format=44
 = `R24G8_TYPELESS`）保持不变；`Format=44` 正是 §#13 探测的源格式那一格。
+
+### 14.18.1 实跑记录（2026-10-06 14:02:51–14:04:27，`86aa133` = `v0.18.2` artifact，`run2c.ps1` → **[PASS] 全绿**）
+
+**环境**：CI `86aa133` **RESULT SUCCESS**（`poc-presenter` + `capture-helper` 双 job 均 success；
+前一个提交 `6ed52c7` 曾被 CI 抓出 `C2039 'GetSharedHandle' 不是 ID3D11Device 成员` —— 老式共享句柄是
+`IDXGIResource::GetSharedHandle`，已改）；ini 五行全开；本局 1323 行 / 96 秒，
+末条汇总 **帧=4980**（关停前最后一帧 5247，**≥2000 达标**）。
+
+| 判据 | 实测 | 判 |
+|---|---|---|
+| #0 banner | `expect v0.18.2: OK`（`ssr.shared`/`Step2c-β`/`ssr.sentinel`/`ssr.vkout` 四特征全 OK） | ✅ |
+| #1 挂载 | `ctx槽33/50/47 已挂 = 1`（无 `挂载门未满足`） | ✅ |
+| #2/#5 镜像+就绪 | 色324 SHARED OK=1、共享入向就绪=1 | ✅ |
+| #6/#7 入向拷贝 | 46 行、`[2c读回` **9 行 9/9 ≠基线、`=基线` = 0** | ✅ |
+| #8/#9 | `入向累计 = 4086`、`COPY= 末值 = 3`、`[2c入向已排队] = 65`、哨兵执行 0 | ✅ |
+| #11 副作用 | `[异常] = 0`、PoC-B 失败行 0、`code=-4` 0；PoC-B **0.86~0.87 ms/帧**（Step1 基线 0.87） | ✅ |
+| β2/β3 | VK 导入 OK=1、导入矩阵 1 组合成、交叉校验 **12 一致 / 0 不一致**、`不需要归因` | ✅ |
+| β4 R2 归因 | 重试 2 行、`病因是格式 x2`、结论行 1 —— **本轮对这条做了归因更正，见下** | ⚠ 更正 |
+| 12a–12c | `ini ssr.vkout=1` 1 行、`[2d] 出向镜像 OK` = 1、`[2d] 出向图就绪` = 1、**关闸行 0** | ✅ |
+| 12d | `[2d] 回写#` **40 行，desc一致 40 / desc不一致 0** | ✅ |
+| **12e（C-7 验收）** | `[2d] 出向读回` **9 行**（修复前恒 3 行，§14.18 预期 9~10）；**一致 4 / 不一致 5** | ✅ + 观察项 |
+| 12f | `出向= 4084`、`帧= 4980` ⇒ **出向/帧 = 0.82**（0.5~1.5 内）；入向 4086 ⇒ 出向/入向 = **0.999** | ✅ |
+| **#13 2d-3 探测** | **行数 = 7、结论行 = 1、NT-handle 可用格子 = 6** | ✅ |
+| R2 告警 | 仍为固定 2 项（深度镜像 FAIL + 归因格式 ×2） | ~ 已知 |
+| **总判** | **`[PASS] 全绿`**（`2c-alpha + 2c-beta 收口`） | ✅ |
+
+**C-7 修复验证（本轮重点之二）**：`[2d] 出向读回` 由**恒 3 行 → 9 行**，且「每 600 次采一次」
+（#600/#1200/#1800）**确实发生了** ⇒ 计数进门先 `++` 生效，C-7 关闭。
+
+> **O-1 观察项（新暴露，不改判）**：9 行里 **一致 4 / 不一致 5**（#600、#1800 不一致，#1200 一致）。
+> 修复前中后段帧**从未被采**，所以这个问题本轮才看得见。样本特征：`#600 出向=0x5E20817998A32B28`
+> 正是同刻 `[2c] 入向拷贝#600` 的色校验和，而该行「入向」是另一个值 ⇒ 两份**来自不同时刻的采样**
+> （帧错位/时序），与 `不一致✗ (帧错位/行距/时序)` 的自诊断一致。判据只要求 **≥1 一致** ⇒ 不拦 PASS；
+> 是否为真问题（入向镜像在我 Map 读之前已被下一帧覆盖）待后续复核，不进 FAIL。
+
+**帧时基线（§14.14 口径）**：
+
+| 局 | 会话 CPU / GPU 均值 | 末 600 帧 CPU / GPU | 末窗 `>20ms` |
+|---|---|---|---|
+| `v0.18.0`（28.77 写/帧） | 17.14 / 17.16 ms | 18.09 / 17.81 ms | 52/600 |
+| `v0.18.1`（0.68 写/帧） | 16.80 / 16.82 ms | 16.77 / 16.84 ms | 3/600 |
+| **`v0.18.2`（+2d-3 探测 + C-7）** | **16.84 / 16.89** ms | **16.70 / 16.69** ms | **4/600** |
+| Step1 基线 | — | 中位 16.65~16.66 | — |
+
+⇒ 与 `v0.18.1` 持平（+0.02 / +0.07 ms），**末窗 GPU 还略好**，`>20ms` 4 vs 3 ⇒
+**2d-3 探测（一次性建 7 张纹理）无性能回退**；PoC-B 回到 **0.86~0.87**（上一轮 0.92~0.95）。
+
+**★ 2d-3 实测结论（本轮真正要拿的东西）** —— 七格明细（日志原文）：
+
+```
+#1 源格式(Format=44)      BindFlags=0x00000000 misc=SHARED          → 建=OK handle=老式OK(NT=FAIL 0x80070057)
+#2 R32_FLOAT(41)          BindFlags=0x00000000 misc=SHARED|NTHANDLE → 建=OK handle=OK(NT)
+#3 R32_FLOAT(41)          BindFlags=0x00000028 misc=SHARED|NTHANDLE → 建=OK handle=OK(NT)
+#4 R16_FLOAT(54)          BindFlags=0x00000000 misc=SHARED|NTHANDLE → 建=OK handle=OK(NT)
+#5 R16_FLOAT(54)          BindFlags=0x00000028 misc=SHARED|NTHANDLE → 建=OK handle=OK(NT)
+#6 R32_TYPELESS(39)       BindFlags=0x00000000 misc=SHARED|NTHANDLE → 建=OK handle=OK(NT)
+#7 R32_TYPELESS(39)       BindFlags=0x00000028 misc=SHARED|NTHANDLE → 建=OK handle=OK(NT)
+```
+
+1. **路线 1 前置完全成立**：3 个候选格式 × 2 档 `BindFlags` **6/6 拿到 NT handle** ⇒
+   **首选 `R32_FLOAT × 0x28(SRV|RTV)`**（#3 格，正是路线 1 全屏 PS 要写的那档；`0x28` 这档通了
+   意味着不必拆成「先写 RTV 再拷成可采样」）。`R16_FLOAT`（4.2 MB/全屏）与 `R32_TYPELESS` 作备选。
+2. **★ 归因更正（修正 §14.12 / §14.17 沿用的措辞）**：第 1 格证明
+   **`Format=44` × 单独 `SHARED`（不带 `NTHANDLE`）建得出来、老式 handle 也拿得到** ⇒
+   2c-α 三次 `BindFlags` 全失败的真凶是 **`SHARED_NTHANDLE`**，不是「格式不在 D3D11 SHARED 白名单」。
+   正确表述 = **病因是 `D24 家族 × SHARED_NTHANDLE` 这个组合**。
+   当初矩阵只动 `BindFlags`、`MiscFlags` 恒为 `SHARED|NTHANDLE`，**少排除了一个轴** ——
+   这正是 §14.18 特意加「源格式 × 单独 SHARED」那一格的用意，本轮闭环。
+3. **对路线选择的影响：首选不变，但多出一条候选**：
+   - 老式（KMT）handle 对**当前**导入路径无用（2c-β 已定案 `D3D11_TEXTURE_BIT` 只认 NT handle）⇒
+     **路线 1 仍是首选**，第 2/3 条的结论不受影响；
+   - **新增候选路线 1′（待探测）**：D24 走 legacy `SHARED` → `IDXGIResource::GetSharedHandle`
+     （KMT handle）→ VK `VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT` 直接导入，
+     **可省掉每帧 1 次全屏 PS**。前置未知：① 驱动是否给该 handle type 配出 `VkImage`（D24/S8）；
+     ② 跨 API 同步原语（NT 路径用的 fence 在 KMT 资源上是否等效）。**结论出来前不写死实现**。
+4. **C-8（诊断输出，归 v0.18.3）**：结论行后半句「源格式 D24家族 **不可共享**」与第 1 格实测
+   （`建=OK 老式OK`）**自相矛盾**，措辞应为「源格式不可 **NT** 共享」。本轮按七格明细读结论，
+   **不影响判读**，但下次会误导。
+
+**画面**：与 §14.15.1 / §14.17 相同 —— 水体消失 + 拖影（`vkout=1` 换掉 585 内容 = **预期，非回归**）。
