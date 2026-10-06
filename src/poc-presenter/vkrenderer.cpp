@@ -107,6 +107,7 @@ static bool ssrV1RecordOut(PocbCtx& c, unsigned w, unsigned h); // 录出向命�
 static bool ssrV1Dirty(); // v1 依赖变了 (深度图/模式/入向图) ⇒ 只重录不重建
 static void ssrV1Free(PocbCtx& c); // 销毁 v1 全套 (换设备/关闸时)
 static void ssrV1DropViewC(PocbCtx& c); // 入向图要换/要销毁前, 先摘掉 v1 指着它的 color view
+static void ssrV1DropViewD(PocbCtx& c); // 深度 KMT 图要换/要销毁前, 先摘掉 v1 指着它的 depth view
 
 static std::string pocbCode(long v)
 {
@@ -2090,6 +2091,7 @@ static long            g_ssrKmtBad = 0;              // 三档候选全不一致
 // (旧 VkDevice 已作废, 拿它 destroy 是 UB)。老式 handle 归 D3D11 所有, 这里从不 CloseHandle。
 static void ssrKmtReset(PocbCtx& c, bool destroy)
 {
+	ssrV1DropViewD(c); // v0.18.6: v1 的 depth view 指着这张图, 销毁/换图前先摘掉 (下帧重建+重填描述符)
 	if (destroy && g_ssrKmtDev && g_ssrKmtDev == c.vdev && c.vdev)
 	{
 		c.fns.vkDeviceWaitIdle(c.vdev); // 先确认 GPU 不再读这块内存
@@ -2648,6 +2650,17 @@ static void ssrV1DropViewC(PocbCtx& c)
 		g_ssrV1ViewC = VK_NULL_HANDLE;
 	}
 	g_ssrV1CSrc = VK_NULL_HANDLE;
+}
+
+// 深度 KMT 图要被销毁/换掉之前先调（同 ssrV1DropViewC 的道理，只是换 depth view）
+static void ssrV1DropViewD(PocbCtx& c)
+{
+	if (g_ssrV1ViewD)
+	{
+		c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewD, nullptr);
+		g_ssrV1ViewD = VK_NULL_HANDLE;
+	}
+	g_ssrV1DSrc = VK_NULL_HANDLE;
 }
 
 // 换设备: 旧 device 上的句柄**不能**拿来 destroy, 也不该在新 device 上引用 —— 只丢不毁
