@@ -68,7 +68,8 @@ $n_shr  = Cnt "ini ssr.shared=1"
 $out.Add("  ini ssr.shared=1 = " + $n_shr + "   [应为1]")
 $n_sen  = Cnt "ini ssr.sentinel=1 "
 $out.Add("  ini ssr.sentinel=1 = " + $n_sen + "   [应为0, 哨兵关着]")
-$out.Add("  ctx槽33/50/47 已挂 = " + (Cnt "ctx槽33/50/47 已挂") + "   [应为1]")
+$hookN = Cnt "ctx槽33/50/47 已挂"
+$out.Add("  ctx槽33/50/47 已挂 = " + $hookN + "   [应为1]")
 $n_c = Cnt "[2c] 色324 SHARED 镜像 OK"
 $n_d = Cnt "[2c] 深度520 SHARED 镜像 OK"
 $out.Add("  [2c] 色324 SHARED 镜像 OK = " + $n_c + "   [#2 应为1]")
@@ -251,6 +252,18 @@ $out.Add("")
 $out.Add("==== 自动结论 ====")
 $fail = New-Object System.Collections.Generic.List[string]
 $warn = New-Object System.Collections.Generic.List[string]
+# --- 根因短路 (2026-10-06 踩坑): 挂载门没过 => 下面几乎每条 FAIL 都是它的下游 ---
+if ($hookN -ne 1) {
+    $root = "#1 挂载门没过 (ctx槽33/50/47 未挂) => 33/47/50 钩子全没装, OM/候选/特征A,B/入向/出向 恒为 0"
+    if ((Cnt "探针升质: ini probe=0") -gt 0) {
+        $root += " ;本页已确认 ini probe=0 -> installSsrRecon 第一行静默 return (main.cpp:2089 门 = pocbEnabled && g_probeOn && g_ssrOn; g_probeOn = iniFlag(""probe"", true))"
+        $root += " ;修法 = ini 写 probe=1 后重跑 (probe 默认就是 1, 别手写 0)"
+    } else {
+        $root += " ;看日志有无 'GetImmediateContext 空 / slot33/50 原值不在 d3d11 / ctx 登记表已满'"
+    }
+    $out.Add("  [根因] " + $root)
+    $out.Add("         -> 本页其余 FAIL 均为该根因的下游; 换 DLL、重跑图之前先确认 ini 五个开关")
+}
 if ($ver -ne "v0.18.0") { $fail.Add("#0 banner 不是 v0.18.0 -> DLL 没换") }
 if ($n_shr -ne 1) { $fail.Add("#1 ini ssr.shared=1 未读到 -> ini 没写或 ssr=0") }
 if ($n_sen -gt 0) { $fail.Add("#1 ssr.sentinel 还开着 -> 应为0, 否则水会消失干扰判读") }

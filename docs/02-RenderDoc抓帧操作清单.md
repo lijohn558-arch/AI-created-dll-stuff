@@ -1532,9 +1532,19 @@ indirect draw 要按帧预算调剔除力度/间接 draw 上限，`docs/00` §6.
 
 ### 14.15 SSR Step 2d-1（出向回写）跑图判读（`v0.18.0` `ec94958` CI SUCCESS，**待实跑**）
 
-> **先决**：`poc-presenter.dll` 换成 `ec94958` 轮 artifact；`poc-presenter.ini` 四行：
+> **先决**：`poc-presenter.dll` 换成 `ec94958` 轮 artifact；`poc-presenter.ini` **五行**：
 > `ssr=1` / `ssr.shared=1` / `ssr.sentinel=0` / **`ssr.vkout=1`**（本版新增，默认 0；
-> 写 0 = 整轮回退成纯 2c 形态，其余行为与 `v0.17.0` 一致）。
+> 写 0 = 整轮回退成纯 2c 形态，其余行为与 `v0.17.0` 一致）
+> / **`probe=1`**（**不能漏、不能写 0** —— 见下方「挂载门」）。
+>
+> **⚠ 挂载门（2026-10-06 实跑踩坑，`installSsrRecon` main.cpp:2089）**：挂槽33/47/50 的
+> 门是 `pocbEnabled() && g_probeOn && g_ssrOn`，而 `g_probeOn = iniFlag("probe", true)`
+> （main.cpp:2255）。**`probe=0` 会让 `installSsrRecon` 第一行就静默 return，一条日志都不打**
+> ⇒ 槽33/50/47 全没挂 ⇒ `OM=0 → 候选=0 → 入向=0 → 出向=0` ⇒ run2c 一口气 **10 条 FAIL，
+> 但每一条都是同一个根因**，与 2d-1 代码、与跑图都无关。
+> **判别法**：日志里搜 `ctx槽33/50` —— 出现 `已挂` 才算装上；只出现
+> `ini ssr=1 → 挂 ctx 槽33/47/50` 那行**只是意图打印**（main.cpp:2261），不代表挂上。
+> 该静默 return 待 v0.18.1 补一条一次性日志（挂载门未满足时打明是哪个开关关的）。
 
 **跑法**：2000+ 帧，跑完执行 `run2c.ps1`（已扩出 §#12）。
 
