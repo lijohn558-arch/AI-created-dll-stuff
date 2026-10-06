@@ -2021,6 +2021,451 @@ bool ssrKmtProbeVk(HANDLE h, const D3D11_TEXTURE2D_DESC& sd)
 	return ok;
 }
 
+// ===========================================================================
+// ---- 路线1′ 正式落地 (v0.18.5, docs/05 D2a-4 定案): 深度 KMT 导入分支 ----
+// ---------------------------------------------------------------------------
+// 2c 的色镜像走 NT handle + VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT; 深度 (D24 家族)
+// 栽在 SHARED_NTHANDLE 这一轴 (R2 真凶 = **组合** 而非格式), 而"单独 SHARED"建得出老式 handle
+// (2d-3 第一格), VK 用 KMT handleType 直入也 bind=0 (2d-4 #4)。于是深度**另开一条导入分支**:
+// 老式 GetSharedHandle → D3D11_TEXTURE_KMT_BIT, 与色那条分支互不相干 (另开导入分支的字面落地)。
+//
+// 同步原语评估 (D2a-4 留的问题② —— "NT 路径的 fence 在 KMT 资源上是否等效"):
+//   · EVENT 闸 (ssrInQueue End / ssrInGateWait 等) 等的是 **D3D11 那条 CopyResource**, 与
+//     handleType 无关 ⇒ KMT 分支直接继承 v0.18.4 的闸, 不需要新栅栏;
+//   · 老式 handle 只在**建图时导入一次**, 之后每帧都是"D3D11 写同一块物理页 → 闸等到写完 →
+//     VK 读", 不涉及按帧重新导入 (KMT 句柄归 DXGI/D3D11 所有, 不 CloseHandle);
+//   · VK 侧仍用 c.fence 提交+等待 (与 2c-β/2d 出向共用, 顺序提交顺序等)。
+// 降级: 任一步失败只关自己 (g_ssrKmtState=2 + 一行日志), 色通路 / 2c / 2d 出向全不受影响。
+static int             g_ssrKmtState = 0;   // 0=未建 1=就绪 2=关自己 (只打一次失败日志)
+static VkDevice        g_ssrKmtDev = VK_NULL_HANDLE; // 这套句柄属于哪个 VkDevice (换设备须丢弃)
+static VkImage         g_ssrKmtImg = VK_NULL_HANDLE;
+static VkDeviceMemory  g_ssrKmtMem = VK_NULL_HANDLE;
+static VkImageView     g_ssrKmtView = VK_NULL_HANDLE;
+static VkBuffer        g_ssrKmtBuf = VK_NULL_HANDLE;
+static VkDeviceMemory  g_ssrKmtBufMem = VK_NULL_HANDLE;
+static void*           g_ssrKmtBufPtr = nullptr;
+static VkCommandBuffer g_ssrKmtCmd = VK_NULL_HANDLE;
+static unsigned        g_ssrKmtW = 0, g_ssrKmtH = 0; // 建图时的深度镜像尺寸 (读回行距用)
+static bool            g_ssrKmtCanRead = true;       // TRANSFER_SRC/读回 buffer 建得出吗
+static long            g_ssrKmtN = 0;                // 深度跨API读回次数
+static long            g_ssrKmtOk = 0;               // 至少一档候选一致的次数
+static long            g_ssrKmtBad = 0;              // 三档候选全不一致的次数
+
+// 弃置一套深度分支资源。destroy=true 且设备没换 ⇒ 正常销毁; 设备换了 ⇒ **只丢句柄**
+// (旧 VkDevice 已作废, 拿它 destroy 是 UB)。老式 handle 归 D3D11 所有, 这里从不 CloseHandle。
+static void ssrKmtReset(PocbCtx& c, bool destroy)
+{
+	if (destroy && g_ssrKmtDev && g_ssrKmtDev == c.vdev && c.vdev)
+	{
+		c.fns.vkDeviceWaitIdle(c.vdev); // 先确认 GPU 不再读这块内存
+		if (g_ssrKmtView)
+			c.fns.vkDestroyImageView(c.vdev, g_ssrKmtView, nullptr);
+		if (g_ssrKmtImg)
+			c.fns.vkDestroyImage(c.vdev, g_ssrKmtImg, nullptr);
+		if (g_ssrKmtMem)
+			c.fns.vkFreeMemory(c.vdev, g_ssrKmtMem, nullptr);
+		if (g_ssrKmtBuf)
+			c.fns.vkDestroyBuffer(c.vdev, g_ssrKmtBuf, nullptr);
+		if (g_ssrKmtBufMem)
+			c.fns.vkFreeMemory(c.vdev, g_ssrKmtBufMem, nullptr);
+	}
+	g_ssrKmtView = VK_NULL_HANDLE;
+	g_ssrKmtImg = VK_NULL_HANDLE;
+	g_ssrKmtMem = VK_NULL_HANDLE;
+	g_ssrKmtBuf = VK_NULL_HANDLE;
+	g_ssrKmtBufMem = VK_NULL_HANDLE;
+	g_ssrKmtBufPtr = nullptr;
+	g_ssrKmtCmd = VK_NULL_HANDLE; // 命令 buffer 属于旧 pool ⇒ 换设备必须重分配 (无 vkFreeCommandBuffers)
+	g_ssrKmtCanRead = true;
+	g_ssrKmtState = 0;
+	g_ssrKmtDev = VK_NULL_HANDLE;
+}
+
+// 建图 + KMT 导入 + 绑定 + 视图 + 读回 buffer, **持久持有** (与 ssrKmtProbeVk 的"建完立刻销毁"
+// 相对)。只在 D3D11 侧的读回节奏上被调到 (前3次 + 每600次), 失败只关自己。
+static bool ssrKmtVkBuild(PocbCtx& c)
+{
+	if (g_ssrKmtState == 2)
+		return false;
+	if (c.state.load() != 2 || !c.vdev || !c.queue || !c.pool || !c.fence)
+		return false; // PoC-B 还没就绪 → 下一帧再试
+	if (!g_ssrSharedOn.load(std::memory_order_relaxed) || !g_ssrInDepthKmt ||
+	    !g_ssrInHD || !g_ssrInTexD)
+		return false;
+	auto fail = [&](const std::string& why) {
+		logLine("SSR侦察: [2d-5] 深度KMT 导入失败: " + why +
+		        " → 深度不开 (色通路/2c/2d 出向不受影响; SSR 兜底 = 颜色 + 边缘 fallback)");
+		ssrKmtReset(c, true); // 已建成的那一半正常销毁 (设备还在), 再关自己
+		g_ssrKmtState = 2;
+		return false;
+	};
+	// 本函数只在 state==0 进来 ⇒ 这些句柄此时必然是空的; 先置一遍是防 vkCreateImage/AllocateMemory
+	// **失败时不写输出参数**, 免得把垃圾值带进后面的失败清理 (ssrKmtReset 会拿它去 destroy)。
+	g_ssrKmtImg = VK_NULL_HANDLE;
+	g_ssrKmtMem = VK_NULL_HANDLE;
+	g_ssrKmtView = VK_NULL_HANDLE;
+	g_ssrKmtBuf = VK_NULL_HANDLE;
+	g_ssrKmtBufMem = VK_NULL_HANDLE;
+	g_ssrKmtBufPtr = nullptr;
+	D3D11_TEXTURE2D_DESC md{};
+	g_ssrInTexD->GetDesc(&md);
+	// VK 侧映射表本版只认 D24 家族 —— 真机源格式 = Format=44 (R24G8_TYPELESS), 与 2d-4 探测同一格;
+	// 四个符号与 main.cpp 的 ssrIsD24 同表, 都是已编译过的既有 token。
+	const bool d24 = (md.Format == DXGI_FORMAT_R24G8_TYPELESS ||
+	                  md.Format == DXGI_FORMAT_D24_UNORM_S8_UINT ||
+	                  md.Format == DXGI_FORMAT_R24_UNORM_X8_TYPELESS ||
+	                  md.Format == DXGI_FORMAT_X24_TYPELESS_G8_UINT);
+	if (!d24)
+		return fail("深度镜像格式 " + ssrFmtName(md.Format) + " 不在 D24 家族映射表");
+	if (md.ArraySize != 1 || md.MipLevels != 1)
+		return fail("深度镜像 arr" + std::to_string(md.ArraySize) + " mips" +
+		            std::to_string(md.MipLevels) + " (本分支只做单层单 mip)");
+	if (md.SampleDesc.Count != 1)
+		return fail("深度镜像多重采样 msaa" + std::to_string(md.SampleDesc.Count) +
+		            " (本分支没做 msaa 映射)");
+	g_ssrKmtW = md.Width;
+	g_ssrKmtH = md.Height;
+	g_ssrKmtDev = c.vdev;
+
+	// --- 1) 外部内存 VkImage: handleType = KMT (与色的 D3D11_TEXTURE_BIT 分支分开) ---
+	VkExternalMemoryImageCreateInfo pem{};
+	pem.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+	pem.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT;
+	VkImageCreateInfo ici{};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.pNext = &pem;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_D24_UNORM_S8_UINT;
+	ici.extent = VkExtent3D{md.Width, md.Height, 1};
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VkResult vr = c.fns.vkCreateImage(c.vdev, &ici, nullptr, &g_ssrKmtImg);
+	std::string usg = "TRANS_SRC|SAMPLED";
+	if (vr != VK_SUCCESS)
+	{
+		// 兜底档 = 2d-4 探测实测过的 TRANSFER_DST|SAMPLED (支持度查询就是用它查的)。
+		// 落到这档说明 TRANSFER_SRC 不被支持 ⇒ 导入照样成立, 但读回会失能 (下面关掉 canRead)。
+		ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		usg = "TRANS_DST|SAMPLED";
+		g_ssrKmtCanRead = false;
+		vr = c.fns.vkCreateImage(c.vdev, &ici, nullptr, &g_ssrKmtImg);
+	}
+	if (vr != VK_SUCCESS)
+		return fail("vkCreateImage(KMT, " + usg + ") = " + pocbCode(vr));
+
+	// --- 2) 导入老式 handle: 分配即导入 (链进 VkMemoryAllocateInfo) ---
+	VkMemoryRequirements req{};
+	c.fns.vkGetImageMemoryRequirements(c.vdev, g_ssrKmtImg, &req);
+	VkPhysicalDeviceMemoryProperties mp{};
+	c.fns.vkGetPhysicalDeviceMemoryProperties(c.phys, &mp);
+	const int tDev = pocbMemType(mp, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	const int tAny = pocbMemType(mp, req.memoryTypeBits, 0);
+	if (!req.size || (tDev < 0 && tAny < 0))
+		return fail("KMT 导入没有可用内存类型 (memoryTypeBits=" +
+		            std::to_string(req.memoryTypeBits) + ")");
+	VkResult ar = VK_ERROR_OUT_OF_HOST_MEMORY;
+	int tUsed = -1;
+	bool usedDed = false;
+	// 内存类型 (DEVICE_LOCAL 优先) × dedicated 两档。2d-4 支持度查询回 features=0x0005 =
+	// DEDICATED_ONLY|IMPORTABLE ⇒ 按规范必须走 dedicated 分配 (探针当年没链也过了, 那是驱动
+	// 宽容不是合规); 万一被拒, 再退回不带 dedicated 的老路, 两档都把码记下来便于归因。
+	for (int ti = 0; ti < 2 && ar != VK_SUCCESS; ++ti)
+	{
+		const int t = (ti == 0) ? tDev : tAny;
+		if (t < 0 || (ti == 1 && tAny == tDev))
+			continue;
+		for (int di = 0; di < 2 && ar != VK_SUCCESS; ++di)
+		{
+			VkImportMemoryWin32HandleInfoKHR imp{};
+			imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+			imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT;
+			imp.handle = g_ssrInHD;
+			VkMemoryDedicatedAllocateInfo dai{};
+			dai.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+			dai.pNext = &imp;
+			dai.image = g_ssrKmtImg;
+			VkMemoryAllocateInfo mai{};
+			mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+			mai.pNext = (di == 0) ? static_cast<const void*>(&dai) : static_cast<const void*>(&imp);
+			mai.allocationSize = req.size;
+			mai.memoryTypeIndex = static_cast<uint32_t>(t);
+			ar = c.fns.vkAllocateMemory(c.vdev, &mai, nullptr, &g_ssrKmtMem);
+			if (ar == VK_SUCCESS)
+			{
+				tUsed = t;
+				usedDed = (di == 0);
+			}
+		}
+	}
+	if (ar != VK_SUCCESS)
+		return fail("vkAllocateMemory(KMT 导入) = " + pocbCode(ar) +
+		            " VK报size=" + std::to_string((long long)req.size));
+	const VkResult br = c.fns.vkBindImageMemory(c.vdev, g_ssrKmtImg, g_ssrKmtMem, 0);
+	if (br != VK_SUCCESS)
+		return fail("vkBindImageMemory(KMT) = " + pocbCode(br));
+
+	// --- 3) 深度视图 (DEPTH|STENCIL): 只为后续 SSR v1 shader 采样准备, 读回不依赖它 ---
+	VkImageViewCreateInfo vci{};
+	vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vci.image = g_ssrKmtImg;
+	vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vci.format = VK_FORMAT_D24_UNORM_S8_UINT;
+	vci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
+	const VkResult vvr = c.fns.vkCreateImageView(c.vdev, &vci, nullptr, &g_ssrKmtView);
+	if (vvr != VK_SUCCESS)
+	{
+		g_ssrKmtView = VK_NULL_HANDLE;
+		logLine("SSR侦察: [2d-5] 深度KMT ImageView 失败 " + pocbCode(vvr) +
+		        " (读回不受影响; SSR v1 要采样前必须修)");
+	}
+
+	// --- 4) 读回 buffer: 紧密 width*height*4 (D24 的 depth aspect ≤ 4B/px), host visible|coherent
+	//      持久映射 —— 与 2c-β 同法; 建不出只是失去读回比对, 导入本身照常成立。 ---
+	if (g_ssrKmtCanRead)
+	{
+		const VkDeviceSize sz = (VkDeviceSize)md.Width * (VkDeviceSize)md.Height * 4ULL;
+		VkBufferCreateInfo bci{};
+		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bci.size = sz;
+		bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		vr = c.fns.vkCreateBuffer(c.vdev, &bci, nullptr, &g_ssrKmtBuf);
+		if (vr != VK_SUCCESS)
+			g_ssrKmtCanRead = false;
+		else
+		{
+			VkMemoryRequirements breq{};
+			c.fns.vkGetBufferMemoryRequirements(c.vdev, g_ssrKmtBuf, &breq);
+			const int bt = pocbMemType(mp, breq.memoryTypeBits,
+			                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+			                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			VkMemoryAllocateInfo bmai{};
+			bmai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+			bmai.allocationSize = breq.size;
+			bmai.memoryTypeIndex = (bt >= 0) ? static_cast<uint32_t>(bt) : 0;
+			if (bt < 0 || c.fns.vkAllocateMemory(c.vdev, &bmai, nullptr, &g_ssrKmtBufMem) != VK_SUCCESS ||
+			    c.fns.vkBindBufferMemory(c.vdev, g_ssrKmtBuf, g_ssrKmtBufMem, 0) != VK_SUCCESS ||
+			    c.fns.vkMapMemory(c.vdev, g_ssrKmtBufMem, 0, VK_WHOLE_SIZE, 0, &g_ssrKmtBufPtr) != VK_SUCCESS ||
+			    !g_ssrKmtBufPtr)
+				g_ssrKmtCanRead = false;
+		}
+		if (!g_ssrKmtCanRead)
+			logLine("SSR侦察: [2d-5] 深度KMT 读回 buffer 建不出 → 导入仍就绪, 但本分支无跨API比对");
+	}
+
+	// --- 5) 读回命令 (ONE_TIME 录, 提交完自动回 initial state ⇒ 之后可直接重录) ---
+	if (g_ssrKmtCanRead && !g_ssrKmtCmd)
+	{
+		VkCommandBufferAllocateInfo cbai{};
+		cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		cbai.commandPool = c.pool;
+		cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		cbai.commandBufferCount = 1;
+		if (c.fns.vkAllocateCommandBuffers(c.vdev, &cbai, &g_ssrKmtCmd) != VK_SUCCESS)
+		{
+			g_ssrKmtCmd = VK_NULL_HANDLE;
+			g_ssrKmtCanRead = false;
+			logLine("SSR侦察: [2d-5] 深度KMT vkAllocateCommandBuffers 失败 → 无跨API比对");
+		}
+	}
+
+	// --- 6) 布局初转 (UNDEFINED→GENERAL) 单独一条, 建好时立即提交并等完。按规范这次转换
+	//      **可能丢掉** D3D11 刚拷进来的内容 ⇒ 调用方"建图帧只建不比", 下一机会才出对比值。 ---
+	if (g_ssrKmtCanRead && g_ssrKmtCmd)
+	{
+		VkCommandBufferBeginInfo cbb{};
+		cbb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		if (c.fns.vkBeginCommandBuffer(g_ssrKmtCmd, &cbb) != VK_SUCCESS)
+			return fail("vkBeginCommandBuffer(深度初转)");
+		VkImageMemoryBarrier imb{};
+		imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		imb.srcAccessMask = 0;
+		imb.dstAccessMask = 0;
+		imb.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imb.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+		imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.image = g_ssrKmtImg;
+		imb.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
+		c.fns.vkCmdPipelineBarrier(g_ssrKmtCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr,
+		                           1, &imb);
+		if (c.fns.vkEndCommandBuffer(g_ssrKmtCmd) != VK_SUCCESS)
+			return fail("vkEndCommandBuffer(深度初转)");
+		c.fns.vkResetFences(c.vdev, 1, &c.fence);
+		VkSubmitInfo si{};
+		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		si.commandBufferCount = 1;
+		si.pCommandBuffers = &g_ssrKmtCmd;
+		vr = c.fns.vkQueueSubmit(c.queue, 1, &si, c.fence);
+		if (vr == VK_SUCCESS)
+			vr = c.fns.vkWaitForFences(c.vdev, 1, &c.fence, VK_TRUE, 5000000000ULL);
+		if (vr != VK_SUCCESS)
+			return fail("深度初转 vkQueueSubmit/vkWaitForFences = " + pocbCode(vr));
+	}
+
+	g_ssrKmtState = 1;
+	logLine("SSR侦察: [2d-5] 深度KMT 导入OK: 老式handle → D3D11_TEXTURE_KMT_BIT 直入 " +
+	        std::to_string(md.Width) + "x" + std::to_string(md.Height) + " D24/S8 usage=" + usg +
+	        " alloc=" + std::string(usedDed ? "dedicated" : "plain") +
+	        " 内存类型#" + std::to_string(tUsed) +
+	        " view=" + std::string(g_ssrKmtView ? "OK" : "失败") +
+	        " 读回=" + std::string(g_ssrKmtCanRead ? "OK" : "不可用") +
+	        " — 路线1′ 分支就绪 (与色的 D3D11_TEXTURE_BIT 分支互不相干)");
+	return true;
+}
+
+// 到点读回比对 (节奏完全跟随 D3D11 侧的深度读回: 前3次 + 每600次, 用一次性 flag 消费)。
+// 判据故意做三档候选: VK 拷 depth aspect 时每像素字节数 (4 或 3) 与 stencil 字节是否保留
+// 都是**规范内可变**的, 单一口径假设有假 FAIL 风险 ⇒ (4B全量) / (4B跳stencil=低24位) /
+// (3B紧密排布) 三档都算, 命中任一即证明"D3D11 写的这帧字节 VK 能原样读到" = 同步成立。
+void ssrKmtVkFrame(PocbCtx& c) // vkrenderer.h 有声明 (非 static), 定义必须同链接性
+{
+	const bool want = g_ssrInChkDValid;
+	const unsigned long long d0 = g_ssrInChkD;
+	const unsigned long long d1 = g_ssrInChkD3;
+	g_ssrInChkDValid = false; // 一次性消费, 免得下一帧拿旧值去比
+	if (!want || !g_ssrInDepthKmt || !g_ssrSharedOn.load(std::memory_order_relaxed))
+		return;
+	if (g_ssrKmtState == 2)
+		return;
+	if (c.state.load() != 2 || !c.vdev || !c.queue || !c.pool || !c.fence)
+		return;
+	// 设备换了 ⇒ 旧句柄作废 (不能拿旧 VkDevice destroy), 只丢不毁, 之后重建
+	if (g_ssrKmtState && g_ssrKmtDev != c.vdev)
+	{
+		logLine("SSR侦察: [2d-5] 深度KMT 检测到 VkDevice 变更 → 丢弃旧句柄重建");
+		ssrKmtReset(c, false);
+	}
+	// 分辨率变了 ⇒ 深度镜像尺寸跟着变, 正常销毁重建 (设备还在, 可以安全 destroy)
+	if (g_ssrKmtState == 1 && g_ssrInTexD)
+	{
+		D3D11_TEXTURE2D_DESC md{};
+		g_ssrInTexD->GetDesc(&md);
+		if (md.Width != g_ssrKmtW || md.Height != g_ssrKmtH)
+		{
+			logLine("SSR侦察: [2d-5] 深度KMT 尺寸变更 " + std::to_string(g_ssrKmtW) + "x" +
+			        std::to_string(g_ssrKmtH) + " → " + std::to_string(md.Width) + "x" +
+			        std::to_string(md.Height) + " → 销毁重建");
+			ssrKmtReset(c, true);
+		}
+	}
+	if (g_ssrKmtImg == VK_NULL_HANDLE)
+	{
+		ssrKmtVkBuild(c); // 建图帧只建不比 (初转按规范可能丢内容), 下一机会出对比值
+		return;
+	}
+	if (!g_ssrKmtCanRead || !g_ssrKmtCmd || !g_ssrKmtBufPtr || !g_ssrKmtW || !g_ssrKmtH)
+		return;
+
+	// --- 重录读回命令 ---
+	VkCommandBufferBeginInfo cbb{};
+	cbb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	if (c.fns.vkBeginCommandBuffer(g_ssrKmtCmd, &cbb) != VK_SUCCESS)
+	{
+		logLine("SSR侦察: [2d-5] 深度KMT读回 vkBeginCommandBuffer 失败 → 本分支停用");
+		g_ssrKmtState = 2;
+		return;
+	}
+	auto barrier = [&](VkPipelineStageFlags ss, VkAccessFlags sa, VkPipelineStageFlags ds,
+	                   VkAccessFlags da, VkImageLayout ol, VkImageLayout nl) {
+		VkImageMemoryBarrier imb{};
+		imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		imb.srcAccessMask = sa;
+		imb.dstAccessMask = da;
+		imb.oldLayout = ol;
+		imb.newLayout = nl;
+		imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.image = g_ssrKmtImg;
+		// 组合深度/模板格式的布局迁移必须把 DEPTH 与 STENCIL 两个位一起带上 (规范要求)
+		imb.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
+		c.fns.vkCmdPipelineBarrier(g_ssrKmtCmd, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &imb);
+	};
+	// 与 2c-β 同款三段: 跨 API 的这次写不归 VK 记账 ⇒ srcAccess 用 MEMORY_WRITE 把 VK 侧
+	// 缓存失效掉; 本帧特征B 那条 CopyResource 已由 EVENT 闸 (ssrInGateWait 在本函数之前) 等完。
+	barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+	        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+	        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	VkBufferImageCopy bic{};
+	bic.bufferRowLength = 0; // 0 = 紧密排列 ⇒ 行距 = width × 每像素字节数
+	bic.bufferImageHeight = 0;
+	bic.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1}; // 只拷 depth aspect (stencil 未定义)
+	bic.imageOffset = VkOffset3D{0, 0, 0};
+	bic.imageExtent = VkExtent3D{g_ssrKmtW, g_ssrKmtH, 1};
+	c.fns.vkCmdCopyImageToBuffer(g_ssrKmtCmd, g_ssrKmtImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	                             g_ssrKmtBuf, 1, &bic);
+	barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT,
+	        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+	if (c.fns.vkEndCommandBuffer(g_ssrKmtCmd) != VK_SUCCESS)
+	{
+		logLine("SSR侦察: [2d-5] 深度KMT读回 vkEndCommandBuffer 失败 → 本分支停用");
+		g_ssrKmtState = 2;
+		return;
+	}
+	c.fns.vkResetFences(c.vdev, 1, &c.fence);
+	VkSubmitInfo si{};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &g_ssrKmtCmd;
+	const auto t0 = std::chrono::steady_clock::now();
+	VkResult vr = c.fns.vkQueueSubmit(c.queue, 1, &si, c.fence);
+	if (vr == VK_SUCCESS)
+		vr = c.fns.vkWaitForFences(c.vdev, 1, &c.fence, VK_TRUE, 5000000000ULL);
+	const double ms =
+	    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+	if (vr != VK_SUCCESS)
+	{
+		logLine("SSR侦察: [2d-5] 深度KMT读回 vkQueueSubmit/vkWaitForFences = " + pocbCode(vr) +
+		        " → 本分支停用 (不连坐色通路)");
+		g_ssrKmtState = 2;
+		return;
+	}
+
+	// --- 三候选比对 (D3D11 侧同一帧的两个口径 vs VK 侧三种排布) ---
+	const size_t p4 = (size_t)g_ssrKmtW * 4; // 4 字节/像素 (含 stencil 位)
+	const size_t p3 = (size_t)g_ssrKmtW * 3; // 3 字节/像素 (VK 若按 24 位紧密排布)
+	long nz0 = 0, nz1 = 0, nz2 = 0;
+	const unsigned long long v0 =
+	    ssrFnvSampleAdv(g_ssrKmtBufPtr, p4, g_ssrKmtW, g_ssrKmtH, 4, 4, &nz0);
+	const unsigned long long v1 =
+	    ssrFnvSampleAdv(g_ssrKmtBufPtr, p4, g_ssrKmtW, g_ssrKmtH, 4, 3, &nz1);
+	const unsigned long long v2 =
+	    ssrFnvSampleAdv(g_ssrKmtBufPtr, p3, g_ssrKmtW, g_ssrKmtH, 3, 3, &nz2);
+	const char* verdict;
+	const bool okVerdict = (v0 && v0 == d0) || (v1 && v1 == d1) || (v2 && v2 == d1);
+	if (v0 && v0 == d0)
+		verdict = "一致✓(全量4B)";
+	else if (v1 && v1 == d1)
+		verdict = "低24位一致✓(跳stencil)";
+	else if (v2 && v2 == d1)
+		verdict = "紧密3字节一致✓(VK按24位排布)";
+	else
+		verdict = "不一致✗(三档候选全不符)";
+	++g_ssrKmtN;
+	if (okVerdict)
+		++g_ssrKmtOk;
+	else
+		++g_ssrKmtBad;
+	char b[704];
+	std::snprintf(b, sizeof(b),
+	              "SSR侦察: [2d-5] 深度KMT读回#%ld 判定=%s | D3D全量=0x%llx 低3=0x%llx | "
+	              "VK 4B=0x%llx(非零%ld) 跳stencil=0x%llx(非零%ld) 紧密3B=0x%llx(非零%ld) | "
+	              "提交+等fence=%.2fms 帧=%llu",
+	              g_ssrKmtN, verdict, d0, d1, v0, nz0, v1, nz1, v2, nz2, ms,
+	              static_cast<unsigned long long>(
+	                  g_presentCount.load(std::memory_order_relaxed) + 1));
+	logLine(b);
+}
+
 // ---- O-1 正式修法 (v0.18.4, docs/02 §14.20 / docs/05 O-1): 2c 入向 EVENT 闸 ----
 // 入向 CopyResource 是异步排队的: 只有阻塞读回帧 (前3次+每600次的 Map) 才等得到它, 非读回帧
 // 走到 Present 时可能还没进 GPU ⇒ VK 读到上一帧那份入向, 12e 恒差一帧 (v0.18.3 实测 8 行里
@@ -2170,4 +2615,8 @@ void pocbInject(PocbCtx& c, IDXGISwapChain* sc)
 	// 2d-1 出向回写 (v0.18.0) —— **紧跟在读回之后**: 两者共用 c.fence, 顺序提交+顺序等待;
 	// 单独计时, 不算进 c.accMs, 免得污染 PoC-B 那条 ≈0.9ms/帧 的验收基线。
 	ssrOutVkFrame(c);
+	// 路线1′ 深度 KMT 分支 (v0.18.5) —— 排在最后: 前面 ssrInGateWait 已把本帧入向 CopyResource
+	// 等完 (EVENT 闸与 handleType 无关, KMT 分支直接继承), 又与 2c-β/2d 出向共用 c.fence 顺序提交;
+	// 它只在 D3D11 侧做过深度读回的那几帧干活 (前3次+每600次), 单独计时, 不进 c.accMs。
+	ssrKmtVkFrame(c);
 }

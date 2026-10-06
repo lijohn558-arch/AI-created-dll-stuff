@@ -143,6 +143,7 @@ void  ssrOutVkBuild(PocbCtx& c);                     // 2d-1: 出向图建图+�
 void  ssrOutVkFrame(PocbCtx& c);                     // 2d-1: 每帧 入向图→出向图 拷贝 + fence
 bool  ssrKmtProbeVk(HANDLE h, const D3D11_TEXTURE2D_DESC& sd); // 2d-4: 路线 1′ KMT 导入探测 (纯发现)
 void  ssrInGateWait(PocbCtx& c);                     // O-1 正式修法 (v0.18.4): 2c 入向 EVENT 闸
+void  ssrKmtVkFrame(PocbCtx& c);                     // 路线1′ (v0.18.5): 深度 KMT 导入分支 + 跨API读回比对
 
 // ---- renderer 依赖 hook 面的符号 (v0.17.0 过渡态, 2d 收敛成参数后删除) ----
 namespace pocmain
@@ -157,9 +158,12 @@ namespace pocmain
 	std::string uhex64(unsigned long long v);
 	unsigned long long ssrFnvSample(const void* data, size_t rowPitch, unsigned width,
 	                                unsigned height, int bpp, long* nz);
+	unsigned long long ssrFnvSampleAdv(const void* data, size_t rowPitch, unsigned width,
+	                                   unsigned height, int stride, int nB, long* nz); // 路线1′ 深度三候选
 	unsigned long long ssrInFnv(ID3D11DeviceContext* ctx, ID3D11Texture2D* mir,
 	                            ID3D11Texture2D* stg, const char* nm, long* nz,
-	                            size_t* pitch = nullptr); // v0.16.3: 实际 RowPitch 要传出去
+	                            size_t* pitch = nullptr, // v0.16.3: 实际 RowPitch 要传出去
+	                            unsigned long long* alt3 = nullptr); // v0.18.5: 深度低24位候选
 	void  installProbeOn(ID3D11Device* dev);
 
 	extern std::atomic<uint64_t>   g_presentCount;    // Present 计数 (日志里"帧=F")
@@ -171,6 +175,13 @@ namespace pocmain
 	extern bool                    g_ssrInChkCValid;
 	extern unsigned long long      g_ssrInChkCPrev;   // 上一帧 (差一帧归因)
 	extern size_t                  g_ssrInChkPitch;   // D3D11 STAGING 实际 RowPitch (行距归因)
+	// ---- 路线1′ (v0.18.5): 深度 KMT 导入分支 (docs/05 D2a-4 定案) ----
+	extern ID3D11Texture2D*        g_ssrInTexD;       // 520 的 SHARED 镜像 (深度, 老式 SHARED 建成)
+	extern HANDLE                  g_ssrInHD;         // 深度镜像老式 handle (KMT), VK 侧导入源
+	extern bool                    g_ssrInDepthKmt;   // 深度走路线1′ ⇒ VK 用 KMT handleType 另开分支
+	extern unsigned long long      g_ssrInChkD;       // 本帧 D3D11 深度校验和 (每像素4字节全量)
+	extern unsigned long long      g_ssrInChkD3;      // 同上, 每像素前3字节 (跳过 stencil 字节)
+	extern bool                    g_ssrInChkDValid;  // 上两行可用, 一次性消费
 	// ---- O-1 正式修法 (v0.18.4): 2c 入向的跨 API EVENT 闸 ----
 	extern ID3D11Query*            g_ssrInQ;          // D3D11_QUERY_EVENT (main 侧 End / renderer 侧等)
 	extern bool                    g_ssrInQLive;      // 已 End、还没等到 (一次性消费)

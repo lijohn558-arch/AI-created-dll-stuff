@@ -53,7 +53,7 @@ if ($bn -eq "") { $out.Add("  [FAIL] 没有 banner 行") }
 else {
     $m2 = [regex]::Match($bn, "poc-presenter (v[0-9.]+)")
     if ($m2.Success) { $ver = $m2.Groups[1].Value }
-    $out.Add("  expect v0.18.4: " + $(if ($ver -eq "v0.18.4") { "OK" } else { "MISMATCH -> " + $ver }))
+    $out.Add("  expect v0.18.5: " + $(if ($ver -eq "v0.18.5") { "OK" } else { "MISMATCH -> " + $ver }))
     $out.Add("  banner 含 ssr.shared: " + $(if ($bn.Contains("ssr.shared")) { "OK" } else { "FAIL (banner 没升)" }))
     $out.Add("  banner 含 Step2c-β: " + $(if ($bn.Contains("Step2c-β")) { "OK" } else { "FAIL (banner 没含 2c-β)" }))
     $out.Add("  banner 含 ssr.sentinel: " + $(if ($bn.Contains("ssr.sentinel")) { "OK" } else { "FAIL" }))
@@ -279,6 +279,28 @@ $out.Add("  [2d-4] 结论行 = $nP14c   [有探测行时应为1]")
 foreach ($x in (Pick "[2d-4]   KMT探测 结论" 2)) { $out.Add("      " + $x) }
 $out.Add("")
 
+$out.Add("==== #15 路线1' 深度 KMT 导入分支 (v0.18.5) ====")
+$nKmtRoute = CntBoth "[2c] 深度520 SHARED 镜像 OK" "老式SHARED/KMT"
+$out.Add("  [2c] 深度镜像 OK 且标了路线1' = $nKmtRoute   [NTHANDLE 走不通 => 应=1: 深度改单独 SHARED + 老式 handle]")
+foreach ($x in (Pick "[2c] 深度520 SHARED 镜像 OK" 3)) { $out.Add("      " + $x) }
+$nKmtRetry = Cnt "[2d-5]   老式SHARED 重试"
+$out.Add("  [2d-5] 老式SHARED 重试行 = $nKmtRetry   [0=没进改道 (NTHANDLE 通了); 1..2=改道重试了两档 BindFlags]")
+foreach ($x in (Pick "[2d-5]   老式SHARED 重试" 4)) { $out.Add("      " + $x) }
+$nKmtImp = Cnt "[2d-5] 深度KMT 导入OK"
+$nKmtImpFail = Cnt "[2d-5] 深度KMT 导入失败"
+$out.Add("  [2d-5] KMT 导入OK = $nKmtImp   导入失败 = $nKmtImpFail   [深度镜像建成时应 OK=1 且 失败=0]")
+foreach ($x in (Pick "[2d-5] 深度KMT" 8)) { $out.Add("      " + $x) }
+$nKmtRd   = Cnt "[2d-5] 深度KMT读回#"
+$nKmtV1   = CntBoth "[2d-5] 深度KMT读回#" "判定=一致✓"
+$nKmtV2   = CntBoth "[2d-5] 深度KMT读回#" "判定=低24位一致✓"
+$nKmtV3   = CntBoth "[2d-5] 深度KMT读回#" "判定=紧密3字节一致✓"
+$nKmtBad  = CntBoth "[2d-5] 深度KMT读回#" "判定=不一致✗"
+$out.Add("  读回行数 = $nKmtRd   判定: 全量4B一致 = $nKmtV1   低24位一致 = $nKmtV2   紧密3字节一致 = $nKmtV3   不一致 = $nKmtBad")
+$out.Add("      [三档任一命中 => D3D11 写的这帧字节 VK 能原样读到 = EVENT 闸对 KMT 同样成立 (D2a-4 问题②的答案)]")
+$out.Add("      [节奏跟随 D3D11 侧 [2c读回 深=] (前3次+每600次); 建图帧只建不比, 第2次机会出首行对比]")
+foreach ($x in (Pick "[2d-5] 深度KMT读回#" 6)) { $out.Add("      " + $x) }
+$out.Add("")
+
 $out.Add("==== 末 10 行原始日志 ====")
 foreach ($x in ($lines | Select-Object -Last 10)) { $out.Add("  " + $x) }
 
@@ -300,13 +322,16 @@ if ($hookN -ne 1) {
     $out.Add("  [根因] " + $root)
     $out.Add("         -> 本页其余 FAIL 均为该根因的下游; 换 DLL、重跑图之前先确认 ini 五个开关")
 }
-if ($ver -ne "v0.18.4") { $fail.Add("#0 banner 不是 v0.18.4 -> DLL 没换") }
+if ($ver -ne "v0.18.5") { $fail.Add("#0 banner 不是 v0.18.5 -> DLL 没换") }
 if ($n_shr -ne 1) { $fail.Add("#1 ini ssr.shared=1 未读到 -> ini 没写或 ssr=0") }
 if ($n_sen -gt 0) { $fail.Add("#1 ssr.sentinel 还开着 -> 应为0, 否则水会消失干扰判读") }
 if ($n_c -ne 1) { $fail.Add("#2 色镜像 OK 行 != 1") }
 $dOK = ($n_d -eq 1)
 if (-not $dOK) { $warn.Add("#3 深度镜像 OK 行 != 1 -> R2 深度不过 (看 #4 归因; v0.16.0 已归因为格式=已知)") }
-if ($r2 -gt 0) { $warn.Add("#4 R2 风险点命中 $r2 次 -> R2 半过 (色过/深度不过, 归因=格式则已知)") }
+if ($r2 -gt 0) {
+    if ($dOK) { $warn.Add("#4 R2 风险点命中 $r2 次 -> NTHANDLE 轴失败 (已知组合 D24×SHARED_NTHANDLE); 深度已由路线1' 老式SHARED 改道 (#3=1), 属预期") }
+    else { $warn.Add("#4 R2 风险点命中 $r2 次 -> R2 半过 (色过/深度不过, 归因=格式则已知)") }
+}
 if ($n_ready -ne 1) { $fail.Add("#5 就绪行 != 1") }
 if ($inN -le 0) { $fail.Add("#8 入向累计=0 -> 没触发 (菜单期不 arm? 没进实机场景?)") }
 if ($n7 -eq 0) { $fail.Add("#7 没有 [2c读回 行 -> 节流逻辑或触发有问题") }
@@ -367,17 +392,28 @@ if ($nP14 -gt 0) {
     if ($nKmtBind -gt 0) { $out.Add("  [2d-4] 判读: 路线1' 前置成立 -> 深度可原样直入 VK, 省掉每帧全屏 PS (落地前按 docs/05 D2a-4 另评导入分支)") }
     else { $out.Add("  [2d-4] 判读: 路线1' 前置不成立 -> 回到路线1 (R32_FLOAT x BindFlags 0x28 全屏 PS, 前置已由 2d-3 6/6 验通)") }
 }
+# --- 路线1' 深度 KMT 导入分支 (v0.18.5) ---
+if ($nKmtRoute -ge 1) {
+    if ($nKmtImp -ne 1) { $warn.Add("路线1' 深度镜像走了老式SHARED, 但 [2d-5] 导入OK != 1 (失败行 $nKmtImpFail) -> 看上方失败原因; 深度降级, 色通路/2c/2d 不受影响") }
+    if ($nKmtRd -eq 0) { $warn.Add("路线1' 导入成功但 0 行 [2d-5] 深度KMT读回 -> 跨API比对没跑 (读回失能, 或 D3D11 侧 [2c读回 深=] 也没出)") }
+    if ($nKmtRd -gt 0 -and ($nKmtV1 + $nKmtV2 + $nKmtV3) -eq 0) { $warn.Add("路线1' 读回 $nKmtRd 次三档全不一致 -> 归因待定 (depth aspect 排布 / 时序), 本轮不拦判读; 看那几行的 D3D全量/VK三值再定") }
+} elseif ($dOK -and $r2 -gt 0) {
+    $warn.Add("#3 深度镜像 OK 却没标路线1' -> 走的是 NTHANDLE 老路 (D24 家族实测不该通, 换源格式了?)")
+}
 if ($warn.Count -gt 0) {
     $out.Add("  [已知/告警] " + $warn.Count + " 项:")
     foreach ($w in $warn) { $out.Add("    ~ " + $w) }
 }
 if ($fail.Count -eq 0) {
-    $r2txt = $(if ($dOK) { "全过 (D24 深度 + FP16 都可建 SHARED 且 DXGI 允许共享)" } else { "色过/深度不过, 归因=格式 (R2 病因=格式, 深度需改道)" })
+    $r2txt = $(if ($dOK -and $nKmtRoute -gt 0) { "NTHANDLE 轴失败 (已知组合) => 已由路线1' 老式SHARED -> KMT 直入改道, 深度照样可用" } elseif ($dOK) { "全过 (D24 深度 + FP16 都可建 SHARED 且 DXGI 允许共享)" } else { "色过/深度不过, 归因=格式 (R2 病因=格式, 深度需改道)" })
     $out.Add("  [PASS] 全绿 -> 2c-alpha + 2c-beta 收口, R2 " + $r2txt)
     $out.Add("  入向通路 (D3D11 写 -> VK 读) 验通: 交叉校验 $nBok 次一致 (v0.16.6 定案 handleType=D3D11_TEXTURE_BIT)")
+    if ($nKmtRoute -ge 1) {
+        $out.Add("  路线1' 深度分支落地: 导入OK $nKmtImp, 跨API读回 $nKmtRd 次 (一致 $nKmtV1 / 低24位 $nKmtV2 / 紧密3B $nKmtV3 / 不一致 $nKmtBad) -- 深度直入 VK, 免掉路线1 的每帧全屏 PS")
+    }
     if ($nVkoIni -gt 0) {
         $out.Add("  2d-1 出向回写落地: 回写 $nOutWr 行 desc一致 $nOutDescOk, 出向读回 一致 $nOutOk / 不一致 $nOutBad; 入向EVENT闸等了 $nGate 次 (超时 $nGateTo)")
-        $out.Add("  下一步: 路线1' 已定案 (docs/05 D2a-4) -> 本闸过闸 (12e 全一致) 后进 SSR v1 shader 采样; 兜底 = 路线1 R32_FLOAT 全屏 PS")
+        $out.Add("  下一步: 路线1' 分支已落地 -> 进 SSR v1 shader 采样 (depth view/descriptor/sampler 函数表已备); 兜底 = 路线1 R32_FLOAT 全屏 PS")
     } else {
         $out.Add("  下一步: 2d-1 本轮回退 (ini 没开 ssr.vkout); 开了再跑一轮即可验出向")
     }

@@ -1194,11 +1194,11 @@ static std::atomic<bool> g_ssrSentinelOn{false}; // ini ssr.sentinel (2b 回写�
 // (与 2b 哨兵的"改 585"性质完全不同, 所以单独给一道独立开关, D5 的逃生门思路一致)。
 static ID3D11Resource*  g_ssrDepthRes = nullptr; // 520 活引用 (2a 只学身份, 2c 补持一份)
 ID3D11Texture2D* g_ssrInTexC = nullptr;   // 324 的 SHARED 镜像 (色)
-static ID3D11Texture2D* g_ssrInTexD = nullptr;   // 520 的 SHARED 镜像 (深度)
+ID3D11Texture2D* g_ssrInTexD = nullptr;   // 520 的 SHARED 镜像 (深度, 路线1′ 老式 SHARED)
 ID3D11Texture2D* g_ssrInStgC = nullptr;   // 色镜像的 STAGING 镜像 (读回自校验用)
 static ID3D11Texture2D* g_ssrInStgD = nullptr;   // 深度镜像的 STAGING 镜像
 HANDLE g_ssrInHC = nullptr;               // 色镜像 NT handle (2c-β 交 VK 导入)
-static HANDLE g_ssrInHD = nullptr;               // 深度镜像 NT handle
+HANDLE g_ssrInHD = nullptr;               // 深度镜像 handle (NTHANDLE=NT; 路线1′=老式 KMT, 二者都交 VK)
 std::atomic<bool> g_ssrSharedOn{false};   // ini ssr.shared
 static bool  g_ssrInPending = false;             // 特征B 已判 → real() 后执行入向拷贝
 static bool  g_ssrInBuilt = false;               // 两张镜像 + 暂存已建、句柄已取
@@ -1208,11 +1208,23 @@ static long  g_ssrInLogN = 0;                    // 读回自校验节流 (前3�
 static unsigned long long g_ssrInBaseC = 0;      // 建好但**未拷**时的色镜像校验和 (基线)
 static unsigned long long g_ssrInBaseD = 0;      // 同上, 深度
 
+// ---- 路线1′ (v0.18.5, docs/05 D2a-4 定案): 深度走"单独 SHARED + 老式 handle → KMT 直入" ----
+// 2c 的 NTHANDLE 轴对 D24 家族实测失败 (R2 真凶 = D24 家族 × SHARED_NTHANDLE 这个组合),
+// 2d-3/2d-4 两轮探测证明: 深度源 × 单独 SHARED → 建得出 + 老式 handle OK + VK KMT 直入 bind=0。
+// 于是深度镜像改走老式 GetSharedHandle, VK 侧**另开导入分支**用 KMT handleType (与色的
+// D3D11_TEXTURE_BIT 互不相干) —— 成立则省掉路线1 那每帧一次全屏 PS。
+bool g_ssrInDepthKmt = false;              // 深度镜像已按路线1′ 建成 (老式 handle = KMT)
+
+unsigned long long g_ssrInChkD = 0;             // 本帧 D3D11 读回的深度校验和 (每像素4字节全量)
+unsigned long long g_ssrInChkD3 = 0;            // 同上, 每像素只喂前3字节 (跳过 stencil 字节)
+bool  g_ssrInChkDValid = false;                  // 上两行可用 (本帧做过深度读回), 一次性消费
+
 unsigned long long g_ssrInChkC = 0;             // 本帧 D3D11 侧读回的色校验和
 bool  g_ssrInChkCValid = false;                  // 上一行是否可用 (本帧做过 D3D11 读回)
 // ---- β3 不一致归因三件套 (v0.16.3): 一次跑图就能把"时序/行距/布局"三分开 ----
 unsigned long long g_ssrInChkCPrev = 0;          // 上一次 D3D11 校验和 (差一帧? 用它对)
 size_t g_ssrInChkPitch = 0;                      // D3D11 STAGING 实际 RowPitch (行距?)
+
 
 // ---- O-1 正式修法 (v0.18.4, docs/02 §14.20 / docs/05 O-1): 2c 入向的跨 API EVENT 闸 ----
 // 为什么 Flush (v0.18.3) 不够: Flush 只提交不等待, 不构成跨 API 顺序保证 ⇒ 非读回帧到
@@ -1638,12 +1650,15 @@ std::string uhex64(unsigned long long v)
 // 交叉校验的全部意义就是"同一张共享镜像, D3D11 侧读到的值 == VK 侧读到的值",
 // 若不等即说明两套 API 对这块共享内存的视图/布局/字节序不一致 (2c-β 的核心未知数)。
 // rowPitch 由调用方给: D3D11 是 Mapped.RowPitch, VK 是 width*8 (紧密排列)。
-unsigned long long ssrFnvSample(const void* data, size_t rowPitch, unsigned width,
-                                       unsigned height, int bpp, long* nz)
+// 按 (像素间隔 stride, 每像素喂哈希的字节数 nB) 抽样算 FNV-1a。
+// 色镜像 stride=nB=8; 深度候选三档 (路线1′ 跨API比对用): (4,4)=D3D 全量含 stencil 字节,
+// (4,3)=跳过 stencil 字节只看低24位, (3,3)=VK 若把深度按 24 位紧密排布时的行式。
+unsigned long long ssrFnvSampleAdv(const void* data, size_t rowPitch, unsigned width,
+                                   unsigned height, int stride, int nB, long* nz)
 {
 	if (nz)
 		*nz = 0;
-	if (!data || bpp <= 0 || !width || !height)
+	if (!data || stride <= 0 || nB <= 0 || nB > stride || !width || !height)
 		return 0;
 	unsigned long long h = 14695981039346656037ULL; // FNV-1a offset basis (0xcbf29ce484222325)
 	long nzc = 0;
@@ -1655,8 +1670,8 @@ unsigned long long ssrFnvSample(const void* data, size_t rowPitch, unsigned widt
 		for (int c = 0; c < cols; ++c)
 		{
 			const int x = (int)((long long)c * width / cols);
-			const unsigned char* px = row + (size_t)x * bpp;
-			for (int b = 0; b < bpp; ++b)
+			const unsigned char* px = row + (size_t)x * stride;
+			for (int b = 0; b < nB; ++b)
 			{
 				h ^= px[b];
 				h *= 1099511628211ULL; // FNV prime
@@ -1670,6 +1685,13 @@ unsigned long long ssrFnvSample(const void* data, size_t rowPitch, unsigned widt
 	return h;
 }
 
+// 原接口 = 每像素取满 bpp 字节 (色16F 走 bpp=8)。调用面不改, 实现委托给上面那个带参版本。
+unsigned long long ssrFnvSample(const void* data, size_t rowPitch, unsigned width,
+                                       unsigned height, int bpp, long* nz)
+{
+	return ssrFnvSampleAdv(data, rowPitch, width, height, bpp, bpp, nz);
+}
+
 // 把 STAGING 镜像读回算 FNV-1a 校验和。
 // **为什么必须自校验**: CopyResource 返回 void, desc 不一致时 D3D11 静默丢弃、日志照打
 // (2b 已踩过这坑, 见 [2b] 的 desc 预检) ⇒ "镜像建得出"不能证明"拷进去了", 必须读回看内容。
@@ -1678,12 +1700,15 @@ unsigned long long ssrFnvSample(const void* data, size_t rowPitch, unsigned widt
 // 免得自己这道暂存拷贝被槽47 钩计进 2a 的 COPY=/学习里。
 unsigned long long ssrInFnv(ID3D11DeviceContext* ctx, ID3D11Texture2D* mir,
                                    ID3D11Texture2D* stg, const char* nm, long* nz,
-                                   size_t* pitch) // v0.16.3: 把实际 RowPitch 带出去
+                                   size_t* pitch, // v0.16.3: 把实际 RowPitch 带出去
+                                   unsigned long long* alt3) // v0.18.5: 深度低24位候选 (跳 stencil)
 {
 	if (nz)
 		*nz = 0;
 	if (pitch)
 		*pitch = 0;
+	if (alt3)
+		*alt3 = 0;
 	if (!ctx || !mir || !stg)
 		return 0;
 	const bool prevSelf = g_ssrSelfCopy;
@@ -1703,6 +1728,10 @@ unsigned long long ssrInFnv(ID3D11DeviceContext* ctx, ID3D11Texture2D* mir,
 	if (pitch)
 		*pitch = m.RowPitch; // β3 归因: D3D11 侧真正用的行距 (与 VK 的 width*8 比)
 	const unsigned long long h = ssrFnvSample(m.pData, m.RowPitch, md.Width, md.Height, bpp, nz);
+	// 路线1′: 深度(4字节/像素) 顺手再算一份"只喂前3字节"的 —— DXGI 把 depth 放低24位、
+	// stencil 放高8位, VK 侧 depth aspect 拷出来的 stencil 字节未定义 ⇒ 低24位才是可比口径。
+	if (alt3 && bpp == 4)
+		*alt3 = ssrFnvSampleAdv(m.pData, m.RowPitch, md.Width, md.Height, 4, 3, nullptr);
 	ctx->Unmap(stg, 0);
 	g_ssrSelfCopy = prevSelf;
 	return h;
@@ -1945,11 +1974,15 @@ static void ssrKmtProbe(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& sd, const
 }
 
 // 建 1 张 SHARED|NTHANDLE 镜像 (desc 照抄源) 并取 NT handle。失败只降级、不抛。
+// v0.18.5 路线1′: **深度**源在 NTHANDLE 轴三次全败后, 退回"单独 SHARED + 老式 handle"
+// (2d-3 实测建得出、2d-4 实测 VK KMT 直入 bind=0), 成功则 *kmtOut=true 交调用方走 KMT 分支。
 static bool ssrInMakeShared(ID3D11Device* dev, ID3D11Resource* src, ID3D11Texture2D** out,
-                            HANDLE* hOut, const char* nm)
+                            HANDLE* hOut, const char* nm, bool* kmtOut = nullptr)
 {
 	*out = nullptr;
 	*hOut = nullptr;
+	if (kmtOut)
+		*kmtOut = false;
 	D3D11_TEXTURE2D_DESC sd{};
 	if (!ssrResObj(src, &sd, nullptr))
 	{
@@ -1996,43 +2029,102 @@ static bool ssrInMakeShared(ID3D11Device* dev, ID3D11Resource* src, ID3D11Textur
 		}
 		if (FAILED(hr) || !*out)
 		{
-			logLine("SSR侦察: [2c] " + std::string(nm) + " 三种 BindFlags 全失败 → 结论: " +
+			logLine("SSR侦察: [2c] " + std::string(nm) + " 三种 BindFlags 全失败 → NTHANDLE 轴到此为止: " +
 			        ssrFmtName(sd.Format) + " (Format=" +
 			        std::to_string(static_cast<int>(sd.Format)) +
-			        ") 不在 D3D11 SHARED 白名单 —— R2 病因=格式, 深度不能走 D3D11 SHARED, 需改道");
+			        ") × SHARED_NTHANDLE 不让共享 —— R2 归因=这个组合 (明细看 [2d-3]/[2d-4] 探测)");
 			ssrDepthFormatProbe(dev, sd, nm); // 2d-3: 在 BindFlags 矩阵旁再加一列格式 (纯发现)
 			ssrKmtProbe(dev, sd, nm);        // 2d-4: 路线 1' 老式 SHARED → KMT → VK 直入 (纯发现)
-			*out = nullptr;
-			return false;
+			// ---- 路线1′ 正式落地 (v0.18.5, docs/05 D2a-4 定案): 深度改走"单独 SHARED" ----
+			// 只对**深度**源开这条道 —— 色324 的 NTHANDLE 本来就通 (根本走不到这里), 且 VK 侧
+			// 本轮只给深度开了 KMT 导入分支; 色若失败仍按 v0.18.4 行为停用入向, 不连坐。
+			// 两档 BindFlags 正是 2d-4 实测过的两格 (源 desc 与 0x00), 不引入未测组合。
+			const bool depthSrc = (std::string(nm).find("深度") != std::string::npos);
+			td = sd;
+			td.CPUAccessFlags = 0;
+			td.MiscFlags = D3D11_RESOURCE_MISC_SHARED; // ← 单独 SHARED, **不带** NTHANDLE (2d-3 已证可建)
+			const UINT lc[2] = { origBF, 0u };
+			for (int li = 0; li < 2 && depthSrc && (FAILED(hr) || !*out); ++li)
+			{
+				if (li > 0 && lc[li] == lc[li - 1])
+					continue;
+				td.BindFlags = lc[li];
+				hr = dev->CreateTexture2D(&td, nullptr, out);
+				logLine("SSR侦察: [2d-5]   老式SHARED 重试 " + std::string(nm) + " BindFlags=0x" +
+				        uhex64(lc[li]).substr(8) + " → " +
+				        ((SUCCEEDED(hr) && *out) ? std::string("OK (路线1′ 可建)")
+				                                 : std::string("失败 ") + hexHr(hr)));
+			}
+			if (FAILED(hr) || !*out)
+			{
+				*out = nullptr;
+				if (!depthSrc)
+					return false; // 色源: 维持 v0.18.4 行为 (入向停用), 上面的 R2 日志已打足
+				logLine("SSR侦察: [2d-5] " + std::string(nm) + " 老式 SHARED 也建不出 → 结论: " +
+				        ssrFmtName(sd.Format) + " 不可 legacy-shared → 路线1′ 关闭, 回落路线1 (R32_FLOAT 全屏 PS)");
+				return false;
+			}
+			if (kmtOut)
+				*kmtOut = true;
 		}
 	}
 	if (td.BindFlags != origBF)
 		logLine("SSR侦察: [2c] " + std::string(nm) + " 注意: 镜像 BindFlags 已放宽 0x" +
 		        uhex64(origBF).substr(8) + "→0x" + uhex64(td.BindFlags).substr(8) +
 		        " (与源不一致, CopyResource 能否落地看 [2c读回] 判据)");
-	IDXGIResource1* r1 = nullptr;
-	hr = (*out)->QueryInterface(__uuidof(IDXGIResource1), reinterpret_cast<void**>(&r1));
-	if (SUCCEEDED(hr) && r1)
+	const bool legacyKmt = (kmtOut && *kmtOut); // 路线1′: 老式 handle (KMT) 走另一条取法
+	if (legacyKmt)
 	{
-		hr = r1->CreateSharedHandle(nullptr,
-		                            DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
-		                            nullptr, hOut);
-		r1->Release();
+		// 老式 handle = **IDXGIResource::GetSharedHandle** —— 不是 CreateSharedHandle
+		// (那个 API 要求 SHARED_NTHANDLE, 而深度正是栽在这一轴)。返回值归资源所有,
+		// **不 CloseHandle**, 与 2d-4 探测同一处理; 老式 handle 即 KMT, 交 VK 的
+		// VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT 导入分支。
+		IDXGIResource* r0 = nullptr;
+		hr = (*out)->QueryInterface(__uuidof(IDXGIResource), reinterpret_cast<void**>(&r0));
+		if (SUCCEEDED(hr) && r0)
+		{
+			hr = r0->GetSharedHandle(hOut);
+			r0->Release();
+		}
+		if (FAILED(hr) || !*hOut)
+		{
+			logLine("SSR侦察: [2d-5] " + std::string(nm) + " GetSharedHandle 失败 " + hexHr(hr) +
+			        " (" + ssrFmtName(td.Format) + ") → 路线1′ 关闭 (老式句柄没拿到)");
+			(*out)->Release();
+			*out = nullptr;
+			*hOut = nullptr;
+			if (kmtOut)
+				*kmtOut = false;
+			return false;
+		}
 	}
-	if (FAILED(hr) || !*hOut)
+	else
 	{
-		logLine("SSR侦察: [2c] " + std::string(nm) + " CreateSharedHandle 失败 " + hexHr(hr) +
-		        " (" + ssrFmtName(td.Format) + ") ← R2 风险点: D3D11 建得出但 DXGI 不让共享");
-		(*out)->Release();
-		*out = nullptr;
-		*hOut = nullptr;
-		return false;
+		IDXGIResource1* r1 = nullptr;
+		hr = (*out)->QueryInterface(__uuidof(IDXGIResource1), reinterpret_cast<void**>(&r1));
+		if (SUCCEEDED(hr) && r1)
+		{
+			hr = r1->CreateSharedHandle(nullptr,
+			                            DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+			                            nullptr, hOut);
+			r1->Release();
+		}
+		if (FAILED(hr) || !*hOut)
+		{
+			logLine("SSR侦察: [2c] " + std::string(nm) + " CreateSharedHandle 失败 " + hexHr(hr) +
+			        " (" + ssrFmtName(td.Format) + ") ← R2 风险点: D3D11 建得出但 DXGI 不让共享");
+			(*out)->Release();
+			*out = nullptr;
+			*hOut = nullptr;
+			return false;
+		}
 	}
 	logLine("SSR侦察: [2c] " + std::string(nm) + " SHARED 镜像 OK = " + hexOf(*out) + " (" +
 	        std::to_string(td.Width) + "x" + std::to_string(td.Height) +
 	        " Format=" + std::to_string(static_cast<int>(td.Format)) + " " +
 	        ssrFmtName(td.Format) + " BindFlags=0x" + uhex64(td.BindFlags).substr(8) +
-	        ") handle=" + hexOf(*hOut) + " 源=" + hexOf(src));
+	        ") handle=" + hexOf(*hOut) + (legacyKmt ? " [路线1′ 老式SHARED/KMT]" : "") +
+	        " 源=" + hexOf(src));
 	return true;
 }
 
@@ -2104,12 +2196,14 @@ static void ssrInBuild(ID3D11DeviceContext* ctx)
 	ID3D11Texture2D* td = nullptr;
 	HANDLE hc = nullptr;
 	HANDLE hd = nullptr;
-	if (!ssrInMakeShared(dev, g_ssrSceneRes, &tc, &hc, "色324"))
+	bool kmtC = false; // 色源不会走路线1′ (NTHANDLE 本来就通), 留着只为调用面统一
+	bool kmtD = false;
+	if (!ssrInMakeShared(dev, g_ssrSceneRes, &tc, &hc, "色324", &kmtC))
 	{
 		dev->Release();
 		return; // 色建不出 → 入向整段停用 (上面已打 R2 风险点日志)
 	}
-	if (!ssrInMakeShared(dev, g_ssrDepthRes, &td, &hd, "深度520"))
+	if (!ssrInMakeShared(dev, g_ssrDepthRes, &td, &hd, "深度520", &kmtD))
 	{
 		g_ssrInDepthFail = true; // R2 的一半答案: 深度不让共享 —— 色照跑, 不连坐
 		if (td)
@@ -2119,10 +2213,12 @@ static void ssrInBuild(ID3D11DeviceContext* ctx)
 		}
 		if (hd)
 		{
-			CloseHandle(hd);
+			CloseHandle(hd); // 只有 NTHANDLE 路径的 hd 归我方; 老式 handle 失败时早已置空
 			hd = nullptr;
 		}
 	}
+	// 路线1′ (v0.18.5): 深度镜像是老式 SHARED 建成的 ⇒ 告诉 renderer 用 KMT handleType 导入
+	g_ssrInDepthKmt = (kmtD && td && hd);
 	auto mkStg = [&](ID3D11Texture2D* src, ID3D11Texture2D** out) {
 		*out = nullptr;
 		if (!src)
@@ -2164,7 +2260,9 @@ static void ssrInBuild(ID3D11DeviceContext* ctx)
 	    : 0;
 	g_ssrInBuilt = true;
 	logLine("SSR侦察: [2c] 共享入向就绪 — 色324=OK 深度520=" +
-	        std::string(g_ssrInDepthFail ? "FAIL(R2 未过)" : "OK") +
+	        std::string(g_ssrInDepthFail
+	                        ? "FAIL(R2 未过)"
+	                        : (g_ssrInDepthKmt ? "OK(路线1′ 老式SHARED→KMT)" : "OK")) +
 	        "; 基线校验和(建好未拷) 色=0x" + uhex64(g_ssrInBaseC) +
 	        " 深=0x" + uhex64(g_ssrInBaseD) +
 	        "; 自此每帧特征B 处 CopyResource(324/520 → SHARED 镜像)" +
@@ -2257,9 +2355,17 @@ static void ssrInQueue(ID3D11DeviceContext* ctx)
 		if (g_ssrInTexD && g_ssrInStgD)
 		{
 			long nzd = 0;
-			const unsigned long long h2 = ssrInFnv(ctx, g_ssrInTexD, g_ssrInStgD, "深", &nzd);
+			unsigned long long h2lo3 = 0;
+			const unsigned long long h2 =
+			    ssrInFnv(ctx, g_ssrInTexD, g_ssrInStgD, "深", &nzd, nullptr, &h2lo3);
 			s += " 深=0x" + uhex64(h2) + (h2 != g_ssrInBaseD ? "≠基线✓" : "=基线✗") +
 			     " 非零" + std::to_string(nzd);
+			// 路线1′: 两个口径一并带出, 给 [2d-5] 的 VK 侧三候选比对当 D3D11 侧基准。
+			// 低3字节 = 跳过 stencil (DXGI 把 depth 放低24位), VK depth aspect 的 stencil 未定义。
+			g_ssrInChkD = h2;
+			g_ssrInChkD3 = h2lo3;
+			g_ssrInChkDValid = g_ssrInDepthKmt; // 只有 KMT 分支消费它 (色/NT 路径不看)
+			s += " 低3=0x" + uhex64(h2lo3);
 		}
 		s += "]";
 	}
@@ -4366,7 +4472,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.4 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) ====");
+	logLine("==== poc-presenter v0.18.5 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) + v0.18.5: 路线1' 导入分支落地(深度改单独SHARED老式handle→VK KMT 直入, [2d-5] 深度跨API三候选比对) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

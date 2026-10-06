@@ -550,6 +550,39 @@ layout×2 + pool×2 + allocate/update/**bind**×3）—— SSR v1 真要采样�
 `ctx->Flush()` 实测把 12e 不一致 **5/9 → 3/8、仍未归零** ⇒ `copyQ` 式 EVENT 跨 API 闸
 **已随 `v0.18.4` 落地并真机验证**（`ssrInQueue` End + `ssrInGateWait`，12e = **0/9 归零**，
 判读 `docs/02` §14.20 / **§14.20.1**；闸等待均值 1.78ms 已单列登记 R3 基线观测项）。）
+
+**路线 1′ 落地（`v0.18.5` 代码批，2026-10-06，待真机回归 → `docs/02` §14.21）**——
+把 2d-4「建完立刻销毁」的探测转成**持久导入分支**：
+
+- **D3D11 侧（`main.cpp` `ssrInMakeShared`）**：NTHANDLE × 三档 BindFlags 全败后，深度源
+  （`std::string(nm).find("深度")`，与两个探针同一判据）**追加 legacy `D3D11_RESOURCE_MISC_SHARED`
+  回退**，两档 BindFlags 正是 2d-4 实测过的两格（源 desc `0x48`、`0x00`）；handle 走
+  **`IDXGIResource::GetSharedHandle`**（不是 `CreateSharedHandle` —— 后者要求 NTHANDLE），
+  返回值**归资源所有、不 `CloseHandle`**（与 2d-4 探测同处理）。成功置
+  `g_ssrInDepthKmt`，就绪行改打 `深度520=OK(路线1′ 老式SHARED→KMT)`。
+  **色源不开这条道**：色的 NTHANDLE 本来就通（走不到失败块），且 VK 侧本轮只给深度做了 KMT 分支，
+  色若失败仍按 v0.18.4 行为停用入向、不连坐。
+- **两个探测原样保留**（`ssrDepthFormatProbe` / `ssrKmtProbe` 照跑在改道之前）⇒
+  `run2c` §#13 行数 7 / §#14 行数 4 的判据**不掉**，改道重试行另计为 §#15 的新计数。
+- **VK 侧（`vkrenderer.cpp` 新分支）**：`ssrKmtVkBuild`（D24/S8 图 + `D3D11_TEXTURE_KMT_BIT`
+  导入 + **dedicated 分配**——支持度查询 `features=0x0005` = `DEDICATED_ONLY|IMPORTABLE`，
+  探针当年没链 `VkMemoryDedicatedAllocateInfo` 是驱动宽容不是合规 + 绑定 + `DEPTH|STENCIL`
+  视图 + 持久映射读回 buffer/cmd + 布局初转）、`ssrKmtVkFrame`（**节流完全跟随 D3D11 侧深度读回
+  节奏**：前 3 次 + 每 600 次，一次性 flag 消费；建图帧只建不比）、`ssrKmtReset`（换设备只丢
+  句柄不销毁、改分辨率正常销毁重建）。`pocbInject` 在 `ssrOutVkFrame(c)` **之后**调用。
+  `usage` 首试 `TRANSFER_SRC|SAMPLED`，退回探测那档 `TRANSFER_DST|SAMPLED` 时关掉读回但**保留导入**
+  （供 SSR v1 采样）。任一步失败只关自己（`g_ssrKmtState=2` + 一行日志）。
+- **三档候选比对**：D3D11 侧出两个口径（`ssrInFnv` 的 `alt3` 出参 = 每像素只喂前 3 字节，
+  `ssrFnvSampleAdv` 支持 (stride,nB) 参数化），VK 侧读回算三档 —— `4B 全量` / `4B 跳 stencil
+  (=低24位)` / `3B 紧密排布`；**命中任一即证明跨 API 字节可读**，三档全不一致只记
+  `判定=不一致✗` 由 `run2c` §#15 按 **WARN 级**归因待定，**不设 FAIL**
+  （深度当前无消费者，任何问题只降级）。
+- **同步原语评估结论（D2a-4 问题②）**：EVENT 闸在 `ssrInQueue` 内两条 `CopyResource` 之后
+  End、`ssrInGateWait` 在 `ssrKmtVkFrame` 之前等 ⇒ **闸等的是 D3D11 那条拷贝，与 handleType 无关，
+  KMT 分支直接继承 v0.18.4 的闸，不需要新栅栏**；老式 handle 只在建图时导入一次，之后每帧都是
+  「D3D11 写同一块物理页 → 闸等到写完 → VK 读」，不涉及按帧重新导入；VK 侧仍用 `c.fence`
+  顺序提交顺序等（与 2c-β / 2d 出向共用）。代码内的对应注释见
+  `vkrenderer.cpp`「路线1′ 正式落地」块首。
 **D3a 的段16 结束信号**（**Step 1 真机判读已二选一：定特征B** —— 两者真机均 100% 每帧恰 1 次，
 但 B 结构必然触发、A 依赖游戏清屏细节故只作交叉校验，详见 D1 末「Step 1 真机判读」）：
 - **特征A**：`ClearRenderTargetView` 发生在**强特征通道进行期间**。S4 api-scan 实测
