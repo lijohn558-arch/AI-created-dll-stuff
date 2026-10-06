@@ -16,8 +16,9 @@ Skyrim Special Edition 的 Vulkan 直接对接项目 — 让游戏以 Vulkan 渲
 | [docs/00-总体规划-实施步骤.md](docs/00-总体规划-实施步骤.md) | 九阶段总体规划、里程碑、风险清单、首周行动项 |
 | [docs/01-CommunityShaders项目调研.md](docs/01-CommunityShaders项目调研.md) | CS 项目可复用资料调研（HLSL 源码、Hook 清单、NvAPI 坑） |
 | [docs/02-RenderDoc抓帧操作清单.md](docs/02-RenderDoc抓帧操作清单.md) | 抓帧执行手册（环境、场景、记录表、提取清单、无头批跑 §10、配对 harness §11） |
-| [docs/03-API配对验证收益分析.md](docs/03-API配对验证收益分析.md) | 配对锚点判定口径、收益/风险、现代化扩展顺序（水体→天空→材质→超分→帧生成） |
+| [docs/03-API配对验证收益分析.md](docs/03-API配对验证收益分析.md) | 配对锚点判定口径、收益/风险、现代化扩展顺序（水体→天空→光照→材质→超分→帧生成，见 §6.7） |
 | [docs/04-NIF资源格式调研.md](docs/04-NIF资源格式调研.md) | NIF 顶点格式→Vulkan 映射、材质参数、骨骼蒙皮结构；风险项 #2（蒙皮复杂度）评估（`tools/parse-nif.ps1`） |
+| [docs/05-SSR节点替换实施设计.md](docs/05-SSR节点替换实施设计.md) | SSR 同位置节点替换实施设计：D1 触发判据、D2 共享输入通路、D3 输出回写（2d）、D4 shader、D5 逃生门、R1–R6 风险 |
 
 ## 仓库结构
 
@@ -30,11 +31,16 @@ skyrim-vulkan/
 │   │   ├── main.cpp
 │   │   ├── skse_abi.h             # SKSE64 2.0.20 最小 ABI 声明（poc-presenter 共用）
 │   │   └── renderdoc_app.h        # RenderDoc 官方 in-app API 头 (MIT)
-│   └── poc-presenter/             # SKSE 插件: PoC-A Present Hook 验证（main.cpp）
+│   └── poc-presenter/             # SKSE 插件: PoC-A/B + SSR Step1~2d（main.cpp 4043 行）
+│       ├── main.cpp               # hook 面 / interop（2c 入向、2d 出向回写、ini、日志与判读）
+│       ├── vkrenderer.h           # VK 函数表 POCB_DEV_FNS + pocmain 反向声明（v0.17.0 拆出）
+│       └── vkrenderer.cpp         # 自写 VK 渲染器模块：设备/导入/命令录制/入向出向帧循环
 ├── tools/                         # 分析脚本（qrenderdoc 内嵌 Python 运行）
 │   ├── rdc_extract.py + rdc_pass2~6.py  # 六轮提取（RDC_SCENE 选场景，无头批跑）
 │   ├── rdc_run.ps1                # 无头批跑 runner（-Scene/-Targets/-PsEvents/-PsWL）
-│   └── rdc_compare.py / rdc_compare.ps1  # 配对判定 harness（10 锚点 PASS/DIFF/SKIP）
+│   ├── rdc_compare.py / rdc_compare.ps1  # 配对判定 harness（10 锚点 PASS/DIFF/SKIP）
+│   ├── run2c.ps1                  # 跑图判读脚本（§#0–#12 自动结论；banner 版本期望随版本升）
+│   └── check1.ps1                 # main.cpp / vkrenderer.h/cpp 结构自检（提交前必跑，须 RESULT OK）
 └── captures/                      # .rdc 原始文件（不进 git）
 ```
 
@@ -73,7 +79,9 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
 本步**不碰 Vulkan、不改变画面**，只产出日志。
 
-> **状态（2026-10-03 16:0x）：风险项 #1 双环闭合，且两条遗留清零 —— 插件 0.9.3**
+> **状态（2026-10-06）：插件 `poc-presenter` v0.18.0 —— 阶段1 已全绿收口（2026-10-04）、阶段2 进行中：
+> SSR Step1/2a/2b/2c 已收口 + 2d-1 出向回写已落地（`ssr.vkout`，真机回归待补跑）；renderer 已拆成
+> `vkrenderer.h/cpp` 独立模块（v0.17.0）；CI 双 job 出包。**（下述 0.9.3 及以前为 PoC-A/B 期历史记录）**
 > —— 带 renderdoc 局（7201 次 / 60 FPS，判读 §7.6）+ 无 renderdoc/GFE 局（★ 中、6001 次 / 60 FPS，判读 §7.7）
 > 闭合第一环「Present 可拦」；**PoC-B v0.1 于 0.9.1 局闭合第二环「写」**：Vulkan 离屏 512×512 → 读回 →
 > `CopySubresourceRegion` 进 backbuffer (16,16)，4200 帧零失败、均值 **6.47 ms/帧**、近 600 帧恒 60 FPS；
@@ -170,8 +178,8 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 > 32B 序言存根 → 字节不符保守跳过留档 → 候选2（方案A真vtbl）`RAW 已装 窃取14B`；
 > **第 1 次 Present (经 Present): vtable=renderdoc 包装类 … title="Skyrim Special Edition"**。
 > 本局**无 ★**（游戏交换链未走我方工厂）但 vtable 同类直接命中 ⇒ 印证「★ 中否不影响计数」；
-> 因 vtable 层先命中 + TLS 去重，**方案B 层的独立有效性本局未证明**（待无 renderdoc/GFE 局
-> 复跑闭环：预期 ★ 中、方案A 跳过、方案B 候选1 即 dxgi+0x19000）。详见 docs/01 §7.6。
+> 因 vtable 层先命中 + TLS 去重，**方案B 层的独立有效性本局未证明** —— **该悬念已由下述第二局闭合**
+> （无 renderdoc/GFE 局实测：★ 中、方案A 按设计跳过、方案B 候选① 即真 dxgi `vtbl[8]`、RAW 已装 14B）。详见 docs/01 §7.6。
 > **v1.7 第二局（13:59，无 capture-helper / GFE 在场）= 双环境闭环**：`renderdoc.dll 未加载` →
 > 交换链回真 dxgi 类（vtable/slot8/slot22/工厂 10/15/16/24 原值全 dxgi）；探针 B 这次打到
 > **真 dxgi Present 存根**（前 14B `48 89 5C 24 10 … 55 57 41 56` + 第 15 字节起 `48 8D 6C 24 90`
