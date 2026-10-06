@@ -80,9 +80,10 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
 本步**不碰 Vulkan、不改变画面**，只产出日志。
 
-> **状态（2026-10-06）：插件 `poc-presenter` v0.18.6（`fd3ed9f`，CI SUCCESS，**SSR v1 shader 采样
-> 代码批已落地、待实跑**，判读模板 `docs/02` §14.22）；上一轮 v0.18.5（`882903b`，CI SUCCESS +
-> 真机 [PASS] 全绿，判读 §14.21 / §14.21.1）；再上一轮 v0.18.4 ✅ CI SUCCESS + 真机 [PASS] 全绿（O-1 EVENT 闸归零，
+> **状态（2026-10-07）：插件 `poc-presenter` v0.18.7（**代码批已落地、待 CI + 待实跑**，判读模板
+> `docs/02` §14.23）；上一轮 v0.18.6（`fd3ed9f`，CI SUCCESS + 实跑 —— **通路全绿但画面两个问题：
+> 倒影完全破碎 / 水面除倒影仍透明无色，归因与对策见 `docs/02` §14.22.1**）；再上一轮 v0.18.5（`882903b`，CI SUCCESS +
+> 真机 [PASS] 全绿，判读 §14.21 / §14.21.1）；更早 v0.18.4 ✅ CI SUCCESS + 真机 [PASS] 全绿（O-1 EVENT 闸归零，
 > 判读 §14.20 / §14.20.1）—— 阶段1 已全绿收口（2026-10-04）、阶段2 进行中：
 > SSR Step1/2a/2b/2c 已收口 + **2d-1 出向回写两轮真机回归均 [PASS] 全绿**（`ssr.vkout`；
 > `v0.18.0` §14.15.1、代码批 `v0.18.1` §14.17 = 6001 帧），其中 C-6 把 2d 回写从 **28.77 → 0.68
@@ -124,7 +125,21 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 > **`ssr.dist` 以 near 为单位**（`pc.p1.w = dist × near`，乘 near 后与 `ssr.near` 取值无关 ⇒ 观感
 > 主要调 `fov`），`ssr.rev=1` 备反向深度。run2c 新增 §#16（`[v1]` 就绪/渲染/降级行，FAIL 只对
 > 「有渲染行没就绪行」，其余 WARN 级）。ini 需追加 `ssr.v1=1`（其余 `ssr.*` 可选）。
-> 下一步 = **SSR v1 真机目视判读（`docs/02` §14.22）**；renderer 已拆成
+> **第八批 `v0.18.7`（代码批已落地 ⇒ 待 CI + 待实跑，判读模板 `docs/02` §14.23）＝ A 平滑批 + B 底色镜像**，
+> 一次跑图同时修 `v0.18.6` 实机回报的两个问题（归因 `docs/02` §14.22.1）：
+> **A「倒影完全破碎」**——水面像素的深度其实是水底/河床（水体不写深度），逐像素差分得到**碎石法线**
+> ⇒ 每像素反射方向各不相同 ⇒ 破碎；对策 = `ssr.smooth`（法线中心差分邻域半径 px，默认 4，1..16）
+> + `ssr.blur`（反射色 5-tap 十字平滑，默认 1）+ `ssr.debug`（0 正常 / 1 法线 / 2 命中红绿 / 3 深度灰度）。
+> **B「水面除倒影仍透明无色」**——合成底 base = 324 快照 = 段16 **之前**（没画水），fresnel 正对时
+> `wgt≈0.08` ⇒ 92% 来自没水的画面 ⇒ 段17 水体 PS 拿它当反射做自己的合成 ⇒ 水无色；对策 = 特征B 处
+> 在 2d 出向回写**之前**抢一份 **585（段16 刚画完）** 当第 4 张 `SHARED|NTHANDLE` 镜像（`ssr.base585=1`
+> 逃生门）→ VK 导入当描述符 binding2，`ssr.v1` push constant 48B→**64B**（`p3 = smooth/blur/debug/useBase`）；
+> 底色建不出 ⇒ 退回 324 底色（= v0.18.6 行为）、v1 失败 ⇒ 退 2d 纯拷贝（= v0.18.5），**任一步只关自己**。
+> `tools/make_shaders.ps1` 已跑（`ssr.frag.spv` 11044 → **14732 B**）、`check1.ps1` **RESULT OK**、
+> run2c §#16 新增 `[base] 底色镜像 OK / 底色图就绪 / 底色# / desc不一致` 四组判据 + 6 条 fail/warn。
+> ini 需追加 `ssr.smooth=4` / `ssr.blur=1` / `ssr.debug=0` / `ssr.base585=1`。
+> 下一步 = **commit + push + CI SUCCESS → 换 DLL 实机跑 ≥2000 帧 → 判读入档 `docs/02` §14.23.1
+> （`docs/02` §14.23 = 模板）**；renderer 已拆成
 > `vkrenderer.h/cpp` 独立模块（v0.17.0）；CI 双 job 出包。**（下述 0.9.3 及以前为 PoC-A/B 期历史记录）**
 > —— 带 renderdoc 局（7201 次 / 60 FPS，判读 §7.6）+ 无 renderdoc/GFE 局（★ 中、6001 次 / 60 FPS，判读 §7.7）
 > 闭合第一环「Present 可拦」；**PoC-B v0.1 于 0.9.1 局闭合第二环「写」**：Vulkan 离屏 512×512 → 读回 →

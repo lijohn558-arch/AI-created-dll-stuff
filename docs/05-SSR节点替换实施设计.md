@@ -615,8 +615,8 @@ layout×2 + pool×2 + allocate/update/**bind**×3）—— SSR v1 真要采样�
 - 判据：ray 命中 → 采 324；出屏/未命中 → fallback
 - 水面法线扰动输入不在 v1（原版扰动在段16 的 17352 内做，我们替换后先用平面法线出图）
 
-**✅ 落地（`v0.18.6` = `fd3ed9f`，2026-10-06，代码批已提交、CI SUCCESS，待真机实跑 →
-`docs/02` §14.22）**——实际形态与上表的差异按下列定案收敛：
+**✅ 落地（`v0.18.6` = `fd3ed9f`，2026-10-06，代码批已提交、CI SUCCESS；**已实跑 → 通路全绿、
+画面两个问题见 `docs/02` §14.22.1，`v0.18.7` 补遗见下**）**——实际形态与上表的差异按下列定案收敛：
 
 - **出向内容不是「2d 原样拷的副本」，而是一次全屏三角 render pass**（`shaders/ssr.vert` 无顶点
   缓冲、`ssr.frag` 出图覆盖整张出向镜像）：原先 2d 的 `vkCmdCopyImage` 路径整体退化为
@@ -640,6 +640,30 @@ layout×2 + pool×2 + allocate/update/**bind**×3）—— SSR v1 真要采样�
   一跳都没进屏则保持底色；501 探针采样仍按原计划推迟到 v2。
 - **反推的尺度关系（R4 的一个副产品）**：`ssr.dist` **以 near 为单位**（`p1.w = dist × near`），
   于是行进距离与 `ssr.near` 的取值无关，观感主要只剩 `ssr.fov` 要对齐；`ssr.rev=1` 备反向深度。
+
+**✅ A/B 补遗落地（`v0.18.7`，2026-10-07，代码批已落地 ⇒ 待 CI + 待实跑 → `docs/02` §14.23）**
+—— 上面那块是 v0.18.6 的形态；**实机回报两个画面问题**（归因 `docs/02` §14.22.1）后补了两件事：
+
+- **A 平滑批（修「倒影完全破碎」）**：水面像素的**深度其实是水底/河床**（水体不写深度）⇒
+  逐像素中心差分得到的是**碎石法线** ⇒ 每像素反射方向各不相同 ⇒ 破碎。改法 = `PAt()` 改
+  **中心差分 + 邻域半径 `ssr.smooth`**（默认 4，clamp 1..16，叉积退化兜 `vec3(0,0,1)`），
+  命中色再过 `ssr.blur`（默认 1）的 5-tap 十字平滑；`ssr.debug` = 0 正常 / 1 法线 / 2 命中
+  （红未命中·绿命中）/ 3 深度灰度，**绕过合成**用于先定位再调参。
+- **B 底色批（修「水面除倒影仍透明无色」）**：合成底原 = 324 快照 = 段16 **之前**（没画水），
+  fresnel 正对时 `wgt≈0.08` ⇒ **92% 来自没水的画面** ⇒ 段17 水体 PS 拿它当反射做自己的合成 ⇒
+  水无色（§14.21.1 当初「出真反射后自然消失」是误判）。改法 = 特征B 处在 2d 出向回写
+  **之前**抢拷段16 后的 **585** 成第 4 张 `SHARED|NTHANDLE` 镜像（`ssrMakeSharedTo` +
+  `copyResDescChecked`，门 = `g_ssrInPending` + 身份三重判据，**只读不消费、一次性**）→ VK 侧
+  `ssrBaseVkBuild` 导入成 `g_ssrVkImgBase`（usage 仅 SAMPLED、导入矩阵照抄出向、UNDEFINED→GENERAL
+  初转走独立 `g_ssrVkCmdB` + fence 等待、**换设备整套只丢不毁**）+ `g_ssrV1ViewB`；描述符
+  **3 binding**（`binding 2` = `uBase`，**没底色时填 viewC**、由 push `p3.w` 告诉 shader 采不采，
+  避免空 view）；**push constant 48B → 64B**（`p3 = smooth/blur/debug/useBase`）；`ssrV1Sig`
+  吸收底色图 handle 与 3 个调参 ⇒ 变了自动重录；`ssr.base585`（默认 1）= 逃生门，0 = v0.18.6 行为。
+- **降级链仍是「任一步只关自己」**：底色建不出 ⇒ `p3.w=0` 退回 `uColor` 底色（= v0.18.6 水色偏透明）、
+  v1 失败 ⇒ 2d 纯拷贝（= v0.18.5）、`ssr=0` / `ssr.vkout=0` 总逃生门；底色镜像**不改任何既有通路的时序**。
+- **闸**：`tools/make_shaders.ps1` 已跑（`ssr.frag.spv` 11044 → **14732 B**，`pocb_shaders.h` 588 行）、
+  `tools/check1.ps1` → **RESULT OK**、`run2c.ps1` §#16 增 `[base] 底色镜像 OK / 底色图就绪 /
+  底色# / desc不一致` 四组判据 + 6 条 fail/warn。
 
 ### D5 配置与逃生门
 
@@ -672,7 +696,10 @@ descriptor/sampler **推迟到 2d**，理由见 D2a-4）；**2c-β** VK `OPAQUE_
 
 > **Step 3 代码已落地（`v0.18.6` = `fd3ed9f`，CI SUCCESS，2026-10-06）**：D4 定案见上（全屏三角
 > render pass + 2 binding + push constant 48B、R4 = 反推 inv(投影)）；run2c 新增 §#16；
-> **验收（人工目视）还没跑** ⇒ 判读模板已备 `docs/02` §14.22，需 ini 追加 `ssr.v1=1` 实跑。
+> **验收（人工目视）已跑、通路全绿但画面两个问题**（倒影完全破碎 / 水色仍透明，归因见
+> `docs/02` §14.22.1）⇒ **第八批 `v0.18.7`（A 平滑批 + B 底色镜像，push constant 48B→64B、
+> 描述符 3 binding）已落地，待 CI + 待实跑** ⇒ 判读模板改用 `docs/02` §14.23，ini 在 `ssr.v1=1`
+> 之外再追加 `ssr.smooth=4` / `ssr.blur=1` / `ssr.debug=0` / `ssr.base585=1`。
 | **4 过闸** | 套 `docs/02` §14.6 模板：抓 S5/S4 双帧 → declared-diff 闸（A 全绿 + F 必现 + B 归因）→ 帧时不劣于基线 5%（`docs/00:93`，1660Ti 1080p，S4/S5 各测；**基线数取 `v0.16.2` 的 `帧时基线` 行，采法见 `docs/02` §14.14**） | compare JSON + 帧时数据 + 判读入档 | R3 帧时 |
 | **5 收口** | 默认 `ssr=1`、docs/00 §1.1 与 docs/03 §7.1 回填、诚实边界新增 | commit + CI | — |
 
