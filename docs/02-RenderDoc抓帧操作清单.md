@@ -1100,7 +1100,8 @@ GET https://api.github.com/repos/{owner}/{repo}/check-runs/{id}/annotations
 ```
 （`User-Agent` 必带；`annotations_url` 字段是空的，要自己按 `/check-runs/{id}/annotations`
 拼。）`build.yml` 的编译步已有 `| Select-Object { if ($_ -like '*error*') { '::error::' + $_ } }`
-这层转换，所以编译错误会完整出现在注解里。脚本：`Temp\opencode\cianno3.ps1` → `ci1ddanno2.txt`。
+这层转换，所以编译错误会出现在注解里（**但注解只拿到 10 条、按行号倒序**，
+拿不准就别据此断言「没有更早的错误」——见下「坑3」）。脚本：`Temp\opencode\cianno3.ps1` → `ci1ddanno2.txt`。
 
 **坑：本机系统 DNS 解析器故障（2026-10-06）—— 与「GitHub 被墙」是两回事**：
 `Get-DnsClientServerAddress` 显示以太网 DNS = `192.168.199.1`（路由器）**不应答**，
@@ -1126,6 +1127,34 @@ GET https://api.github.com/repos/{owner}/{repo}/check-runs/{id}/annotations
 
 脚本：`Temp\opencode\ci_once.ps1`（一次性判 RESULT）与 `Temp\opencode\ciwait_ip.ps1`（轮询后台），
 均已实测拿到 `RESULT SUCCESS`（`86aa133`）。
+
+**坑3（2026-10-06，v0.18.3 首轮 CI FAILURE）：Vulkan 结构体名写错 ⇒ 10 条错误全挤在 4 行**：
+
+错误全在 `vkrenderer.cpp` 1927–1930（每行 2~3 条 C2065/C2146，合计恰好 10 条，因此**看不出来**是否还有更早的错误）。
+真相是我凭记忆写了两个**根本不存在**的类型：
+
+| 我写的（错） | 真名（对照 `Vulkan-Headers@main`） |
+| --- | --- |
+| `VkPhysicalDeviceImageFormatProperties2` | `VkImageFormatProperties2` + `VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2` |
+| `VkPhysicalDeviceExternalImageFormatProperties` | `VkExternalImageFormatProperties` + `VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES` |
+
+同批里 `VkPhysicalDeviceImageFormatInfo2` / `VkPhysicalDeviceExternalImageFormatInfo` /
+`PFN_vkGetPhysicalDeviceImageFormatProperties2` **是存在的**（所以 1917–1926 一行不报）——
+`vkGetPhysicalDeviceImageFormatProperties2` 的**出参是 `VkImageFormatProperties2`**，
+外部内存属性靠 `VkExternalImageFormatProperties` 挂在其 `pNext` 上。
+
+**被墙时怎么拉文件核符号**（`raw.githubusercontent.com` 直连超时、`github.com` 浏览器
+`ERR_CONNECTION_CLOSED`、job 日志端点 403 要鉴权）⇒ 改用 **jsDelivr 的 GitHub 镜像**，
+`webfetch` 与 Code Mode `fetch`、PowerShell `Invoke-WebRequest` **三者都通**：
+
+```
+https://cdn.jsdelivr.net/gh/<owner>/<repo>@<ref>/<path>
+https://cdn.jsdelivr.net/gh/KhronosGroup/Vulkan-Headers@main/include/vulkan/vulkan_core.h
+```
+
+做法：把改动函数体里所有 `Vk*` / `VK_*` token 抽出来，逐个 `header.Contains()` 比对；
+`vulkan_core.h` 查不到的再查 `vulkan_win32.h`（`VkImportMemoryWin32HandleInfoKHR` 这类
+Win32 句柄结构体都在那）。本轮 38 个符号全过才 push，修完 `RESULT SUCCESS`（`624c4d0`）。
 
 ### 14.12 SSR Step 2c-α（共享入向·D3D11 侧）跑图判读（`v0.15.0` 已实跑，**2026-10-04**）
 
