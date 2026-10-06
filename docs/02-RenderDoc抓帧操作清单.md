@@ -2201,3 +2201,70 @@ tools\rdc_run.ps1 -Script rdc_seg16_state.py -Scene S4
 **下一步**：进 **SSR v1 shader 采样**（`DEPTH|STENCIL` 视图已备、`POCB_DEV_FNS` 的
 descriptor/sampler 函数表已备、`ssrKmtVkFrame` 的节流读回在 shader 上线后转为回归对照）。
 
+---
+
+### 14.22 v0.18.6 判读模板（SSR v1 shader 采样落地，**代码批 CI SUCCESS、待实跑**）
+
+**这一轮把 2d 出向的「入向整幅原样拷」换成一次全屏三角 render pass**（设计定案见
+`docs/05` D4 末「✅ 落地」块 + R4 行）；入向 2c / 2c-β / 2d 通路 / 深度 KMT §#15
+**全部当回归对照**（v1 关着时行为与 v0.18.5 逐字节相同）。
+
+**代码在哪**：
+
+1. `shaders/ssr.vert` + `ssr.frag`（新）：无顶点缓冲全屏三角；`viewZ()` 由深度反推视图 Z
+   （D3D 正投影 近→0 / 远→1，`ssr.rev=1` 先翻回标准口径）→ `viewPos()` / `projectUV()`，
+   逐像素差分还原法线、线性 ray march + 末段 3 次二分收紧、未命中用射线最后一个在屏点做
+   屏幕边缘延展；Schlick fresnel(F0=0.02) × `ssr.strength` × 4 合成、未命中再 ×0.5；
+   `ssr.mode=0` 或深度越界 = 纯透传。`tools/make_shaders.ps1` 扩成 4 对
+   （`pocb.vert/frag` + `ssr.vert/frag` → `kPocbVertSpv`/`kPocbFragSpv`/`kSsrVertSpv`/`kSsrFragSpv`）。
+2. `vkrenderer.cpp`：`ssrV1Build`（render pass / framebuffer / 色 view / **只取 depth aspect**
+   的深度 view / 色 LINEAR + 深 NEAREST 两个 sampler / 2 binding 描述符布局+pool+set /
+   push constant 48B 的图形管线；幂等、换设备只丢不毁）+ `ssrV1RecordRender`（色深
+   `GENERAL ↔ SHADER_READ_ONLY`、出向 `UNDEFINED → GENERAL`、**深度布局迁移带 `DEPTH|STENCIL`
+   两位**）+ `ssrV1RecordCopy`（= v0.18.5 的原样拷）+ `ssrV1RecordOut`（唯一录制入口）+
+   `ssrV1Dirty`/`ssrV1Sig`（依赖签名变才重录，不重建资源）。
+3. `main.cpp`：`iniNum()` 解析器 + `ssr.v1` / `ssr.mode` / `ssr.fov` / `ssr.near` / `ssr.far` /
+   `ssr.steps` / `ssr.dist` / `ssr.strength` / `ssr.rev` 读取与合法性回退；banner = `v0.18.6`。
+4. 入向图 usage += `SAMPLED`、出向图 usage += `COLOR_ATTACHMENT`（**两者建不出都回退原 usage
+   并只关 v1**）；深度 KMT 图由 v1 提前触发 `ssrKmtVkBuild`，不再等 D3D11 节流读回。
+
+**跑法（与 §14.20 相同 + ini 追加）**：五行全开之外**追加 `ssr.v1=1`**（可选 `ssr.mode=1`、
+`ssr.fov=65`、`ssr.near=10`、`ssr.far=100000`、`ssr.steps=32`、`ssr.dist=500`、
+`ssr.strength=1`、`ssr.rev=0`），换 artifact DLL，实机 ≥2000 帧，先自查
+`SSR侦察: ctx槽33/50/47 已挂`，再跑 `tools\run2c.ps1`。**ini 启动只读一次 ⇒ 改完必须重启游戏。**
+
+**判读表（`run2c.ps1` §#0~§#16 + 下列判据）**：
+
+| 判据 | 期望 | 判 |
+|---|---|---|
+| #0 banner | `expect v0.18.6: OK`（否则 DLL 没换） | — |
+| **§#16 `[v1] SSR v1 就绪`** | **= 1**（>1 = 资源被反复重建 ⇒ WARN 看有无换设备/换分辨率行） | **本轮核心** |
+| **§#16 `[v1] 渲染#` 行数** | **> 0**（前8 + 每128 节流）；有渲染行却没就绪行 = **FAIL** | **本轮核心** |
+| §#16 降级行（`→ v1 关自己` / `深度KMT 图还没就绪` / 出向无 `COLOR_ATTACHMENT` / 入向无 `SAMPLED`） | 全 0 最好；任一 >0 ⇒ **WARN + 按行文归因**，出向已退回 2d 纯拷贝、**只关自己** | 降级面 |
+| §#12 `[2d] VK出向#` | 仍 >0（**两种模式都照打**，12e/12f 判据不断档），文案 = `全屏三角→出向` | 回归对照 |
+| §#15 深度 KMT（§14.21.1 逐格） | 导入OK=1、失败=0、读回 ≥1、不一致 0 | 回归对照（= v1 的深度输入） |
+| §#13 / §#14 / 12e / 2c-β / desc / 哨兵 / `[异常]` | 与 §14.21.1 同（全 0 / 全绿） | 回归对照 |
+| 帧时基线 | 5% 闸按 **16.85** 算（CPU 会话均值）；`[v1]` 的 fence 与 PoC-B **分列**看 | 回归对照 |
+| PoC-B 性能 | 基线 0.87 × 1.05（v0.18.5 实测 0.88~0.93） | 回归对照 |
+
+**画面（这一轮的真正判据 = 人眼，无自动判据）**：
+
+- **预期**：水体不再「几乎透明 + 拖影」，取而代之是**屏幕空间倒影**——命中时倒影内容来自本帧
+  屏内其它位置的场景色，未命中时是屏幕边缘延展且强度再 ×0.5（一眼能看出「没打中」）。
+  **1 帧延迟仍在**（回写的是上一帧场景色）⇒ 移动时倒影轻微滞后属预期，不算缺陷。
+- **观感对不上怎么调（R4 = 反推 inv(投影)，全 ini 可校，不必改代码）**：
+  - **倒影位置/比例整体偏** ⇒ 调 `ssr.fov`（默认 65 = Skyrim 默认垂直 FOV；装了改 FOV 的 mod
+    就填那个值）。
+  - **倒影远近/延伸长度不对** ⇒ 调 `ssr.dist`（**以 near 为单位**，默认 = 500 × near）与
+    `ssr.steps`（默认 32；步太粗会跳过薄几何）。
+  - **倒影明显错乱/远近反了** ⇒ 试 `ssr.rev=1`（游戏用反向深度时的开关）。
+  - **倒影太淡** ⇒ 调 `ssr.strength`（0..4，乘在 fresnel 上）。
+  - `ssr.near` / `ssr.far` 一般**不用动**：`p1.w = dist × near` 的写法已把 near 的尺度自由度消掉，
+    far 只在 near/far 比值 < ~100 时才有可见影响；真要动就看日志里回退提示（非法自动回 10 / 100000）。
+- **完全没变化** ⇒ 看 §#16 降级行（深度没就绪 / usage 退回 / `ssr.v1=1 但 ssr/ssr.shared/ssr.vkout
+  有没开的`），或 **ini 没重启**（只读一次）。
+- **画面比 v0.18.5 还差（花屏/整屏错乱/DEVICE_LOST）** ⇒ **不是本轮该有的行为**：先把
+  `ssr.v1=0` 退回 2d 纯拷贝确认通路，再按 `[v1]` 日志归因（只关自己，`ssr=0` / `ssr.vkout=0`
+  是总逃生门）。**同一块导入内存绑两张 VkImage = DEVICE_LOST（v0.16.4 教训）**，v1 只给现有
+  图换 usage、没有新建并存图。
+

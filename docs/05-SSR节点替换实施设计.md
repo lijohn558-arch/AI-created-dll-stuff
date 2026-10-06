@@ -615,6 +615,32 @@ layout×2 + pool×2 + allocate/update/**bind**×3）—— SSR v1 真要采样�
 - 判据：ray 命中 → 采 324；出屏/未命中 → fallback
 - 水面法线扰动输入不在 v1（原版扰动在段16 的 17352 内做，我们替换后先用平面法线出图）
 
+**✅ 落地（`v0.18.6` = `fd3ed9f`，2026-10-06，代码批已提交、CI SUCCESS，待真机实跑 →
+`docs/02` §14.22）**——实际形态与上表的差异按下列定案收敛：
+
+- **出向内容不是「2d 原样拷的副本」，而是一次全屏三角 render pass**（`shaders/ssr.vert` 无顶点
+  缓冲、`ssr.frag` 出图覆盖整张出向镜像）：原先 2d 的 `vkCmdCopyImage` 路径整体退化为
+  `ssrV1RecordCopy`，**`ssr.v1=0` / `ssr.mode=0` / 任一前置没就绪 ⇒ 录的就是它**（与 v0.18.5
+  逐字节同行为），因此 D4 的「输出 → 585」通路一根没换。
+- **描述符只有 2 个 binding**：`binding 0` = 色 sampler2D（LINEAR + clamp）、`binding 1` = 深度
+  sampler2D（**只取 depth aspect** 的 view，NEAREST + clamp —— KMT 那张图是 `DEPTH|STENCIL`
+  组合视图，采样必须拆开）；相机走 **push constant 48B**（`p0` = tanHalfY/aspect/near/far、
+  `p1` = mode/steps/strength/dist、`p2` = w/h/rev），**不开 UBO**。
+- **布局口径**：色/深 `GENERAL ↔ SHADER_READ_ONLY`（进 render pass 前、出 render pass 后各一次，
+  复原到 `GENERAL` 是为了下一帧 D3D11 `CopyResource` 目的地与 KMT 读回的 `oldLayout` 不变）；
+  出向图 `initialLayout = UNDEFINED` / `finalLayout = GENERAL`（与 2d 交接同一口径）。
+  **深度/模板格式的布局迁移同时带 `DEPTH|STENCIL` 两位**（规范要求，与 KMT 读回命令一致）。
+- **降级链（每级只关自己）**：`ssr.v1=0` 或 `ssr.mode=0` ⇒ 纯拷贝；入向图带不出 `SAMPLED` /
+  出向图带不出 `COLOR_ATTACHMENT` ⇒ 建图时退回原 usage 并关 v1；**深度 KMT 图没就绪 ⇒ 先跑纯拷贝，
+  `ssrV1Dirty()` 检测到就绪后自动切 v1**（KMT 分支由 v1 提前触发 `ssrKmtVkBuild`，不再等 D3D11
+  节流读回）；v1 任一步被驱动拒 ⇒ `ssrV1Free + state=2`。2c/2d/深度分支的判据一行不受影响。
+- **增量重录而非重建**：`ssrV1Sig()` 把「深度图 / 入向图 / 出向图 / mode / canSample / attachOk /
+  相机参数」哈希成依赖签名，签名变了只 `ssrV1RecordOut` 重录命令（与「建图帧只建不提」同节奏）。
+- **fallback 颜色延展**：未命中时取射线最后一个在屏点的颜色、强度再 ×0.5（一眼能看出「没打中」），
+  一跳都没进屏则保持底色；501 探针采样仍按原计划推迟到 v2。
+- **反推的尺度关系（R4 的一个副产品）**：`ssr.dist` **以 near 为单位**（`p1.w = dist × near`），
+  于是行进距离与 `ssr.near` 的取值无关，观感主要只剩 `ssr.fov` 要对齐；`ssr.rev=1` 备反向深度。
+
 ### D5 配置与逃生门
 
 - `ssr=0/1`（`iniFlag` 模板），**默认 0（未过闸前）**，过闸后改默认 1 —— 总门：管挂不挂槽33/47/50；
@@ -643,6 +669,10 @@ descriptor/sampler **推迟到 2d**，理由见 D2a-4）；**2c-β** VK `OPAQUE_
 `vkCmdCopyImageToBuffer`/`vkMapMemory` 交叉校验（两函数已在 `POCB_DEV_FNS`，**零新增 VK API**）；
 **2d** SSR v0 passthrough 经 VK 回写 585 | **2a** 日志：`[2a]` 认出 324/520 各 1 行 ✓、`COPY=` 每帧=3 ✓、`[585]`/`[321]` 标注落在 runs==1 / runs>1 的对象上 ✓；**2b** 目视：**水几乎消失**（`324`=段16 前快照不含水 → 段17 读到"没画水的场景"）；`[desc一致]=42/[desc不一致!]=0`，写目标恒 = `[585]` 的 runs==1 对象；**硬约束 5「必须 in-frame 拦截」验通**；锚点 declared-diff 提案先行 | R2 深度格式/导入 |
 | **3 SSR v1** | D4 shader + D3a 覆盖式回写 + 事件闸同步 | 游戏内水面反射呈屏幕空间内容（人工截图对照——观感无自动判据） | R4 相机矩阵来源 |
+
+> **Step 3 代码已落地（`v0.18.6` = `fd3ed9f`，CI SUCCESS，2026-10-06）**：D4 定案见上（全屏三角
+> render pass + 2 binding + push constant 48B、R4 = 反推 inv(投影)）；run2c 新增 §#16；
+> **验收（人工目视）还没跑** ⇒ 判读模板已备 `docs/02` §14.22，需 ini 追加 `ssr.v1=1` 实跑。
 | **4 过闸** | 套 `docs/02` §14.6 模板：抓 S5/S4 双帧 → declared-diff 闸（A 全绿 + F 必现 + B 归因）→ 帧时不劣于基线 5%（`docs/00:93`，1660Ti 1080p，S4/S5 各测；**基线数取 `v0.16.2` 的 `帧时基线` 行，采法见 `docs/02` §14.14**） | compare JSON + 帧时数据 + 判读入档 | R3 帧时 |
 | **5 收口** | 默认 `ssr=1`、docs/00 §1.1 与 docs/03 §7.1 回填、诚实边界新增 | commit + CI | — |
 
@@ -664,7 +694,7 @@ descriptor/sampler **推迟到 2d**，理由见 D2a-4）；**2c-β** VK `OPAQUE_
 | ~~R1~~ ✅ | 真机反射段特征不可识别/不唯一（事件号不可跨帧用） | **Step 1 真机判读关闭（2026-10-04）**：判别子「1 段 vs 4~6 段」在 2607 个打印帧中零重叠、`distinct` 恒 ≤2 ⇒ 可唯一定位；段16 结束信号定 **特征B**（结构必然），特征A 作交叉校验。前置发现仍成立：同帧有 2 个同签名强特征段 → 必须加判别子（次数不唯一，339 比 585 还多）；ev39511 真清目标是 591 而非 585 |
 | R2 | 深度 520 共享/采样格式 VK 不支持 | **归因已由 `v0.18.2` 2d-3 实测更正：病因 = `D24 家族 × SHARED_NTHANDLE` 组合**（源格式 × 单独 `SHARED` 建得出、老式 handle OK；早期「D24 不在 D3D11 SHARED 白名单」的说法少排除一个轴，不精确）；**改道方案的实现缺口见 D2a-4 末「R2 深度改道实现缺口」块** —— **2d-3 探测已出结论：路线 1 前置 6/6 成立（首选 `R32_FLOAT × 0x28`），另立候选路线 1′（KMT 直入）待估**；未开深度前仍保留「仅颜色 SSR + 屏幕边缘 fallback」降级 |
 | R3 | in-frame fence 等待帧时超门槛（5%） | 多缓冲（帧 N 算 N-1）；仍超 → 按 `docs/00:103` 降级判据连续两次不过则回退**口径③（自建呈现，见 `docs/00` §1.1.1）** |
-| R4 | 相机矩阵（SSR 反射向量必需）D3D11 侧拿不到 | 候选：per-frame CB 反查（pass 已测 CB 布局）、或从深度+投影反推；Step 3 前定 |
+| ~~R4~~ ✅ | 相机矩阵（SSR 反射向量必需）D3D11 侧拿不到 | **定案（用户选定）＝ 方案「反推 inv(投影)」**：只用 fov/aspect/near/far 反推深度→视图 Z 的映射，行进全程在视图空间做 ⇒ **不需要 view 矩阵**，ini 可校正；观感对不齐再升级为 hook 真 CB 矩阵。**已随 `v0.18.6` 落地**（`ssr.fov`/`ssr.near`/`ssr.far`/`ssr.rev` 全部 ini 可调，`ssr.dist` 以 near 为单位消掉 near 的尺度自由度） |
 | R5 | 覆盖式时序：SSR 拷入 585 与游戏对该纹理的写竞争 | 事件闸沿用 PoC-B 模板；侦察步确认 585 在段17 前无游戏侧写 |
 | R6 | 观感无自动判据 | 人工截图对照（同存档同机位），锚点只判结构不判观感（`docs/03:144` 同口径） |
 

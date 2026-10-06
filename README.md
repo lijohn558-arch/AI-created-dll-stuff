@@ -80,8 +80,9 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
 本步**不碰 Vulkan、不改变画面**，只产出日志。
 
-> **状态（2026-10-06）：插件 `poc-presenter` v0.18.5（`882903b`，CI SUCCESS + 真机 [PASS] 全绿，
-> 判读 §14.21 / §14.21.1）；上一轮 v0.18.4 ✅ CI SUCCESS + 真机 [PASS] 全绿（O-1 EVENT 闸归零，
+> **状态（2026-10-06）：插件 `poc-presenter` v0.18.6（`fd3ed9f`，CI SUCCESS，**SSR v1 shader 采样
+> 代码批已落地、待实跑**，判读模板 `docs/02` §14.22）；上一轮 v0.18.5（`882903b`，CI SUCCESS +
+> 真机 [PASS] 全绿，判读 §14.21 / §14.21.1）；再上一轮 v0.18.4 ✅ CI SUCCESS + 真机 [PASS] 全绿（O-1 EVENT 闸归零，
 > 判读 §14.20 / §14.20.1）—— 阶段1 已全绿收口（2026-10-04）、阶段2 进行中：
 > SSR Step1/2a/2b/2c 已收口 + **2d-1 出向回写两轮真机回归均 [PASS] 全绿**（`ssr.vkout`；
 > `v0.18.0` §14.15.1、代码批 `v0.18.1` §14.17 = 6001 帧），其中 C-6 把 2d 回写从 **28.77 → 0.68
@@ -110,7 +111,20 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 > 持平）**，登记为 R3 新观测项；EVENT 闸均值 **1.783 → 1.420ms（-20%，仍 >1ms 继续单列）**；
 > 回归面 §#13=7/6/1、§#14=4/2/1、2c-β 8/8、12e 7/7、desc/哨兵/异常 全 0、PoC-B 0.88、
 > 帧时末窗中位 **16.66/16.70**（v0.18.4 = 16.78/16.67）⇒ **无性能回退**。
-> 下一步 = **SSR v1 shader 采样**；renderer 已拆成
+> **第七批 `v0.18.6`（`fd3ed9f`，CI SUCCESS，代码批已落地 ⇒ 待真机实跑，判读模板 `docs/02`
+> §14.22）＝ SSR v1 shader 采样落地**（`docs/05` D4 / Step 3 / R4）：出向回写由「入向整幅原样拷」
+> 换成**一次全屏三角 render pass**（新 `shaders/ssr.vert` + `ssr.frag`，`tools/make_shaders.ps1`
+> 扩成 4 对 → `kSsrVertSpv`/`kSsrFragSpv`），输入 = 324 色镜像 sampler2D + 520 深度快照
+> （**只取 depth aspect**，KMT 那张是 `DEPTH|STENCIL`）+ push constant 48B 相机参数
+> （**R4 定案 = 只用 fov/aspect/near/far 反推 inv(投影)**：行进全程在视图空间做，不需要 view 矩阵）；
+> 出向图 usage 加 `COLOR_ATTACHMENT`、入向图加 `SAMPLED`（两者建不出都回退原 usage 只关自己）；
+> 线性步进 + 末段 3 次二分收紧、逐像素差分还原法线、Schlick fresnel(F0=0.02) × strength × 4 合成，
+> 未命中走屏幕边缘延展且强度 ×0.5；`ssr.mode=0` = 透传（等价 2d 原样拷）。降级链 =
+> `ssr.v1=0` / `mode=0` / 深度没就绪 / usage 退回 ⇒ 一律退回 **2d 纯拷贝（v0.18.5 行为）且只关自己**；
+> **`ssr.dist` 以 near 为单位**（`pc.p1.w = dist × near`，乘 near 后与 `ssr.near` 取值无关 ⇒ 观感
+> 主要调 `fov`），`ssr.rev=1` 备反向深度。run2c 新增 §#16（`[v1]` 就绪/渲染/降级行，FAIL 只对
+> 「有渲染行没就绪行」，其余 WARN 级）。ini 需追加 `ssr.v1=1`（其余 `ssr.*` 可选）。
+> 下一步 = **SSR v1 真机目视判读（`docs/02` §14.22）**；renderer 已拆成
 > `vkrenderer.h/cpp` 独立模块（v0.17.0）；CI 双 job 出包。**（下述 0.9.3 及以前为 PoC-A/B 期历史记录）**
 > —— 带 renderdoc 局（7201 次 / 60 FPS，判读 §7.6）+ 无 renderdoc/GFE 局（★ 中、6001 次 / 60 FPS，判读 §7.7）
 > 闭合第一环「Present 可拦」；**PoC-B v0.1 于 0.9.1 局闭合第二环「写」**：Vulkan 离屏 512×512 → 读回 →
