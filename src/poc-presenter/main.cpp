@@ -528,7 +528,7 @@ std::string timestamp()
 	return buf;
 }
 
-// C-1 (docs/06): 原实现每行 open+分配缓冲+write+close+析构 —— 每行一次文件开关,
+// C-1 (待修复事项总结 C-1): 原实现每行 open+分配缓冲+write+close+析构 —— 每行一次文件开关,
 // 既贵又污染"帧时基线"基线 (P0-6 的测量源)。改成常驻 FILE* + 64KB 缓冲 + 每行一次
 // fflush (1 次 write syscall)。由 DllMain 的 DLL_PROCESS_DETACH 关闭。
 static FILE* g_logFp = nullptr;
@@ -1225,7 +1225,8 @@ static ID3D11Texture2D* g_ssrOutStg = nullptr; // 出向镜像 STAGING (节流�
 HANDLE g_ssrOutHC = nullptr;             // 出向镜像 NT handle (VK 导入源)
 bool  g_ssrOutReady = false;             // VK 已填好 → 本帧特征B 可回写 (renderer 写, hook 读)
 long  g_ssrOutN = 0;                     // 2d 回写 585 累计次数
-static long  g_ssrOutChkN = 0;           // 出向读回自校验节流 (前3次 + 每600次, 同 2c)
+static long  g_ssrOutChkN = 0;           // 出向读回自校验节流 (前3次 + 每600次, 同 2c)。
+                                         // C-7: 计数 = 回写事件数, 进门先 ++ 再判节流
 
 static SsrCtxEntry* lookupSsrCtx(void** vtbl)
 {
@@ -1291,6 +1292,12 @@ std::string ssrFmtName(DXGI_FORMAT f)
 	case DXGI_FORMAT_R10G10B10A2_UNORM:  return "R10G10B10A2";
 	case DXGI_FORMAT_R8G8B8A8_UNORM:     return "RGBA8";
 	case DXGI_FORMAT_R16G16_FLOAT:       return "RG16F";
+	// 2d-3 深度改道路线 1 的候选格式 (docs/05 D2a-4「R2 深度改道实现缺口」):
+	// D3D11 侧把深度转进**可共享**的浮点颜色镜像, 再复用 2c-β 已验通的 D3D11_TEXTURE_BIT 导入。
+	case DXGI_FORMAT_R32_FLOAT:          return "R32F";
+	case DXGI_FORMAT_R16_FLOAT:          return "R16F";
+	case DXGI_FORMAT_R32_TYPELESS:       return "R32TL";
+	case DXGI_FORMAT_D32_FLOAT:          return "D32F";
 	case DXGI_FORMAT_R24G8_TYPELESS:
 	case DXGI_FORMAT_D24_UNORM_S8_UINT:
 	case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
@@ -1690,6 +1697,124 @@ unsigned long long ssrInFnv(ID3D11DeviceContext* ctx, ID3D11Texture2D* mir,
 	return h;
 }
 
+// ---- 2d-3 深度格式探测 (v0.18.2, docs/05 D2a-4「R2 深度改道实现缺口」/ :431) ----
+// 2c-α 现有的重试矩阵只动 **BindFlags** (0x48 → 0x08 → 0x00) 三次全失败 => 已定案"病因=格式"。
+// 本函数在它旁边**再加一列格式**: R32_FLOAT / R16_FLOAT / R32_TYPELESS × SHARED|NTHANDLE
+// (正是路线 1 要写进去的那个镜像格式), 外加"源格式 × 单独 SHARED"一格, 用来排除 MiscFlags 轴。
+// 每格问两个问题: ① CreateTexture2D 建得出吗 ② 建得出的话 DXGI 让共享吗
+// (NT handle 优先 —— VK 的 D3D11_TEXTURE_BIT 只认这种; 没带 NTHANDLE 的那格退回老式 handle 验一下)。
+// **纯发现**: 建出来的立刻 Release, 不写任何 g_ssrIn* 状态、不改本轮任何行为 (docs/05 明写
+// "结论出来前不写死实现")。整轮只跑一次 (静态 flag), 且只在深度那条路上跑。
+static void ssrDepthFormatProbe(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& sd, const char* nm)
+{
+	static bool s_probed = false;
+	if (s_probed || !dev)
+		return;
+	if (std::string(nm).find("深度") == std::string::npos)
+		return; // 只为深度改道取数 (色324 实测本来就能共享)
+	s_probed = true;
+
+	const UINT bf0 = 0u;
+	const UINT bfShader = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET; // 路线1 的 PS 要写它
+	const UINT miscNt = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+	const UINT miscLegacy = D3D11_RESOURCE_MISC_SHARED;
+	struct Cell
+	{
+		DXGI_FORMAT fmt;
+		UINT bf;
+		UINT misc;
+		const char* tag;
+	};
+	const Cell cells[] = {
+		{ sd.Format, bf0, miscLegacy, "源格式" },
+		{ DXGI_FORMAT_R32_FLOAT, bf0, miscNt, "R32_FLOAT" },
+		{ DXGI_FORMAT_R32_FLOAT, bfShader, miscNt, "R32_FLOAT" },
+		{ DXGI_FORMAT_R16_FLOAT, bf0, miscNt, "R16_FLOAT" },
+		{ DXGI_FORMAT_R16_FLOAT, bfShader, miscNt, "R16_FLOAT" },
+		{ DXGI_FORMAT_R32_TYPELESS, bf0, miscNt, "R32_TYPELESS" },
+		{ DXGI_FORMAT_R32_TYPELESS, bfShader, miscNt, "R32_TYPELESS" },
+	};
+	auto addTag = [](std::string& s, const char* tag) {
+		if (s.find(tag) == std::string::npos)
+		{
+			if (!s.empty())
+				s += ", ";
+			s += tag;
+		}
+	};
+	logLine("SSR侦察: [2d-3] 格式探测开始 (2c-α BindFlags 矩阵的第 2 列: 格式) 源=" +
+	        ssrFmtName(sd.Format) + "(Format=" + std::to_string(static_cast<int>(sd.Format)) + ") " +
+	        std::to_string(sd.Width) + "x" + std::to_string(sd.Height) +
+	        " — 纯发现用, 建出来的立刻 Release, 不改本轮回写行为");
+	std::string okBuilt, okNt;
+	for (int i = 0; i < static_cast<int>(sizeof(cells) / sizeof(cells[0])); ++i)
+	{
+		const Cell& c = cells[i];
+		D3D11_TEXTURE2D_DESC td = sd; // 尺寸/mips/msaa 照抄源, 只换 Format/BindFlags/MiscFlags
+		td.Format = c.fmt;
+		td.BindFlags = c.bf;
+		td.CPUAccessFlags = 0;
+		td.MiscFlags = c.misc;
+		ID3D11Texture2D* t = nullptr;
+		const HRESULT hr = dev->CreateTexture2D(&td, nullptr, &t);
+		std::string res;
+		if (SUCCEEDED(hr) && t)
+		{
+			addTag(okBuilt, c.tag);
+			res = "建=OK";
+			HRESULT hr2 = E_FAIL;
+			HANDLE h = nullptr;
+			IDXGIResource1* r1 = nullptr;
+			hr2 = t->QueryInterface(__uuidof(IDXGIResource1), reinterpret_cast<void**>(&r1));
+			if (SUCCEEDED(hr2) && r1)
+			{
+				hr2 = r1->CreateSharedHandle(nullptr,
+				                             DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+				                             nullptr, &h);
+				r1->Release();
+			}
+			if (SUCCEEDED(hr2) && h)
+			{
+				res += " handle=OK(NT)";
+				addTag(okNt, c.tag);
+			}
+			else
+			{
+				// 老式 handle 那格: 证明"格式本身可共享", 但 VK 的 D3D11_TEXTURE_BIT 导不了它
+				HANDLE hOld = nullptr;
+				if (SUCCEEDED(dev->GetSharedHandle(t, &hOld)) && hOld)
+					res += " handle=老式OK(NT=FAIL " + hexHr(hr2) + ")";
+				else
+					res += " handle=FAIL " + hexHr(hr2);
+			}
+			t->Release();
+		}
+		else
+		{
+			if (t) // 理论上 FAILED 时不会给指针, 但不白赌一次 Release
+			{
+				t->Release();
+				t = nullptr;
+			}
+			res = "建=FAIL " + hexHr(hr);
+		}
+		logLine("SSR侦察: [2d-3]   格式探测#" + std::to_string(i + 1) + " " + c.tag + "(Format=" +
+		        std::to_string(static_cast<int>(c.fmt)) + ") BindFlags=0x" +
+		        uhex64(c.bf).substr(8) + " misc=" +
+		        ((c.misc & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) ? "SHARED|NTHANDLE" : "SHARED") +
+		        " → " + res);
+	}
+	logLine("SSR侦察: [2d-3]   格式探测 结论: 建得出 = " +
+	        (okBuilt.empty() ? std::string("无") : okBuilt) +
+	        "; 建得出且拿得到 NT handle (VK D3D11_TEXTURE_BIT 可导入) = " +
+	        (okNt.empty() ? std::string("无") : okNt) +
+	        (okNt.empty()
+	             ? std::string(" → 路线1 前置不成立, 退回路线2 (仅颜色 SSR + 屏幕边缘 fallback)")
+	             : std::string(" → 路线1 前置成立: D3D11 侧 shader 把深度转进 ") + okNt +
+	                   " 的 SHARED 镜像, 再走 2c-β 同一条导入; 源格式 " + ssrFmtName(sd.Format) +
+	                   " 不可共享 (BindFlags 矩阵 + 本表第1格双重确认)"));
+}
+
 // 建 1 张 SHARED|NTHANDLE 镜像 (desc 照抄源) 并取 NT handle。失败只降级、不抛。
 static bool ssrInMakeShared(ID3D11Device* dev, ID3D11Resource* src, ID3D11Texture2D** out,
                             HANDLE* hOut, const char* nm)
@@ -1746,6 +1871,7 @@ static bool ssrInMakeShared(ID3D11Device* dev, ID3D11Resource* src, ID3D11Textur
 			        ssrFmtName(sd.Format) + " (Format=" +
 			        std::to_string(static_cast<int>(sd.Format)) +
 			        ") 不在 D3D11 SHARED 白名单 —— R2 病因=格式, 深度不能走 D3D11 SHARED, 需改道");
+			ssrDepthFormatProbe(dev, sd, nm); // 2d-3: 在 BindFlags 矩阵旁再加一列格式 (纯发现)
 			*out = nullptr;
 			return false;
 		}
@@ -1994,7 +2120,7 @@ static std::string descStr(const D3D11_TEXTURE2D_DESC& d) // 仅日志用 (含 A
 // CopyResource 返回 **void**: src/dst 尺寸/格式/多重采样/片数不一致时不会给你 HRESULT,
 // 只会静默失败 (画面没变化, 日志照打) ⇒ 判读会误判成"回写没生效"。所以必须先比 desc 再拷,
 // 并把两边 desc 打进日志 ([desc一致] 才算通路验通)。原先 2b/2d 各写一份、逐字重复,
-// 两处独立演进 → 判读口径分叉风险, 现收敛成一份 (docs/06 C-2)。
+// 两处独立演进 → 判读口径分叉风险, 现收敛成一份 (待修复事项总结 C-2)。
 // linePrefix = 调用方拼好的行首 (含 #k、两个资源 id、帧号), k 决定节流 (前8条 + 每128条)。
 // 返回 desc 是否一致。
 static bool copyResDescChecked(ID3D11DeviceContext* ctx, ID3D11Resource* dst,
@@ -2083,11 +2209,13 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 		// desc 预检 + 拷 + 日志都在下方 copyResDescChecked (C-2/C-3), 与 2b 共用同一份。
 		// 读回自校验 (节流 前3次+每600次, 同 2c): 入向=VK 消费的那帧, 出向=VK 写回的那份。
 		// 只有**两个 STAGING 都在**才比; 阻塞读回, 绝不能每帧做 (docs/05 约束 2)。
-		const long cc = g_ssrOutChkN + 1;
-		if ((g_ssrOutStg && g_ssrInStgC && g_ssrInTexC) &&
-		    ((cc <= 3) || (cc % 600) == 0))
+		// C-7: 计数**进门先推进** (同 2c 的 `++g_ssrInLogN`)。原写法是 `cc = N+1`、
+		// 只在打日志的分支里回填 `g_ssrOutChkN = cc` => cc 停在 4 永不前进、`cc%600` 永不命中,
+		// "每600次采一次"从未发生 (v0.18.0 / v0.18.1 两轮 [2d] 出向读回 都恰好只有 3 行,
+		// 后段帧从没被采过)。
+		const long cc = ++g_ssrOutChkN;
+		if ((g_ssrOutStg && g_ssrInStgC && g_ssrInTexC) && ((cc <= 3) || (cc % 600) == 0))
 		{
-			g_ssrOutChkN = cc;
 			long nzi = 0, nzo = 0;
 			const unsigned long long hIn =
 			    ssrInFnv(ctx, g_ssrInTexC, g_ssrInStgC, "2d入向", &nzi);
@@ -2139,7 +2267,7 @@ static void installSsrRecon(ID3D11Device* dev)
 	if (!dev || !pocbEnabled() || !g_probeOn.load(std::memory_order_relaxed) ||
 	    !g_ssrOn.load(std::memory_order_relaxed))
 	{
-		// C-5 (docs/06): 门不满足时**必须**说清是谁关的 —— 原来是一声不吭 return,
+		// C-5 (待修复事项总结 C-5): 门不满足时**必须**说清是谁关的 —— 原来是一声不吭 return,
 		// 而日志里那行 "ini ssr=1 → 挂 ctx 槽33/47/50" 只是**意图打印** (与门无关),
 		// 看着像挂上了, 实际槽33/47/50 一个都没挂 ⇒ OM=0 → 入向=0 → run2c 一口气 10 条
 		// FAIL 全是同一根因 (2026-10-06 曾白跑两轮 3600 + 8400 帧)。
@@ -4068,7 +4196,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.1 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets) ====");
+	logLine("==== poc-presenter v0.18.2 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

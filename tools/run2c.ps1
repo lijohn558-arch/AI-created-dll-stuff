@@ -53,7 +53,7 @@ if ($bn -eq "") { $out.Add("  [FAIL] 没有 banner 行") }
 else {
     $m2 = [regex]::Match($bn, "poc-presenter (v[0-9.]+)")
     if ($m2.Success) { $ver = $m2.Groups[1].Value }
-    $out.Add("  expect v0.18.1: " + $(if ($ver -eq "v0.18.1") { "OK" } else { "MISMATCH -> " + $ver }))
+    $out.Add("  expect v0.18.2: " + $(if ($ver -eq "v0.18.2") { "OK" } else { "MISMATCH -> " + $ver }))
     $out.Add("  banner 含 ssr.shared: " + $(if ($bn.Contains("ssr.shared")) { "OK" } else { "FAIL (banner 没升)" }))
     $out.Add("  banner 含 Step2c-β: " + $(if ($bn.Contains("Step2c-β")) { "OK" } else { "FAIL (banner 没含 2c-β)" }))
     $out.Add("  banner 含 ssr.sentinel: " + $(if ($bn.Contains("ssr.sentinel")) { "OK" } else { "FAIL" }))
@@ -213,7 +213,7 @@ $nB3 = Cnt "三种 BindFlags 全失败"
 if ($nB3 -gt 0) { foreach ($x in (Pick "三种 BindFlags 全失败" 2)) { $out.Add("      [结论] " + $x) } }
 $out.Add("")
 
-$out.Add("==== #12 Step 2d-1 出向回写 (v0.18.1) ====")
+$out.Add("==== #12 Step 2d-1 出向回写 (v0.18.2) ====")
 $nVkoIni = Cnt "ini ssr.vkout=1 → 2d 出向回写"
 $out.Add("  ini ssr.vkout 读到 = $nVkoIni   [应为1; 0 => ini 没写 ssr.vkout=1, 本轮回退到纯 2c 形态]")
 foreach ($x in (Pick "ini ssr.vkout" 3)) { $out.Add("      " + $x) }
@@ -250,6 +250,17 @@ $ratio = if ($nFr -gt 0 -and $nOut -ge 0) { [math]::Round($nOut / $nFr, 2) } els
 $out.Add("  出向= 末值 = $nOut   帧= $nFr   出向/帧 = $ratio   [vkout=1 应 ≈1.0 (±20%); C-6 修复前实测 28.7]")
 $out.Add("")
 
+$out.Add("==== #13 2d-3 深度格式探测 (v0.18.2) ====")
+$nP13 = Cnt "[2d-3]   格式探测#"
+$out.Add("  [2d-3] 格式探测 行数 = $nP13   [深度 SHARED 建不成时应 = 7; 深度建成了则 0, 不算 FAIL]")
+foreach ($x in (Pick "[2d-3]   格式探测#" 8)) { $out.Add("      " + $x) }
+$nP13nt = CntBoth "[2d-3]   格式探测#" "handle=OK(NT)"
+$out.Add("  NT-handle 可用的格子 = $nP13nt   [>0 => 路线1 前置成立 (深度可转进该格式的 SHARED 镜像, VK D3D11_TEXTURE_BIT 能导入)]")
+$nP13c = Cnt "[2d-3]   格式探测 结论"
+$out.Add("  [2d-3] 结论行 = $nP13c   [有探测行时应为1]")
+foreach ($x in (Pick "[2d-3]   格式探测 结论" 2)) { $out.Add("      " + $x) }
+$out.Add("")
+
 $out.Add("==== 末 10 行原始日志 ====")
 foreach ($x in ($lines | Select-Object -Last 10)) { $out.Add("  " + $x) }
 
@@ -271,7 +282,7 @@ if ($hookN -ne 1) {
     $out.Add("  [根因] " + $root)
     $out.Add("         -> 本页其余 FAIL 均为该根因的下游; 换 DLL、重跑图之前先确认 ini 五个开关")
 }
-if ($ver -ne "v0.18.1") { $fail.Add("#0 banner 不是 v0.18.1 -> DLL 没换") }
+if ($ver -ne "v0.18.2") { $fail.Add("#0 banner 不是 v0.18.2 -> DLL 没换") }
 if ($n_shr -ne 1) { $fail.Add("#1 ini ssr.shared=1 未读到 -> ini 没写或 ssr=0") }
 if ($n_sen -gt 0) { $fail.Add("#1 ssr.sentinel 还开着 -> 应为0, 否则水会消失干扰判读") }
 if ($n_c -ne 1) { $fail.Add("#2 色镜像 OK 行 != 1") }
@@ -311,9 +322,19 @@ if ($nVkoIni -eq 0) {
     }
     if ($nOutDescBad -gt 0) { $fail.Add("2d 回写 desc不一致 $nOutDescBad 次 -> CopyResource 会静默丢弃") }
     if ($nOutOk -eq 0) { $fail.Add("2d 出向读回 0 次一致 -> passthrough 没逐字节还原 (看上面不一致行的入向/出向值)") }
+    # --- C-7 验收 (v0.18.2): 节流计数须进门先推进 => 行数 ≈ 3 + 事件数/600, 事件数 ≈ 0.68*帧数 ---
+    $minOut = [Math]::Max(3, [int][math]::Floor($nFr / 1000))
+    if ($nFr -ge 1200 -and $nOutChk -lt $minOut) {
+        $warn.Add("2d 出向读回只有 $nOutChk 行 (< $minOut) -> C-7 节流计数没生效 (应进门先 ++ 再判节流)")
+    }
     if ($nOutDown + $nOutDown2 -gt 0) { $fail.Add("2d 关闸了 -> 看上面 [2d] 关闸行 (出向任一步失败只关自己)") }
     if ($nSen -gt 0) { $fail.Add("2d 开着但 2b 哨兵还在执行 -> 让位逻辑没生效, 585 归因不纯") }
 }
+# --- 2d-3 深度格式探测 (v0.18.2) ---
+if ($n_d -ne 1 -and $nP13 -eq 0) {
+    $warn.Add("2d-3 深度 SHARED 没成, 但没有 [2d-3] 格式探测行 -> 探测没跑 (静态 flag 已置? nm 不含 '深度'?)")
+}
+if ($nP13 -gt 0 -and $nP13c -eq 0) { $fail.Add("2d-3 有探测行但没有结论行 -> 结论打印被跳过, 路线1/2 无法定案") }
 if ($warn.Count -gt 0) {
     $out.Add("  [已知/告警] " + $warn.Count + " 项:")
     foreach ($w in $warn) { $out.Add("    ~ " + $w) }
@@ -324,7 +345,7 @@ if ($fail.Count -eq 0) {
     $out.Add("  入向通路 (D3D11 写 -> VK 读) 验通: 交叉校验 $nBok 次一致 (v0.16.6 定案 handleType=D3D11_TEXTURE_BIT)")
     if ($nVkoIni -gt 0) {
         $out.Add("  2d-1 出向回写落地: 回写 $nOutWr 行 desc一致 $nOutDescOk, 出向读回一致 $nOutOk 次")
-        $out.Add("  下一步: 2d-3 深度格式探测 (R32_FLOAT/R16_FLOAT/R32_TYPELESS 能否 SHARED) + SSR v1 shader 采样")
+        $out.Add("  下一步: 按 [2d-3] 结论定深度改道路线 1/2 -> SSR v1 shader 采样 (descriptor/sampler 函数表已备)")
     } else {
         $out.Add("  下一步: 2d-1 本轮回退 (ini 没开 ssr.vkout); 开了再跑一轮即可验出向")
     }
