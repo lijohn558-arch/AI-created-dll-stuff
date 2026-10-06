@@ -80,8 +80,10 @@ push 代码 → GitHub Actions `build` 工作流 → 从 **Actions → Artifacts
 用 SKSE 插件载体证明能在真实游戏进程内拦截 `IDXGISwapChain::Present`。
 本步**不碰 Vulkan、不改变画面**，只产出日志。
 
-> **状态（2026-10-06）：插件 `poc-presenter` v0.18.0 —— 阶段1 已全绿收口（2026-10-04）、阶段2 进行中：
-> SSR Step1/2a/2b/2c 已收口 + 2d-1 出向回写已落地（`ssr.vkout`，真机回归待补跑）；renderer 已拆成
+> **状态（2026-10-06）：插件 `poc-presenter` v0.18.1 —— 阶段1 已全绿收口（2026-10-04）、阶段2 进行中：
+> SSR Step1/2a/2b/2c 已收口 + **2d-1 出向回写真机回归 2026-10-06 [PASS] 全绿**（`ssr.vkout`，
+> 6001 帧，判读 `docs/02` §14.15.1）→ 代码批 v0.18.1 六项（C-1/C-2/C-3/P1-1/C-5/C-6，含修掉
+> 2d 回写 28.7 次/帧），真机回归待跑；renderer 已拆成
 > `vkrenderer.h/cpp` 独立模块（v0.17.0）；CI 双 job 出包。**（下述 0.9.3 及以前为 PoC-A/B 期历史记录）**
 > —— 带 renderdoc 局（7201 次 / 60 FPS，判读 §7.6）+ 无 renderdoc/GFE 局（★ 中、6001 次 / 60 FPS，判读 §7.7）
 > 闭合第一环「Present 可拦」；**PoC-B v0.1 于 0.9.1 局闭合第二环「写」**：Vulkan 离屏 512×512 → 读回 →

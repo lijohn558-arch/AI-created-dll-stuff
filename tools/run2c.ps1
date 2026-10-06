@@ -53,7 +53,7 @@ if ($bn -eq "") { $out.Add("  [FAIL] 没有 banner 行") }
 else {
     $m2 = [regex]::Match($bn, "poc-presenter (v[0-9.]+)")
     if ($m2.Success) { $ver = $m2.Groups[1].Value }
-    $out.Add("  expect v0.18.0: " + $(if ($ver -eq "v0.18.0") { "OK" } else { "MISMATCH -> " + $ver }))
+    $out.Add("  expect v0.18.1: " + $(if ($ver -eq "v0.18.1") { "OK" } else { "MISMATCH -> " + $ver }))
     $out.Add("  banner 含 ssr.shared: " + $(if ($bn.Contains("ssr.shared")) { "OK" } else { "FAIL (banner 没升)" }))
     $out.Add("  banner 含 Step2c-β: " + $(if ($bn.Contains("Step2c-β")) { "OK" } else { "FAIL (banner 没含 2c-β)" }))
     $out.Add("  banner 含 ssr.sentinel: " + $(if ($bn.Contains("ssr.sentinel")) { "OK" } else { "FAIL" }))
@@ -213,7 +213,7 @@ $nB3 = Cnt "三种 BindFlags 全失败"
 if ($nB3 -gt 0) { foreach ($x in (Pick "三种 BindFlags 全失败" 2)) { $out.Add("      [结论] " + $x) } }
 $out.Add("")
 
-$out.Add("==== #12 Step 2d-1 出向回写 (v0.18.0) ====")
+$out.Add("==== #12 Step 2d-1 出向回写 (v0.18.1) ====")
 $nVkoIni = Cnt "ini ssr.vkout=1 → 2d 出向回写"
 $out.Add("  ini ssr.vkout 读到 = $nVkoIni   [应为1; 0 => ini 没写 ssr.vkout=1, 本轮回退到纯 2c 形态]")
 foreach ($x in (Pick "ini ssr.vkout" 3)) { $out.Add("      " + $x) }
@@ -242,7 +242,12 @@ $nOutBad = CntBoth "[2d] 出向读回#" "不一致✗"
 $out.Add("  [2d] 出向读回 行数 = $nOutChk   一致 = $nOutOk   不一致 = $nOutBad   [前3+每600; ≥1 一致 = v0 passthrough 字节还原]")
 foreach ($x in (Pick "[2d] 出向读回#" 6)) { $out.Add("      " + $x) }
 $m6 = [regex]::Match($lastSum, "出向=(\d+)")
-$out.Add("  出向= 末值 = " + $(if ($m6.Success) { $m6.Groups[1].Value } else { "(汇总行里没有 出向=)" }) + "   [vkout=1 时应持续增长]")
+$nOut = if ($m6.Success) { [int]$m6.Groups[1].Value } else { -1 }
+$mFr = [regex]::Match($lastSum, "帧=(\d+)")
+$nFr = if ($mFr.Success) { [int]$mFr.Groups[1].Value } else { 0 }
+# 12f 上界 (C-6, 2026-10-06 实测修复前 28.7 次/帧): 设计 = 每帧 1 次
+$ratio = if ($nFr -gt 0 -and $nOut -ge 0) { [math]::Round($nOut / $nFr, 2) } else { -1 }
+$out.Add("  出向= 末值 = $nOut   帧= $nFr   出向/帧 = $ratio   [vkout=1 应 ≈1.0 (±20%); C-6 修复前实测 28.7]")
 $out.Add("")
 
 $out.Add("==== 末 10 行原始日志 ====")
@@ -255,7 +260,9 @@ $warn = New-Object System.Collections.Generic.List[string]
 # --- 根因短路 (2026-10-06 踩坑): 挂载门没过 => 下面几乎每条 FAIL 都是它的下游 ---
 if ($hookN -ne 1) {
     $root = "#1 挂载门没过 (ctx槽33/50/47 未挂) => 33/47/50 钩子全没装, OM/候选/特征A,B/入向/出向 恒为 0"
-    if ((Cnt "探针升质: ini probe=0") -gt 0) {
+    if ((Cnt "挂载门未满足") -gt 0) {
+        $root += " ;日志已直接点名 -> 看那行括号里的 dev/vulkan/probe/ssr 四个值, 谁是 0 谁就是关着的开关 (v0.18.1 起 C-5 会打这行)"
+    } elseif ((Cnt "探针升质: ini probe=0") -gt 0) {
         $root += " ;本页已确认 ini probe=0 -> installSsrRecon 第一行静默 return (main.cpp:2089 门 = pocbEnabled && g_probeOn && g_ssrOn; g_probeOn = iniFlag(""probe"", true))"
         $root += " ;修法 = ini 写 probe=1 后重跑 (probe 默认就是 1, 别手写 0)"
     } else {
@@ -264,7 +271,7 @@ if ($hookN -ne 1) {
     $out.Add("  [根因] " + $root)
     $out.Add("         -> 本页其余 FAIL 均为该根因的下游; 换 DLL、重跑图之前先确认 ini 五个开关")
 }
-if ($ver -ne "v0.18.0") { $fail.Add("#0 banner 不是 v0.18.0 -> DLL 没换") }
+if ($ver -ne "v0.18.1") { $fail.Add("#0 banner 不是 v0.18.1 -> DLL 没换") }
 if ($n_shr -ne 1) { $fail.Add("#1 ini ssr.shared=1 未读到 -> ini 没写或 ssr=0") }
 if ($n_sen -gt 0) { $fail.Add("#1 ssr.sentinel 还开着 -> 应为0, 否则水会消失干扰判读") }
 if ($n_c -ne 1) { $fail.Add("#2 色镜像 OK 行 != 1") }
@@ -291,13 +298,17 @@ if ($nBok -gt 0 -and $nBok -lt 4) {
 }
 if ($nDLost -gt 0) { $fail.Add("2c-β 自己的提交 DEVICE_LOST -> 看 [异常] 行") }
 if ($nPocbDL -gt 0) { $fail.Add("PoC-B 报 code=-4 (设备丢) -> 这次读回/建图把 VkDevice 搞丢了, 三角会消失, 看上面 PoC-B 失败行") }
-# --- 2d-1 出向回写 (v0.18.0) ---
+# --- 2d-1 出向回写 (v0.18.1) ---
 if ($nVkoIni -eq 0) {
     $warn.Add("2d ini ssr.vkout 没读到 -> ini 没写 (或 ssr/shared 没开), 本轮回退纯 2c 形态")
 } else {
     if ($nOutImg -ne 1) { $fail.Add("2d 出向镜像 OK != 1 -> 第3张 SHARED 镜像没建成 (看 [2d] 关闸行)") }
     if ($nOutReady -ne 1) { $fail.Add("2d [2d] 出向图就绪 != 1 -> VK 导入/录命令没成 (看 [2d] 失败行)") }
     if ($nOutWr -eq 0) { $fail.Add("2d 没有 [2d] 回写 行 -> g_ssrOutReady 没置上, 或 585 guard 没过 (双强特征格局?)") }
+    if ($ratio -ge 0 -and $nFr -ge 500) {
+        if ($ratio -gt 1.5) { $fail.Add("2d 回写 = $ratio 次/帧 (应 ≈1) -> C-6 一次性门没生效 (g_ssrOutPending 没置位/没消费)") }
+        elseif ($ratio -lt 0.5) { $warn.Add("2d 回写只有 $ratio 次/帧 -> 一次性门过紧或特征B 没 arm (看 [2d出向已排队] 行)") }
+    }
     if ($nOutDescBad -gt 0) { $fail.Add("2d 回写 desc不一致 $nOutDescBad 次 -> CopyResource 会静默丢弃") }
     if ($nOutOk -eq 0) { $fail.Add("2d 出向读回 0 次一致 -> passthrough 没逐字节还原 (看上面不一致行的入向/出向值)") }
     if ($nOutDown + $nOutDown2 -gt 0) { $fail.Add("2d 关闸了 -> 看上面 [2d] 关闸行 (出向任一步失败只关自己)") }

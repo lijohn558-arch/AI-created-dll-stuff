@@ -528,15 +528,38 @@ std::string timestamp()
 	return buf;
 }
 
+// C-1 (docs/06): 原实现每行 open+分配缓冲+write+close+析构 —— 每行一次文件开关,
+// 既贵又污染"帧时基线"基线 (P0-6 的测量源)。改成常驻 FILE* + 64KB 缓冲 + 每行一次
+// fflush (1 次 write syscall)。由 DllMain 的 DLL_PROCESS_DETACH 关闭。
+static FILE* g_logFp = nullptr;
+
 void logLine(const std::string& msg)
 {
 	const std::string line = "[" + timestamp() + "] " + msg + "\r\n";
 	OutputDebugStringA(line.c_str());
 	if (!g_logPath.empty())
 	{
-		std::ofstream f(g_logPath, std::ios::app);
-		if (f)
-			f << line;
+		if (!g_logFp)
+		{
+			g_logFp = fopen(g_logPath.c_str(), "ab");
+			if (g_logFp)
+				setvbuf(g_logFp, nullptr, _IOFBF, 64 * 1024);
+		}
+		if (g_logFp)
+		{
+			fwrite(line.data(), 1, line.size(), g_logFp);
+			fflush(g_logFp); // 每行必须落盘: 判读/崩溃前最后几行不能丢
+		}
+	}
+}
+
+void logLineFlush() // DllMain detach 用
+{
+	if (g_logFp)
+	{
+		fflush(g_logFp);
+		fclose(g_logFp);
+		g_logFp = nullptr;
 	}
 }
 
@@ -1155,6 +1178,7 @@ static long  g_ssrCopyN = 0;           // 本帧 CopyResource 次数 (进帧汇�
 static long  g_ssrCopyLogN = 0;        // 详情日志节流
 static unsigned long long g_ssrCopyFrame = 0; // "本帧首条深度拷贝" 判据的帧号
 static bool  g_ssrSentinelPending = false;    // 特征B 已判 → real() 返回后执行回写
+static bool  g_ssrOutPending = false;         // C-6: 2d 出向回写的同款一次性门 (特征B 置位, 消费即清)
 static long  g_ssrSentN = 0;           // 哨兵累计执行次数
 static bool  g_ssrSelfCopy = false;    // 2b 哨兵自己的 CopyResource 进行中 → 不计数不重复学习
 static std::atomic<bool> g_ssrSentinelOn{false}; // ini ssr.sentinel (2b 回写独立逃生门)
@@ -1375,6 +1399,14 @@ static void ssrReconOm(UINT n, ID3D11RenderTargetView* const* ppRTV, ID3D11Depth
 		if (g_ssrVkOutOn.load(std::memory_order_relaxed) && g_ssrOutReady &&
 		    g_ssrStrRes && g_ssrLastStr == g_ssrReflRt)
 			g_ssrSentinelPending = false; // 双保险: 过渡帧残留的排队标记一并清掉
+		// Step 2d-1 出向回写的 **一次性门** (C-6): 与 2b 同一触发点 (特征B)、同一组前置
+		// (双强特征格局已确立 + 刚离开的是 585), 只是开关互斥 (2b 要求 !vkout, 2d 要求 vkout)。
+		// 没有这道门时 2d 只判身份条件, 而段16 的 16 次 OMSet 重绑让该条件每帧恒成立
+		// ⇒ 2026-10-06 实测 172597 次 / 6019 帧 = 28.7 次/帧 (设计每帧 1 次, 2b 验收 0.8 次/帧)。
+		if (g_ssrVkOutOn.load(std::memory_order_relaxed) && g_ssrOutReady && g_ssrReflRt &&
+		    g_ssrMainHdr && g_ssrMainHdr != g_ssrReflRt &&
+		    g_ssrLastStr == g_ssrReflRt && g_ssrStrRes)
+			g_ssrOutPending = true;
 		// Step 2c 共享入向 (v0.15.0, docs/05 D2a-a): 与 2b **同一触发点** (特征B), 但开关独立。
 		// 只要求"双强特征格局已确立"(菜单期 g_ssrMainHdr == g_ssrReflRt ⇒ 不 arm, 同 D2a-3a),
 		// **不要求 lastStr == 585** —— 入向拷的是 324/520, 与 585 是谁无关, 段16 缺席帧照拷。
@@ -1387,6 +1419,7 @@ static void ssrReconOm(UINT n, ID3D11RenderTargetView* const* ppRTV, ID3D11Depth
 			        " 新RT0=" + hexOf(robj) + " (" + std::to_string(rd.Width) + "x" +
 			        std::to_string(rd.Height) + " " + ssrFmtName(rd.Format) + ") 非空=" +
 			        std::to_string(nonNull) + (g_ssrSentinelPending ? " [2b哨兵已排队]" : "") +
+			        (g_ssrOutPending ? " [2d出向已排队]" : "") +
 			        (g_ssrInPending ? " [2c入向已排队]" : ""));
 	}
 
@@ -1940,6 +1973,52 @@ static void ssrInQueue(ID3D11DeviceContext* ctx)
 
 static void ftNoteCtx(ID3D11DeviceContext* ctx); // 定义在下方"帧时基线"块 (它在本函数之后)
 
+// ---- C-3: desc 比较走字段, 字符串只在不匹配时构造 ----
+// 原实现把 desc 转成 string 再比 (`dsc(sd) == dsc(dd)`), 既多一次分配, 又**漏了 ArraySize**
+// (两处 dsc 都没打 ArraySize ⇒ 数组片数不同的两张图会被判成"一致"而白拷一次)。
+static bool descEqual(const D3D11_TEXTURE2D_DESC& a, const D3D11_TEXTURE2D_DESC& b)
+{
+	return a.Width == b.Width && a.Height == b.Height && a.MipLevels == b.MipLevels &&
+	       a.ArraySize == b.ArraySize && a.Format == b.Format &&
+	       a.SampleDesc.Count == b.SampleDesc.Count;
+}
+
+static std::string descStr(const D3D11_TEXTURE2D_DESC& d) // 仅日志用 (含 ArraySize)
+{
+	return std::to_string(d.Width) + "x" + std::to_string(d.Height) + " " +
+	       ssrFmtName(d.Format) + " mips" + std::to_string(d.MipLevels) + " arr" +
+	       std::to_string(d.ArraySize) + " msaa" + std::to_string(d.SampleDesc.Count);
+}
+
+// ---- C-2: 2b 哨兵 / 2d 出向 的 desc 预检 + CopyResource + 节流日志 —— **唯一一份实现** ----
+// CopyResource 返回 **void**: src/dst 尺寸/格式/多重采样/片数不一致时不会给你 HRESULT,
+// 只会静默失败 (画面没变化, 日志照打) ⇒ 判读会误判成"回写没生效"。所以必须先比 desc 再拷,
+// 并把两边 desc 打进日志 ([desc一致] 才算通路验通)。原先 2b/2d 各写一份、逐字重复,
+// 两处独立演进 → 判读口径分叉风险, 现收敛成一份 (docs/06 C-2)。
+// linePrefix = 调用方拼好的行首 (含 #k、两个资源 id、帧号), k 决定节流 (前8条 + 每128条)。
+// 返回 desc 是否一致。
+static bool copyResDescChecked(ID3D11DeviceContext* ctx, ID3D11Resource* dst,
+                               ID3D11Resource* src, const std::string& linePrefix,
+                               const char* dstTag, const char* srcTag, long k)
+{
+	D3D11_TEXTURE2D_DESC sd{}, dd{};
+	void* so = nullptr;
+	void* dso = nullptr;
+	const bool sok = ssrResObj(src, &sd, &so);
+	const bool dok = ssrResObj(dst, &dd, &dso);
+	const bool same = sok && dok && descEqual(sd, dd);
+	g_ssrSelfCopy = true;
+	ctx->CopyResource(dst, src);
+	g_ssrSelfCopy = false;
+	if (k <= 8 || (k % 128) == 0)
+		logLine(linePrefix +
+		        (same ? std::string(" [desc一致]")
+		              : std::string(" [desc不一致! ") + dstTag + "=" +
+		                    (dok ? descStr(dd) : std::string("QI失败")) + " " + srcTag + "=" +
+		                    (sok ? descStr(sd) : std::string("QI失败")) + "]"));
+	return same;
+}
+
 static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx, UINT n,
                                                        ID3D11RenderTargetView* const* ppRTV,
                                                        ID3D11DepthStencilView* pDSV)
@@ -1975,32 +2054,15 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 		    !g_ssrVkOutOn.load(std::memory_order_relaxed) && g_ssrSceneRes && g_ssrStrRes &&
 		    g_ssrStrResObj == g_ssrLastStr && g_ssrLastStr == g_ssrReflRt)
 		{
-			// CopyResource 返回 **void** —— src/dst 尺寸/格式/多重采样/片数不一致时不会给你
-			// HRESULT, 只会静默失败 (画面没变化, 但 [2b] 行照打) ⇒ 判读会误判成"哨兵没生效"。
-			// 所以先把两边 desc 比一遍并打进日志: [desc一致] 才算通路验通, 不一致行会直接给出
-			// 两个 desc 去定位差异 (最可能是 BindFlags/MSAA, D3D11 对 CopyResource 的匹配要求)。
-			D3D11_TEXTURE2D_DESC sd{}, dd{};
-			void* so = nullptr;
-			void* dso = nullptr;
-			const bool sok2 = ssrResObj(g_ssrSceneRes, &sd, &so);
-			const bool dok2 = ssrResObj(g_ssrStrRes, &dd, &dso);
-			auto dsc = [](const D3D11_TEXTURE2D_DESC& d) {
-				return std::to_string(d.Width) + "x" + std::to_string(d.Height) + " " +
-				       ssrFmtName(d.Format) + " mips" + std::to_string(d.MipLevels) +
-				       " msaa" + std::to_string(d.SampleDesc.Count);
-			};
-			const bool same = sok2 && dok2 && dsc(sd) == dsc(dd);
-			g_ssrSelfCopy = true;
-			ctx->CopyResource(g_ssrStrRes, g_ssrSceneRes); // dst=585 <- src=324
-			g_ssrSelfCopy = false;
+			// desc 预检 + CopyResource + 节流日志 → copyResDescChecked (C-2/C-3)。
+			// 那份函数的注释说明了为什么必须"先比 desc 再拷": CopyResource 返回 void,
+			// desc 不一致时静默丢弃但日志照打 ⇒ 判读会误判成"哨兵没生效"。
 			const long k = ++g_ssrSentN;
-			if (k <= 8 || (k % 128) == 0)
-				logLine("SSR侦察: [2b] 哨兵#" + std::to_string(k) +
-				        " 585=" + hexOf(g_ssrStrResObj) + " <- 324=" + hexOf(g_ssrSceneObj) +
-				        " 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1) +
-				        (same ? " [desc一致]"
-				              : " [desc不一致! 585=" + (dok2 ? dsc(dd) : std::string("QI失败")) +
-				                    " 324=" + (sok2 ? dsc(sd) : std::string("QI失败")) + "]"));
+			const std::string pfx = "SSR侦察: [2b] 哨兵#" + std::to_string(k) +
+			                        " 585=" + hexOf(g_ssrStrResObj) + " <- 324=" +
+			                        hexOf(g_ssrSceneObj) + " 帧=" +
+			                        std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1);
+			copyResDescChecked(ctx, g_ssrStrRes, g_ssrSceneRes, pfx, "585", "324", k);
 		}
 	}
 	// ---- Step 2d-1 出向回写 (v0.18.0, docs/05 D3): VK 上一帧 Present 填好的结果 → 585 ----
@@ -2009,22 +2071,16 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 	// **必须排在 2c 入向之前**: 读回自校验要拿"入向镜像里 VK 消费过的那帧"与"出向镜像"
 	// 比 (v0 passthrough 下两者应逐字节相等), 而 2c 马上就会把入向镜像覆盖成本帧新内容。
 	// 2d 开着时 2b 哨兵让位 ⇒ 585 的内容只可能来自 VK, 归因干净。
-	if (g_ssrVkOutOn.load(std::memory_order_relaxed) && g_ssrOutReady && g_ssrOutTexC &&
-	    g_ssrStrRes && g_ssrStrResObj == g_ssrLastStr && g_ssrLastStr == g_ssrReflRt)
+	// C-6 一次性门: g_ssrOutPending 由特征B 置位 (ssrReconOm 内), 此处才触发一次;
+	// 后面的身份条件只是"还在段16 窗口内"的补充判据, **不能**单独当触发条件 (否则段16 的
+	// 16 次 OMSet 重绑会让它每帧命中 28.7 次)。
+	if (g_ssrVkOutOn.load(std::memory_order_relaxed) && g_ssrOutPending && g_ssrOutReady &&
+	    g_ssrOutTexC && g_ssrStrRes && g_ssrStrResObj == g_ssrLastStr &&
+	    g_ssrLastStr == g_ssrReflRt)
 	{
-		// 与 2b 同一道 desc 预检: CopyResource 返回 void, src/dst 不一致时静默丢弃、日志照打
-		// ⇒ "建得出/排得队"不能证明"写进去了", 必须自己比一遍并打进日志。
-		D3D11_TEXTURE2D_DESC sd{}, dd{};
-		void* so = nullptr;
-		void* dso = nullptr;
-		const bool sok2 = ssrResObj(g_ssrOutTexC, &sd, &so);
-		const bool dok2 = ssrResObj(g_ssrStrRes, &dd, &dso);
-		auto dsc = [](const D3D11_TEXTURE2D_DESC& d) {
-			return std::to_string(d.Width) + "x" + std::to_string(d.Height) + " " +
-			       ssrFmtName(d.Format) + " mips" + std::to_string(d.MipLevels) +
-			       " msaa" + std::to_string(d.SampleDesc.Count);
-		};
-		const bool same = sok2 && dok2 && dsc(sd) == dsc(dd);
+		// 消费一次性门 (C-6): 走到这里 = 本帧特征B + 身份=585 都成立, 只允许写这一次。
+		g_ssrOutPending = false;
+		// desc 预检 + 拷 + 日志都在下方 copyResDescChecked (C-2/C-3), 与 2b 共用同一份。
 		// 读回自校验 (节流 前3次+每600次, 同 2c): 入向=VK 消费的那帧, 出向=VK 写回的那份。
 		// 只有**两个 STAGING 都在**才比; 阻塞读回, 绝不能每帧做 (docs/05 约束 2)。
 		const long cc = g_ssrOutChkN + 1;
@@ -2045,18 +2101,12 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 			        " 非零" + std::to_string(nzo) +
 			        " 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1));
 		}
-		g_ssrSelfCopy = true;
-		ctx->CopyResource(g_ssrStrRes, g_ssrOutTexC); // dst=585 <- src=出向镜像
-		g_ssrSelfCopy = false;
 		const long k = ++g_ssrOutN;
-		if (k <= 8 || (k % 128) == 0)
-			logLine("SSR侦察: [2d] 回写#" + std::to_string(k) + " 585=" + hexOf(g_ssrStrResObj) +
-			        " ← 出向=" + hexOf(g_ssrOutTexC) + " 帧=" +
-			        std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1) +
-			        (same ? " [desc一致]"
-			              : " [desc不一致! 585=" +
-			                    (dok2 ? dsc(dd) : std::string("QI失败")) +
-			                    " 出向=" + (sok2 ? dsc(sd) : std::string("QI失败")) + "]"));
+		const std::string pfx = "SSR侦察: [2d] 回写#" + std::to_string(k) +
+		                        " 585=" + hexOf(g_ssrStrResObj) + " ← 出向=" +
+		                        hexOf(g_ssrOutTexC) + " 帧=" +
+		                        std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1);
+		copyResDescChecked(ctx, g_ssrStrRes, g_ssrOutTexC, pfx, "585", "出向", k);
 	}
 	// ---- Step 2c 共享入向 (v0.15.0): 与 2b 同一触发点, 独立开关 ----
 	// 放在 real() 之后的理由同 2b (此刻段17 已绑、585 已解绑) —— 入向拷贝不碰 585,
@@ -2088,7 +2138,20 @@ static void installSsrRecon(ID3D11Device* dev)
 {
 	if (!dev || !pocbEnabled() || !g_probeOn.load(std::memory_order_relaxed) ||
 	    !g_ssrOn.load(std::memory_order_relaxed))
+	{
+		// C-5 (docs/06): 门不满足时**必须**说清是谁关的 —— 原来是一声不吭 return,
+		// 而日志里那行 "ini ssr=1 → 挂 ctx 槽33/47/50" 只是**意图打印** (与门无关),
+		// 看着像挂上了, 实际槽33/47/50 一个都没挂 ⇒ OM=0 → 入向=0 → run2c 一口气 10 条
+		// FAIL 全是同一根因 (2026-10-06 曾白跑两轮 3600 + 8400 帧)。
+		static std::atomic<bool> s_gateLogged{false};
+		if (!s_gateLogged.exchange(true, std::memory_order_relaxed))
+			logLine(std::string("SSR侦察: 挂载门未满足 — ctx槽33/50 未挂 (dev=") +
+			        (dev ? "OK" : "空") + " vulkan=" + (pocbEnabled() ? "1" : "0") +
+			        " probe=" + (g_probeOn.load(std::memory_order_relaxed) ? "1" : "0") +
+			        " ssr=" + (g_ssrOn.load(std::memory_order_relaxed) ? "1" : "0") +
+			        ") — 开关顺序 ssr / probe / vulkan (逃生门链 ssr=0 → probe=0 → vulkan=0)");
 		return;
+	}
 	ID3D11DeviceContext* ctx = nullptr;
 	dev->GetImmediateContext(&ctx);
 	if (!ctx)
@@ -2211,6 +2274,7 @@ static void ssrReconPresent(uint64_t n)
 	const long copyN = g_ssrCopyN;
 	g_ssrCopyN = 0;
 	g_ssrSentinelPending = false; // 兜底: 上一帧没被 real() 消费掉的标记不带进新帧
+	g_ssrOutPending = false;      // 同上 (C-6: 2d 出向一次性门)
 	g_ssrInPending = false;       // 同上 (2c 入向标记)
 	const bool act = fc > 0 || fs > 0 || fa > 0 || fb > 0;
 	// 真机判读 (2026-10-04, 4472 帧): 2571 条 [异常] 全部来自旧规则 "fs>2" —— fs 是"进入次数"
@@ -3978,6 +4042,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 		g_hModule = hModule;
 		DisableThreadLibraryCalls(hModule);
 	}
+	else if (reason == DLL_PROCESS_DETACH)
+	{
+		logLineFlush(); // C-1: 常驻日志文件句柄在此收尾
+	}
 	return TRUE;
 }
 
@@ -4000,7 +4068,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.0 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler) ====");
+	logLine("==== poc-presenter v0.18.1 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

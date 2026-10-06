@@ -67,7 +67,8 @@
 	X(vkCreateSampler) X(vkDestroySampler) \
 	X(vkCreateDescriptorSetLayout) X(vkDestroyDescriptorSetLayout) \
 	X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) \
-	X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets)
+	X(vkAllocateDescriptorSets) X(vkFreeDescriptorSets) X(vkUpdateDescriptorSets) \
+	X(vkCmdBindDescriptorSets) // P1-1: 能分配也能释放单 set (按材质索引换绑定时不留泄漏点)
 
 #define POCB_DECL_FN(n) PFN_##n n = nullptr;
 

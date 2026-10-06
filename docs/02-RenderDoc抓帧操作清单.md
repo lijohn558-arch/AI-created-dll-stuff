@@ -1550,7 +1550,7 @@ indirect draw 要按帧预算调剔除力度/间接 draw 上限，`docs/00` §6.
 
 | # | 判据 | 期望 | 失败含义 |
 |---|---|---|---|
-| 0 | banner `v0.18.0` 且含 `ssr.vkout` | 是 | DLL 没换 |
+| 0 | banner `v0.18.1`（v0.18.0 那轮实跑用 `v0.18.0`，见 §14.15.1；`run2c` 的 expect 同步升）且含 `ssr.vkout` | 是 | DLL 没换 |
 | 12a | `ini ssr.vkout=1 → 2d 出向回写` | 1 行 | ini 没写，或 `ssr` / `ssr.shared` 总门没开 |
 | 12b | `[2d] 出向镜像 OK` | 1 | 第 3 张 SHARED 镜像没建成 → 看 `[2d]` 关闸行 |
 | 12c | `[2d] 出向图就绪` | 1 | VK 导入 / 录命令没成 |
