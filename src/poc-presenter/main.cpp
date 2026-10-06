@@ -1214,6 +1214,17 @@ bool  g_ssrInChkCValid = false;                  // 上一行是否可用 (本�
 unsigned long long g_ssrInChkCPrev = 0;          // 上一次 D3D11 校验和 (差一帧? 用它对)
 size_t g_ssrInChkPitch = 0;                      // D3D11 STAGING 实际 RowPitch (行距?)
 
+// ---- O-1 正式修法 (v0.18.4, docs/02 §14.20 / docs/05 O-1): 2c 入向的跨 API EVENT 闸 ----
+// 为什么 Flush (v0.18.3) 不够: Flush 只提交不等待, 不构成跨 API 顺序保证 ⇒ 非读回帧到
+// Present 时拷贝可能还没跑完, VK 读到上一帧那份入向 (v0.18.3 实测 12e 仍 3/8 不一致)。
+// 做法: 拷完 End 一条 D3D11 EVENT 查询 (main 侧), renderer 侧在提交任何读入向镜像的 VK
+// 命令前把它等掉 —— 与 PoC-B copyQ 同款范式, 只不过那边管它自己的写, 这边管 2c 入向。
+ID3D11Query* g_ssrInQ = nullptr;     // 惰性创建; 建不出 → 降级为无闸 (只打一次日志)
+bool  g_ssrInQLive = false;          // 已 End、还没等到 (两侧共享, 一次性消费)
+long  g_ssrInGateN = 0;              // 等到次数
+double g_ssrInGateMs = 0;            // 累计等待 ms
+static bool g_ssrInGateWarn = false; // 创建失败只打一次
+
 // ---- Step 2d-1 (v0.18.0, docs/05 D3): 出向回写 —— VK 渲完的结果拷进 585 ----
 // 第 3 张 SHARED|NTHANDLE 镜像, desc 照抄 324 (= 585 的 desc, 2b 的 [desc一致] 已证)
 // → VK 导入后每帧 Present 拷一次 → **下一帧**特征B CopyResource(出向镜像 → 585)。
@@ -2185,8 +2196,40 @@ static void ssrInQueue(ID3D11DeviceContext* ctx)
 	// 设计读了入向镜像, 读到的是**上一帧**那份 ⇒ [2d] 出向读回 出现"出向 = 2 帧前的入向"差一帧
 	// 不一致 (v0.18.2 实测 9 行里 5 行如此, 而每帧都阻塞读回的头 3 行全一致 = 证据链)。
 	// Flush 只提交不等待: 尽早把拷贝交给 GPU, 让本帧 Present 时 VK 读到本帧这份。
-	// 验收 = run2c #12e 的 一致/不一致计数 (预期从 4/5 变成全一致); 代价看帧时基线是否劣化 5%。
-	ctx->Flush();
+	// —— 但 v0.18.3 实测证明**这不够**: 12e 仍 3/8 不一致 (Flush 不构成跨 API 顺序保证),
+	// 故下面补 O-1 的正式修法 (v0.18.4): 拷完 End 一条 D3D11 EVENT 查询, 由 renderer 侧的
+	// ssrInGateWait 在提交任何读入向镜像的 VK 命令前把它等掉 (PoC-B copyQ 同款范式)。
+	// 查询惰性建: 建不出就降级为"无闸", 只打一次日志 (那时 12e 可能仍差一帧)。
+	if (!g_ssrInQ)
+	{
+		ID3D11Device* dev = nullptr;
+		ctx->GetDevice(&dev);
+		if (dev)
+		{
+			D3D11_QUERY_DESC qd{};
+			qd.Query = D3D11_QUERY_EVENT;
+			const HRESULT hq = dev->CreateQuery(&qd, &g_ssrInQ);
+			dev->Release();
+			if (FAILED(hq) || !g_ssrInQ)
+			{
+				g_ssrInQ = nullptr;
+				if (!g_ssrInGateWarn)
+				{
+					g_ssrInGateWarn = true;
+					logLine("SSR侦察: [2c] 入向 EVENT 查询创建失败 " + hexHr(hq) +
+					        " → O-1 闸不生效 (12e 可能仍差一帧)");
+				}
+			}
+		}
+	}
+	// 上一条查询结果还没被 renderer 消费 (VK 侧本帧没跑) 就不再 End,
+	// 免得 debug layer 报"查询结果未取又 End"。
+	if (g_ssrInQ && !g_ssrInQLive)
+	{
+		ctx->End(g_ssrInQ);
+		g_ssrInQLive = true;
+	}
+	ctx->Flush(); // End 之后再 Flush: 查询连同拷贝一起进驱动队列 (GetData 带 DONOTFLUSH, 不替我们提交)
 	const long k = ++g_ssrInN;
 	const long c = ++g_ssrInLogN;
 	const bool logThis = (k <= 8) || (k % 128) == 0;
@@ -4323,7 +4366,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.3 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 ====");
+	logLine("==== poc-presenter v0.18.4 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

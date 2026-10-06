@@ -547,8 +547,8 @@ layout×2 + pool×2 + allocate/update/**bind**×3）—— SSR v1 真要采样�
 全屏 draw；仍按 D2a-4 另开导入分支评估同步原语），不再二选一 —— 路线 1（`R32_FLOAT × 0x28`
 全屏 PS）转为**兜底**。SSR shader 本身未做，见上方「R2 深度改道实现缺口」。
 （同批的 **O-1** 已定位为「零跨 API 栅栏 ⇒ VK 读到上一帧入向，恒差一帧」，入向拷贝后
-`ctx->Flush()` 实测把 12e 不一致 **5/9 → 3/8、仍未归零** ⇒ `copyQ` 式 EVENT 跨 API 闸仍需做，
-见 `docs/02` §14.19.1。）
+`ctx->Flush()` 实测把 12e 不一致 **5/9 → 3/8、仍未归零** ⇒ `copyQ` 式 EVENT 跨 API 闸
+**已单独立项 `v0.18.4` 落地**（`ssrInQueue` End + `ssrInGateWait`，判读 `docs/02` §14.20）。）
 **D3a 的段16 结束信号**（**Step 1 真机判读已二选一：定特征B** —— 两者真机均 100% 每帧恰 1 次，
 但 B 结构必然触发、A 依赖游戏清屏细节故只作交叉校验，详见 D1 末「Step 1 真机判读」）：
 - **特征A**：`ClearRenderTargetView` 发生在**强特征通道进行期间**。S4 api-scan 实测

@@ -53,7 +53,7 @@ if ($bn -eq "") { $out.Add("  [FAIL] 没有 banner 行") }
 else {
     $m2 = [regex]::Match($bn, "poc-presenter (v[0-9.]+)")
     if ($m2.Success) { $ver = $m2.Groups[1].Value }
-    $out.Add("  expect v0.18.3: " + $(if ($ver -eq "v0.18.3") { "OK" } else { "MISMATCH -> " + $ver }))
+    $out.Add("  expect v0.18.4: " + $(if ($ver -eq "v0.18.4") { "OK" } else { "MISMATCH -> " + $ver }))
     $out.Add("  banner 含 ssr.shared: " + $(if ($bn.Contains("ssr.shared")) { "OK" } else { "FAIL (banner 没升)" }))
     $out.Add("  banner 含 Step2c-β: " + $(if ($bn.Contains("Step2c-β")) { "OK" } else { "FAIL (banner 没含 2c-β)" }))
     $out.Add("  banner 含 ssr.sentinel: " + $(if ($bn.Contains("ssr.sentinel")) { "OK" } else { "FAIL" }))
@@ -213,7 +213,7 @@ $nB3 = Cnt "三种 BindFlags 全失败"
 if ($nB3 -gt 0) { foreach ($x in (Pick "三种 BindFlags 全失败" 2)) { $out.Add("      [结论] " + $x) } }
 $out.Add("")
 
-$out.Add("==== #12 Step 2d-1 出向回写 (v0.18.3) ====")
+$out.Add("==== #12 Step 2d-1 出向回写 + O-1 EVENT 闸 (v0.18.4) ====")
 $nVkoIni = Cnt "ini ssr.vkout=1 → 2d 出向回写"
 $out.Add("  ini ssr.vkout 读到 = $nVkoIni   [应为1; 0 => ini 没写 ssr.vkout=1, 本轮回退到纯 2c 形态]")
 foreach ($x in (Pick "ini ssr.vkout" 3)) { $out.Add("      " + $x) }
@@ -239,8 +239,13 @@ foreach ($x in (Pick "[2d] 回写#" 6)) { $out.Add("      " + $x) }
 $nOutChk = Cnt "[2d] 出向读回#"
 $nOutOk  = CntBoth "[2d] 出向读回#" "**一致✓**"
 $nOutBad = CntBoth "[2d] 出向读回#" "不一致✗"
-$out.Add("  [2d] 出向读回 行数 = $nOutChk   一致 = $nOutOk   不一致 = $nOutBad   [前3+每600; ≥1 一致 = passthrough 字节还原; v0.18.3 起 2c 后 Flush, 预期不一致 = 0]")
+$out.Add("  [2d] 出向读回 行数 = $nOutChk   一致 = $nOutOk   不一致 = $nOutBad   [前3+每600; ≥1 一致 = passthrough 字节还原; v0.18.4 起入向 EVENT 闸 => 预期不一致 = 0; v0.18.3 只 Flush 实测 3/8]")
 foreach ($x in (Pick "[2d] 出向读回#" 6)) { $out.Add("      " + $x) }
+# --- O-1 正式修法 (v0.18.4): 2c 入向 EVENT 闸 (ssrInQueue End / ssrInGateWait 等) ---
+$nGate   = Cnt "[2c] 入向EVENT闸#"
+$nGateTo = Cnt "[2c] 入向EVENT闸 等待超 2000ms"
+$out.Add("  [2c] 入向EVENT闸 行数 = $nGate   超时放行 = $nGateTo   [前8条+每128条 => 实机应 >0; 0 = 闸没跑]")
+foreach ($x in (Pick "[2c] 入向EVENT闸#" 4)) { $out.Add("      " + $x) }
 $m6 = [regex]::Match($lastSum, "出向=(\d+)")
 $nOut = if ($m6.Success) { [int]$m6.Groups[1].Value } else { -1 }
 $mFr = [regex]::Match($lastSum, "帧=(\d+)")
@@ -295,7 +300,7 @@ if ($hookN -ne 1) {
     $out.Add("  [根因] " + $root)
     $out.Add("         -> 本页其余 FAIL 均为该根因的下游; 换 DLL、重跑图之前先确认 ini 五个开关")
 }
-if ($ver -ne "v0.18.3") { $fail.Add("#0 banner 不是 v0.18.3 -> DLL 没换") }
+if ($ver -ne "v0.18.4") { $fail.Add("#0 banner 不是 v0.18.4 -> DLL 没换") }
 if ($n_shr -ne 1) { $fail.Add("#1 ini ssr.shared=1 未读到 -> ini 没写或 ssr=0") }
 if ($n_sen -gt 0) { $fail.Add("#1 ssr.sentinel 还开着 -> 应为0, 否则水会消失干扰判读") }
 if ($n_c -ne 1) { $fail.Add("#2 色镜像 OK 行 != 1") }
@@ -335,9 +340,10 @@ if ($nVkoIni -eq 0) {
     }
     if ($nOutDescBad -gt 0) { $fail.Add("2d 回写 desc不一致 $nOutDescBad 次 -> CopyResource 会静默丢弃") }
     if ($nOutOk -eq 0) { $fail.Add("2d 出向读回 0 次一致 -> passthrough 没逐字节还原 (看上面不一致行的入向/出向值)") }
-    # --- O-1 验收 (v0.18.3): 2c 拷贝后 Flush 应把"差一帧不一致"消干净 => 预期 0 次不一致 ---
+    # --- O-1 验收 (v0.18.4 EVENT 闸): 提交VK前把入向 CopyResource 等掉 => 预期 0 次不一致 ---
+    if ($nGate -eq 0) { $warn.Add("入向 EVENT 闸一行都没有 -> O-1 正式修法没跑 (ssrInQueue 没 End / ssrInGateWait 没被调到)") }
     if ($nOutBad -gt 0) {
-        $warn.Add("2d 出向读回有 $nOutBad 次不一致 -> O-1 的 2c 后 Flush 没把差一帧消干净 (v0.18.2 实测 5 次; 根因 = 零跨API栅栏下 D3D11 拷贝还没交 GPU, VK 已读)")
+        $warn.Add("2d 出向读回有 $nOutBad 次不一致 -> EVENT 闸没把差一帧消干净 (v0.18.3 只 Flush 实测 3/8; 根因 = 零跨API栅栏下 D3D11 拷贝没跑完 VK 已读)")
     }
     # --- C-7 验收 (v0.18.2): 节流计数须进门先推进 => 行数 ≈ 3 + 事件数/600, 事件数 ≈ 0.68*帧数 ---
     $minOut = [Math]::Max(3, [int][math]::Floor($nFr / 1000))
@@ -370,8 +376,8 @@ if ($fail.Count -eq 0) {
     $out.Add("  [PASS] 全绿 -> 2c-alpha + 2c-beta 收口, R2 " + $r2txt)
     $out.Add("  入向通路 (D3D11 写 -> VK 读) 验通: 交叉校验 $nBok 次一致 (v0.16.6 定案 handleType=D3D11_TEXTURE_BIT)")
     if ($nVkoIni -gt 0) {
-        $out.Add("  2d-1 出向回写落地: 回写 $nOutWr 行 desc一致 $nOutDescOk, 出向读回一致 $nOutOk 次")
-        $out.Add("  下一步: 按 [2d-3]/[2d-4] 结论定深度改道 —— 路线1' (KMT 直入, 省每帧全屏 PS) 或 路线1 (R32_FLOAT 全屏 PS) -> SSR v1 shader 采样")
+        $out.Add("  2d-1 出向回写落地: 回写 $nOutWr 行 desc一致 $nOutDescOk, 出向读回 一致 $nOutOk / 不一致 $nOutBad; 入向EVENT闸等了 $nGate 次 (超时 $nGateTo)")
+        $out.Add("  下一步: 路线1' 已定案 (docs/05 D2a-4) -> 本闸过闸 (12e 全一致) 后进 SSR v1 shader 采样; 兜底 = 路线1 R32_FLOAT 全屏 PS")
     } else {
         $out.Add("  下一步: 2d-1 本轮回退 (ini 没开 ssr.vkout); 开了再跑一轮即可验出向")
     }

@@ -142,6 +142,7 @@ void  ssrInVkFrame(PocbCtx& c);                      // 2c-β: 到点读回比�
 void  ssrOutVkBuild(PocbCtx& c);                     // 2d-1: 出向图建图+导入+录命令 (失败只关自己)
 void  ssrOutVkFrame(PocbCtx& c);                     // 2d-1: 每帧 入向图→出向图 拷贝 + fence
 bool  ssrKmtProbeVk(HANDLE h, const D3D11_TEXTURE2D_DESC& sd); // 2d-4: 路线 1′ KMT 导入探测 (纯发现)
+void  ssrInGateWait(PocbCtx& c);                     // O-1 正式修法 (v0.18.4): 2c 入向 EVENT 闸
 
 // ---- renderer 依赖 hook 面的符号 (v0.17.0 过渡态, 2d 收敛成参数后删除) ----
 namespace pocmain
@@ -170,6 +171,11 @@ namespace pocmain
 	extern bool                    g_ssrInChkCValid;
 	extern unsigned long long      g_ssrInChkCPrev;   // 上一帧 (差一帧归因)
 	extern size_t                  g_ssrInChkPitch;   // D3D11 STAGING 实际 RowPitch (行距归因)
+	// ---- O-1 正式修法 (v0.18.4): 2c 入向的跨 API EVENT 闸 ----
+	extern ID3D11Query*            g_ssrInQ;          // D3D11_QUERY_EVENT (main 侧 End / renderer 侧等)
+	extern bool                    g_ssrInQLive;      // 已 End、还没等到 (一次性消费)
+	extern long                    g_ssrInGateN;      // 闸等到的累计次数
+	extern double                  g_ssrInGateMs;     // 闸累计等待 ms
 	// ---- 2d-1 出向回写 (v0.18.0) ----
 	extern std::atomic<bool>       g_ssrVkOutOn;      // ini ssr.vkout (2d 出向独立逃生门)
 	extern ID3D11Texture2D*        g_ssrOutTexC;      // 出向 SHARED 镜像 (desc 照抄 324 ≡ 585)

@@ -2021,6 +2021,41 @@ bool ssrKmtProbeVk(HANDLE h, const D3D11_TEXTURE2D_DESC& sd)
 	return ok;
 }
 
+// ---- O-1 正式修法 (v0.18.4, docs/02 §14.20 / docs/05 O-1): 2c 入向 EVENT 闸 ----
+// 入向 CopyResource 是异步排队的: 只有阻塞读回帧 (前3次+每600次的 Map) 才等得到它, 非读回帧
+// 走到 Present 时可能还没进 GPU ⇒ VK 读到上一帧那份入向, 12e 恒差一帧 (v0.18.3 实测 8 行里
+// 3 行不一致, 且全是"出向 = 2 帧前入向"; 每帧都阻塞读回的头 3 行全一致 = 证据链)。
+// main.cpp 侧在拷贝后 End 了 EVENT 查询, 这里在提交任何读入向镜像的 VK 命令之前把它等掉 ——
+// 与 pocbInject 里 PoC-B 的 copyQ 同款: GetData 带 DONOTFLUSH (不替我们 Flush)、Sleep(0) 自旋、
+// 2000ms 超时放行 (绝不卡死帧), 超时也把 live 消费掉免得下一帧等旧结果。
+void ssrInGateWait(PocbCtx& c) // vkrenderer.h 有声明 (非 static), 定义必须同链接性
+{
+	if (!g_ssrInQLive || !g_ssrInQ || !c.ctx)
+		return;
+	g_ssrInQLive = false; // 一次性消费: 本帧的闸用掉了 (超时也放行, 免得下一帧等旧结果)
+	if (c.state.load() != 2 || !c.vdev)
+		return; // VK 没起来/已降级 → 没人读入向镜像, 不必白等 (但消费掉, 下一帧照常重新 End)
+	const auto g0 = std::chrono::steady_clock::now();
+	while (c.ctx->GetData(g_ssrInQ, nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_FALSE)
+	{
+		if (std::chrono::steady_clock::now() - g0 > std::chrono::milliseconds(2000))
+		{
+			logLine("SSR侦察: [2c] 入向EVENT闸 等待超 2000ms → 放行本帧 (12e 可能不一致)");
+			break;
+		}
+		Sleep(0);
+	}
+	const double ms = std::chrono::duration<double, std::milli>(
+	    std::chrono::steady_clock::now() - g0).count();
+	g_ssrInGateMs += ms;
+	const long k = ++g_ssrInGateN;
+	if (k <= 8 || (k % 128) == 0)
+		logLine("SSR侦察: [2c] 入向EVENT闸#" + std::to_string(k) + " 等待=" +
+		        std::to_string(ms).substr(0, 5) + "ms 累计均值=" +
+		        std::to_string(g_ssrInGateMs / static_cast<double>(k)).substr(0, 5) +
+		        "ms 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed)));
+}
+
 // 每帧: 提交一次 Vulkan 命令 → fence 等待 → 读回像素 → 拷进 backbuffer
 void pocbInject(PocbCtx& c, IDXGISwapChain* sc)
 {
@@ -2125,6 +2160,9 @@ void pocbInject(PocbCtx& c, IDXGISwapChain* sc)
 		    c.useShared ? "共享纹理" : "读回");
 		logLine(b);
 	}
+	// O-1 EVENT 闸 (v0.18.4): 提交任何读入向镜像的 VK 命令之前, 先把本帧特征B 那条
+	// CopyResource 等掉 —— 位置在下面两条 SSR 提交之前, 一次等待同时覆盖 2c-β 与 2d 出向。
+	ssrInGateWait(c);
 	// Step 2c-β 交叉校验 —— **刻意放在 PoC-B 统计之后**: 它只在 D3D11 读回过的帧干活
 	// (前3次+每600次), 若算进 c.accMs 就会污染 PoC-B 那条 0.9 ms/帧 的验收基线;
 	// 自己单独计时打进 [2c-β] 行。
