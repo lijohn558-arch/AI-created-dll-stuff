@@ -39,6 +39,7 @@ skyrim-vulkan/
 │   ├── rdc_extract.py + rdc_pass2~6.py  # 六轮提取（RDC_SCENE 选场景，无头批跑）
 │   ├── rdc_run.ps1                # 无头批跑 runner（-Scene/-Targets/-PsEvents/-PsWL）
 │   ├── rdc_compare.py / rdc_compare.ps1  # 配对判定 harness（10 锚点 PASS/DIFF/SKIP）
+│   ├── rdc_seg16_state.py         # 段16 逐 Draw blend/depth/stencil 探针（D-2/D-3，§14.16）
 │   ├── run2c.ps1                  # 跑图判读脚本（§#0–#12 自动结论；banner 版本期望随版本升）
 │   └── check1.ps1                 # main.cpp / vkrenderer.h/cpp 结构自检（提交前必跑，须 RESULT OK）
 └── captures/                      # .rdc 原始文件（不进 git）

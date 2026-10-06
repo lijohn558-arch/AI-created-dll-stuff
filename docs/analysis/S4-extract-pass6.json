@@ -163755,6 +163755,640 @@
       ],
       "disasmLines": 115
     },
+    "15478": {
+      "eventId": 39270,
+      "ps": "15478",
+      "entryPoint": "main",
+      "bytecodeSize": 5896,
+      "readOnly": [
+        {
+          "name": "texture1",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture3",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture4",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture5",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture6",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture7",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture10",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture11",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        }
+      ],
+      "samplers": [
+        "sampler1",
+        "sampler3",
+        "sampler4",
+        "sampler5",
+        "sampler6",
+        "sampler10",
+        "sampler11"
+      ],
+      "cbuffers": [
+        {
+          "name": "cbuffer12",
+          "byteSize": 720,
+          "bindPoint": -1
+        },
+        {
+          "name": "cbuffer0",
+          "byteSize": 80,
+          "bindPoint": -1
+        },
+        {
+          "name": "cbuffer1",
+          "byteSize": 224,
+          "bindPoint": -1
+        },
+        {
+          "name": "cbuffer2",
+          "byteSize": 96,
+          "bindPoint": -1
+        }
+      ],
+      "bound_srvs": [
+        {
+          "stage": "PS",
+          "slot": 0,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::324",
+          "info": "1920x1080 R16G16B16A16_FLOAT",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 1,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::501",
+          "info": "512x512 R16G16B16A16_FLOAT",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 2,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::19280",
+          "info": "2048x2048 BC1_UNORM",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 3,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::19280",
+          "info": "2048x2048 BC1_UNORM",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 4,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::19280",
+          "info": "2048x2048 BC1_UNORM",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 5,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::520",
+          "info": "1920x1080 D24S8_TYPELESS",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 6,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::661",
+          "info": "960x540 R16G16B16A16_FLOAT",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 7,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::665",
+          "info": "960x540 R16G16B16A16_FLOAT",
+          "firstMip": 0
+        }
+      ],
+      "cb_head": [
+        {
+          "id": "ResourceId::1463",
+          "bytes": 64,
+          "head16f": [
+            0.97896,
+            0.20403,
+            0.0,
+            0.0,
+            -0.04919,
+            0.23602,
+            0.9705,
+            0.0,
+            -0.19801,
+            0.95009,
+            -0.2411,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        },
+        {
+          "id": "ResourceId::1388",
+          "bytes": 64,
+          "head16f": [
+            0.00052,
+            0.00093,
+            0.0,
+            0.0,
+            927.9339,
+            -57945.12891,
+            752.78204,
+            0.83333,
+            371648.125,
+            15.0,
+            371633.125,
+            5574722.0,
+            0.63437,
+            0.13947,
+            0.76035,
+            3.7451
+          ]
+        },
+        {
+          "id": "ResourceId::1416",
+          "bytes": 64,
+          "head16f": [
+            0.10227,
+            0.14215,
+            0.07899,
+            3521.0,
+            0.01346,
+            0.05103,
+            0.05924,
+            4.65,
+            0.32026,
+            0.51027,
+            0.51669,
+            37794.5625,
+            0.1,
+            0.4,
+            543.0,
+            1.0
+          ]
+        },
+        {
+          "id": "ResourceId::1443",
+          "bytes": 64,
+          "head16f": [
+            0.39048,
+            0.57706,
+            -0.12055,
+            -1214.29761,
+            -0.14273,
+            0.68484,
+            0.74212,
+            2710.24316,
+            -0.19802,
+            0.95011,
+            -0.2411,
+            3946.65381,
+            -0.19801,
+            0.95009,
+            -0.2411,
+            3954.07031
+          ]
+        }
+      ],
+      "disasmLines": 190
+    },
+    "15990": {
+      "eventId": 39306,
+      "ps": "15990",
+      "entryPoint": "main",
+      "bytecodeSize": 8268,
+      "readOnly": [
+        {
+          "name": "texture1",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture3",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture4",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture7",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture8",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture9",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture10",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture11",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        }
+      ],
+      "samplers": [
+        "sampler1",
+        "sampler3",
+        "sampler4",
+        "sampler8",
+        "sampler9",
+        "sampler10",
+        "sampler11"
+      ],
+      "cbuffers": [
+        {
+          "name": "cbuffer12",
+          "byteSize": 720,
+          "bindPoint": -1
+        },
+        {
+          "name": "cbuffer0",
+          "byteSize": 80,
+          "bindPoint": -1
+        },
+        {
+          "name": "cbuffer1",
+          "byteSize": 224,
+          "bindPoint": -1
+        },
+        {
+          "name": "cbuffer2",
+          "byteSize": 96,
+          "bindPoint": -1
+        }
+      ],
+      "bound_srvs": [
+        {
+          "stage": "PS",
+          "slot": 0,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::324",
+          "info": "1920x1080 R16G16B16A16_FLOAT",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 1,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::501",
+          "info": "512x512 R16G16B16A16_FLOAT",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 2,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::19280",
+          "info": "2048x2048 BC1_UNORM",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 3,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::520",
+          "info": "1920x1080 D24S8_TYPELESS",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 4,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::18400",
+          "info": "320x320 R8G8B8A8_UNORM",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 5,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::19282",
+          "info": "2048x2048 BC1_UNORM",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 6,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::661",
+          "info": "960x540 R16G16B16A16_FLOAT",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 7,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::665",
+          "info": "960x540 R16G16B16A16_FLOAT",
+          "firstMip": 0
+        }
+      ],
+      "cb_head": [
+        {
+          "id": "ResourceId::1463",
+          "bytes": 64,
+          "head16f": [
+            0.97896,
+            0.20403,
+            0.0,
+            0.0,
+            -0.04919,
+            0.23602,
+            0.9705,
+            0.0,
+            -0.19801,
+            0.95009,
+            -0.2411,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        },
+        {
+          "id": "ResourceId::1388",
+          "bytes": 64,
+          "head16f": [
+            0.00052,
+            0.00093,
+            0.0,
+            0.0,
+            927.9339,
+            -57945.12891,
+            752.78204,
+            0.83333,
+            371648.125,
+            15.0,
+            371633.125,
+            5574722.0,
+            0.63437,
+            0.13947,
+            0.76035,
+            3.7451
+          ]
+        },
+        {
+          "id": "ResourceId::1416",
+          "bytes": 64,
+          "head16f": [
+            0.10227,
+            0.14215,
+            0.07899,
+            3521.0,
+            0.01346,
+            0.05103,
+            0.05924,
+            4.65,
+            0.32026,
+            0.51027,
+            0.51669,
+            37794.5625,
+            0.1,
+            0.4,
+            543.0,
+            1.0
+          ]
+        },
+        {
+          "id": "ResourceId::1443",
+          "bytes": 64,
+          "head16f": [
+            0.39048,
+            0.57706,
+            -0.12055,
+            1984.47949,
+            -0.14273,
+            0.68484,
+            0.74212,
+            1540.9834,
+            -0.19802,
+            0.95011,
+            -0.2411,
+            2324.49731,
+            -0.19801,
+            0.95009,
+            -0.2411,
+            2331.94824
+          ]
+        }
+      ],
+      "disasmLines": 264
+    },
+    "17352": {
+      "eventId": 39382,
+      "ps": "17352",
+      "entryPoint": "main",
+      "bytecodeSize": 2368,
+      "readOnly": [
+        {
+          "name": "texture3",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        },
+        {
+          "name": "texture4",
+          "bindPoint": -1,
+          "bindArraySize": 1,
+          "type": "?"
+        }
+      ],
+      "samplers": [
+        "sampler3",
+        "sampler4"
+      ],
+      "cbuffers": [
+        {
+          "name": "cbuffer12",
+          "byteSize": 688,
+          "bindPoint": -1
+        },
+        {
+          "name": "cbuffer0",
+          "byteSize": 80,
+          "bindPoint": -1
+        },
+        {
+          "name": "cbuffer1",
+          "byteSize": 128,
+          "bindPoint": -1
+        }
+      ],
+      "bound_srvs": [
+        {
+          "stage": "PS",
+          "slot": 0,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::501",
+          "info": "512x512 R16G16B16A16_FLOAT",
+          "firstMip": 0
+        },
+        {
+          "stage": "PS",
+          "slot": 1,
+          "type": "Image",
+          "arrayIdx": 0,
+          "id": "ResourceId::19280",
+          "info": "2048x2048 BC1_UNORM",
+          "firstMip": 0
+        }
+      ],
+      "cb_head": [
+        {
+          "id": "ResourceId::1463",
+          "bytes": 64,
+          "head16f": [
+            0.97896,
+            0.20403,
+            0.0,
+            0.0,
+            -0.04919,
+            0.23602,
+            0.9705,
+            0.0,
+            -0.19801,
+            0.95009,
+            -0.2411,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        },
+        {
+          "id": "ResourceId::1388",
+          "bytes": 64,
+          "head16f": [
+            0.00052,
+            0.00093,
+            0.0,
+            0.0,
+            927.9339,
+            -57945.12891,
+            752.78204,
+            0.83333,
+            371648.125,
+            15.0,
+            371633.125,
+            5574722.0,
+            0.63437,
+            0.13947,
+            0.76035,
+            3.7451
+          ]
+        },
+        {
+          "id": "ResourceId::1416",
+          "bytes": 64,
+          "head16f": [
+            0.10227,
+            0.14215,
+            0.07899,
+            3521.0,
+            0.01346,
+            0.05103,
+            0.05924,
+            4.65,
+            0.32026,
+            0.51027,
+            0.51669,
+            37794.5625,
+            0.1,
+            0.4,
+            543.0,
+            1.0
+          ]
+        }
+      ],
+      "disasmLines": 78
+    },
     "2612": {
       "eventId": 39585,
       "ps": "2612",
@@ -163877,5 +164511,5 @@
       "disasmLines": 56
     }
   },
-  "elapsed_sec": 32.7
+  "elapsed_sec": 34.6
 }

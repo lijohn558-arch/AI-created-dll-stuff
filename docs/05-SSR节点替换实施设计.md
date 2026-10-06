@@ -436,7 +436,7 @@ vs "源带 `BIND_DEPTH_STENCIL`"；判读与实跑表见 `docs/02` §14.12.1（�
 | 方案 | 流程 | 优点 | 缺点 |
 |---|---|---|---|
 | **a（推荐 v1）**：覆盖式 | 段16 照常跑（cubemap 结果落 585）→ 在段17 入口（A 拦截点的「段16 结束/段17 开始」）Vulkan 跑 SSR → 共享出向拷入 585 → 放行段17 | **不改游戏 Draw 流**：SSR 失败时 cubemap 结果天然兜底，`ssr=0` 语义最干净；不需要 Draw Hook（约束 6 规避） | 16 Draw 白跑（GPU 成本，cubemap 采样便宜）；触发点需要第二个拦截信号（段16 结束） |
-| b：抑制式 | 段16 第一个 Draw 被拦 → 先跑 SSR 拷入 585 → 吞掉其中**反射那一层** | 省掉反射层的 Draw | **不是整体抑制 16 个 draw** —— 实测（`S4-extract-pass5.json` seg39270-39502）：16 次 draw 全部 1920×1080 viewport、scissors 全 off、rt0 恒为 585、dsv 恒为 461、PS 分布 15478×1 / 15990×4 / 17352×11 ⇒ **同一 RT0 无 ping-pong，必为 blend 分层合成**，整体抑制 16 个 = 丢掉 PS 15478 与 15990 的全部贡献 ⇒ 只能替换**反射那一份**（候选 = PS 17352 组 11 个，唯一声明 `dcl_resource_texturecube t3`；或 PS 15478 那 1 个）。**准入前置 = 三个 PS 的反汇编 + blend/depth-stencil state，当前均缺失**（补法：`tools/rdc_run.ps1` 采 39270–39502 的 PSEvents + 扩展 `rdc_state_probe.py` 采 blend/depth-write）。需新增 Draw Hook + 状态机（非段内计数，Step 1 实测次数每帧 10~19 次/4~6 段）；**抑制失败已有兜底**（`g_ssrOutReady=false` ⇒ D3D11 不回写、画面原样），风险已降 |
+| b：抑制式 | 段16 被拦 → 先跑 SSR 拷入 585 → 吞掉这 16 个 draw（可按 PS 分组选择性吞） | 省掉 16 个 cubemap 反射 draw；不用画 cubemap 采样 | **实测模型（2026-10-06 取数，`tools/rdc_seg16_state.py` → `S4-seg-state.txt`，errors 0）**：16 draw = **16 份不同几何**（numIndices 6144×5 / 606 / 252 / 54 / 78 / 30 / 54 / 18 / 6 / 36 / 150 / 1848），TriangleList、NoCull、viewport 全 1920×1080、scissor 未启用（0,0 0x0）、RT0 恒 585 / DS 恒 461；**blend 全关**（enabled=False、RT0 writeMask=**7** 只写 RGB、logicOp NoOp、independent=True、factor=1,1,1,1）⇒ **不是分层合成，是后画覆盖前画**；**depth 只测不写**（LessEqual + depthWrites=False）⇒ **抑制不影响 461，段17/18 深度不受牵连（D-3 准入通过）**；**stencil 开**（NotEqual / ref=1 / compareMask=1，fail 全 Keep）= 像素门；D-1 反汇编显示**三个 PS 都声明 `dcl_resource_texturecube t3`** ⇒ **16 个全是反射绘制**（按材质变体分 3 组：17352 小几何×11、15990×4、15478×1），**不存在「只替换反射那一份」**。因 **585 整帧从不被清**，抑制的实际效果 = **沿用上一帧反射**（静止近乎无差、移动时旧帧拖影）。需 Draw Hook（状态机；非段内计数 —— Step1 实测每帧 10~19 次/4~6 段）；抑制失败有兜底（`g_ssrOutReady=false` ⇒ D3D11 不回写、画面原样）。准入前置 D-1/D-2/D-3 **已补齐**：`S4-pass6-ps-disasm.txt`（8 PS）、`S4-seg-state.txt` |
 
 **推荐 a**：最小侵入优先，v1 验通路；若帧时测量显示 16 Draw 成为瓶颈再上 b。
 
@@ -562,8 +562,9 @@ descriptor/sampler **推迟到 2d**，理由见 D2a-4）；**2c-β** VK `OPAQUE_
   `copy.sequence` 与 `copies_total` 变化 **declared**；
 - 预期不变：A 类（formats/CS 全等）、透明段规模（带内）、585/321 尺寸格式、段16/17/18 边界；
 - 覆盖式路线段16 仍执行 → `pass5.structure` 段签名不变；抑制式路线（若上 D3b）段16
-  draws **16→N（N = 保留层数，不是 16→0）**，且**每保留一层为一个独立 declared 项**
-  （实测 16 次为同 RT0 的 blend 分层合成，只替换其中反射一层、其余照跑）。
+  draws **16→K（K = SSR 输出 draw 数；v1 全屏 1 个 ⇒ 16→1）**：实测 16 draw 是 16 份不同几何、
+  blend 全关（`S4-seg-state.txt`，2026-10-06）⇒ **不存在「保留层」**，全吞后由 SSR 的 1~K 个
+  draw 补位，且因 585 不清、未覆盖像素自然沿用上一帧内容。
 
 ---
 

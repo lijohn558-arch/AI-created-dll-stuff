@@ -1561,3 +1561,59 @@ indirect draw 要按帧预算调剔除力度/间接 draw 上限，`docs/00` §6.
 **时序为什么是 1 帧延迟**（判读时若被问到）：见 `docs/05` D3「D3a-v0 落地」——
 在 D3D11 钩子里同步跑 VK 要等 D3D11 GPU（全管线 stall），在 VK 里等 D3D11 更不可能
 （D3D11 给不出 VK 能等的 fence）⇒ 取「上一帧填、本帧读」，代价只有 1 帧（16ms）延迟。
+
+---
+
+### 14.16 段16 逐 Draw 状态与 PS 反汇编取数（D-1/D-2/D-3，2026-10-06 补齐）
+
+**为什么**：`docs/05` D3b（抑制式）的准入前置缺三件数据 —— 三个 PS 的反汇编、段16 的
+blend state、段16 对 DS=461 有无实质深度写入。**没有这三件就无法判断「抑制 16 个 draw
+会发生什么」**（`docs/待修复事项总结.md` D-1/D-2/D-3）。
+
+**两条实跑命令**（均 errors 0，qrenderdoc 无头，约 30~35s）：
+
+```powershell
+# D-1: 8 个 PS 的反汇编（原 5 个 + 段16 的 15478/15990/17352）
+tools\rdc_run.ps1 -Script rdc_pass6.py -Scene S4 `
+  -Targets "501,509,520,324,466,366" `
+  -PsWL "1567,12496,1632,12140,2612,15478,15990,17352"
+
+# D-2/D-3: 段16 逐 Draw 的 blend/depth/stencil + 几何线索（+ 段15/17/18 对照）
+tools\rdc_run.ps1 -Script rdc_seg16_state.py -Scene S4
+```
+
+**踩坑（固化）**：
+- **`-PsEvents 39270-39502` 这种区间写法无效** —— `rdc_pass6.py` 的 `_ints()` 只吃
+  分号/逗号分隔的**整数**，非整数静默丢弃 ⇒ 区间会被整段丢掉。要么写成 `39270,39272,...`
+  的逗号枚举，要么用 **`-PsWL`（按 PS 资源 ID）**——后者正合本用例，自动在 `draw_recs`
+  里找该 PS 首个绑定事件。
+- `pass6` 输出文件是 `"w"` 覆盖式 ⇒ 重跑必须把**旧 PS 一并**放进 `-PsWL`，否则会抹掉
+  已有的 5 个 PS 反汇编（本轮就是这么保住的）。
+- 新工具 `tools/rdc_seg16_state.py` 的 API 踩坑（qrenderdoc 内嵌 Python）：
+  `PipeState` **没有** `GetBlendState/GetDepthStencilState`，真名是
+  **`GetColorBlends()` / `GetDepthTestState()` / `GetPrimitiveTopology()`**；
+  `ColorBlend` 的字段是 **`enabled / colorBlend / alphaBlend / logicOperation / writeMask`**
+  （不是 D3D11 的 `SrcBlend/DestBlend` 命名）；SWIG 结构体 `str()` 只给指针地址
+  ⇒ 必须逐属性取值，否则「不同取值」会被地址刷成一堆假差异。
+  同理 `Drawcall` 事件号与 `numIndices` 在 **action 对象**上（`a.eventId` / `a.numIndices`）。
+
+**实测结果（`docs/analysis/S4-seg-state.txt` + `S4-pass6-ps-disasm.txt`）**：
+
+| 项 | 段16 实测 | 含义 |
+|---|---|---|
+| 几何 | 16 个 draw 的 `numIndices` **各不相同**：6144×5、606、252、54、78、30、54、18、6、36、150、1848；全 `TriangleList` / `NoCull` / viewport 1920×1080 / scissor 未启用 | **不是 16 层全屏**，是 16 份不同几何（不同对象/表面） |
+| blend | **16/16 全关**（`enabled=False`），RT0 `writeMask=7`（只写 RGB），logicOp NoOp，factor=1,1,1,1 | **不是分层合成**，是后画覆盖前画 |
+| depth | `depthEnable=True` / `LessEqual` / **`depthWrites=False`** | **只测不写** ⇒ 抑制段16 不影响 461（**D-3 准入通过**） |
+| stencil | **开**：`NotEqual`、ref=1、compareMask=1、writeMask=255、fail 全 `Keep` | 像素门：只在 `(stencil & 1) != 1` 的像素上画 |
+| PS | 三个 PS（15478 / 15990 / 17352）**都声明 `dcl_resource_texturecube t3`** | **16 个全是反射绘制**，按材质变体分 3 组 |
+| 对照 | 段15/段17：blend 关、`writeMask=15`、depth 测关写开；段18：**blend 开（SrcAlpha/InvSrcAlpha）**、writeMask=7 | 段18 才是真混合段，段16 不是 |
+
+**据此更正的三条推论**（原文都是按「blend 分层合成」推的，实测证伪）：
+
+1. `docs/05:439` D3b 行 —— 「只替换反射那一份（PS 17352 组）」**不成立**：16 个全是反射。
+   改为：抑制式 = 吞掉 16 个 cubemap 反射 draw，**因 585 整帧从不被清 ⇒ 实际效果 = 沿用
+   上一帧反射**（静止近乎无差，移动时旧帧拖影），depth 不写故不影响 461。
+2. `docs/05:565` declared-diff —— 「16→N 保留层」**不成立**：改为 **16→K（K = SSR 输出
+   draw 数，v1 全屏 1 个 ⇒ 16→1）**。
+3. `docs/analysis/S4-water.md` 段16 行 —— 「必为 blend 分层合成、非可整体替换节点」
+   改为实测口径（见上表）。
