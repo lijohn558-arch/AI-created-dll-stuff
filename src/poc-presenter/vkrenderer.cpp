@@ -1924,10 +1924,10 @@ bool ssrKmtProbeVk(HANDLE h, const D3D11_TEXTURE2D_DESC& sd)
 		ifi.type = VK_IMAGE_TYPE_2D;
 		ifi.tiling = VK_IMAGE_TILING_OPTIMAL;
 		ifi.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-		VkPhysicalDeviceExternalImageFormatProperties ep{};
-		ep.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_PROPERTIES;
-		VkPhysicalDeviceImageFormatProperties2 fp{};
-		fp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_PROPERTIES_2;
+		VkExternalImageFormatProperties ep{};
+		ep.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES;
+		VkImageFormatProperties2 fp{};
+		fp.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
 		fp.pNext = &ep;
 		const VkResult qr = c.fns.vkGetPhysicalDeviceImageFormatProperties2(c.phys, &ifi, &fp);
 		if (qr != VK_SUCCESS)
