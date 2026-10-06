@@ -5,6 +5,7 @@
 // 编译: build.yml 同时编 main.cpp 与本文件, 链成同一个 poc-presenter.dll。
 #include "vkrenderer.h"
 #include "pocb_shaders.h"
+#include <cmath> // v0.18.6: SSR v1 反推 inv(投影) 要 tan(FOV/2)
 
 PocbCtx g_pocb; // 定义在这里 (vkrenderer.h 声明为 extern); 原 main.cpp 里是 static
 using namespace pocmain; // hook 面提供的 日志/ini/哈希/D3D11 镜像 (声明见 vkrenderer.h)
@@ -92,9 +93,21 @@ static VkDeviceMemory g_ssrVkMemOut = VK_NULL_HANDLE;
 static VkCommandBuffer g_ssrVkCmdOut = VK_NULL_HANDLE; // 录一次永久复用 (ONE_TIME 提交完可重录)
 static VkImage        g_ssrVkCmdOutSrc = VK_NULL_HANDLE; // 录制时的入向图 handle (变了才重录)
 static int   g_ssrVkOutState = 0;   // 0=未建 1=OK 2=失败禁用 (只关自己, 不连坐入向)
+static bool  g_ssrVkCanSample = true; // 入向 VkImage 带 SAMPLED 建得出吗 (v0.18.6; 否则 v1 关自己)
+static bool  g_ssrV1AttachOk = true;  // 出向 VkImage 带 COLOR_ATTACHMENT 建得出吗 (v0.18.6)
 static long  g_ssrVkOutN = 0;       // 出向提交次数
 
 // ---------- 原 main.cpp: PoC-B 实现 (pocbCode/pocbFail/pocbEnabled/pocbInit/2c-β/pocbInject) ----------
+static VkImage        g_ssrV1RecSrc = VK_NULL_HANDLE; // 录命令时用的入向图 (纯拷贝录制 = NULL)
+static long           g_ssrV1N = 0;                   // v1 渲染计数 (节流日志用, ssrOutVkFrame 也读)
+
+// ---- SSR v1 (v0.18.6) 前置声明: 定义在文件后半段 (要复用深度 KMT 分支的句柄), ----
+// ---- 出向录制 ssrOutVkBuild/ssrOutVkFrame 在前半段调它们, 所以先在这里声明。 ----
+static bool ssrV1RecordOut(PocbCtx& c, unsigned w, unsigned h); // 录出向命令 (v1 或纯拷贝)
+static bool ssrV1Dirty(); // v1 依赖变了 (深度图/模式/入向图) ⇒ 只重录不重建
+static void ssrV1Free(PocbCtx& c); // 销毁 v1 全套 (换设备/关闸时)
+static void ssrV1DropViewC(PocbCtx& c); // 入向图要换/要销毁前, 先摘掉 v1 指着它的 color view
+
 static std::string pocbCode(long v)
 {
 	char b[40];
@@ -1019,10 +1032,22 @@ bool ssrInVkBuild(PocbCtx& c, int slot)
 	ici.arrayLayers = 1;
 	ici.samples = VK_SAMPLE_COUNT_1_BIT;
 	ici.tiling = sl.linear ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL; // 槽: LINEAR 试线性布局
-	ici.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT; // usage 已被 v0.16.4 变体B 排除 (见 §14.13.3)
+	ici.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+	            VK_IMAGE_USAGE_SAMPLED_BIT; // v0.18.6: SSR v1 要拿它当 sampler2D (变体B 已证 SAMPLED 不是病因)
+	                                         // 建不出带 SAMPLED 的就退回调用方的原样 (只丢 v1, 2c 交叉校验不受影响)
 	ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; // 规范只允许 UNDEFINED
 	vr = c.fns.vkCreateImage(c.vdev, &ici, nullptr, &g_ssrVkImg);
+	if (vr != VK_SUCCESS)
+	{
+		// v0.18.6: 带 SAMPLED 建不出 (外部内存 × usage 组合被驱动拒) ⇒ 退回只有 TRANSFER_SRC
+		// 的原样: 2c 交叉校验照常跑, 只是 v1 没法把它当采样源 (ssrV1Build 据此关自己)。
+		ici.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		g_ssrVkCanSample = false;
+		logLine("SSR侦察: [v1] 入向图带 SAMPLED vkCreateImage = " + pocbCode(vr) +
+		        " → 退回 TRANSFER_SRC (2c 不受影响, SSR v1 关自己)");
+		vr = c.fns.vkCreateImage(c.vdev, &ici, nullptr, &g_ssrVkImg);
+	}
 	if (vr != VK_SUCCESS)
 	{
 		// 槽参数不被支持是**预期可能** (如 external + LINEAR) ⇒ 只记日志、换槽, 不关整条通路
@@ -1159,6 +1184,7 @@ bool ssrInVkBuild(PocbCtx& c, int slot)
 		{
 			// 不是对照槽: 下面的 2x2 探针是按 OPAQUE+OPTIMAL 口径归因的, 对本槽的候选参数
 			// 没有意义 ⇒ 只记一行就换槽 (本槽的失败本身就是结论: 该参数导入不了)。
+			ssrV1DropViewC(c); // v0.18.6: 先摘掉 v1 指着这张图的 color view, 再销毁图
 			c.fns.vkDestroyImage(c.vdev, g_ssrVkImg, nullptr);
 			g_ssrVkImg = VK_NULL_HANDLE;
 			g_ssrVkMakeFail++;
@@ -1448,6 +1474,10 @@ bool ssrInVkBuild(PocbCtx& c, int slot)
 // VK_ERROR_DEVICE_LOST → PoC-B 被连坐关闭注入, 画面上的 VK 三角消失)。
 void ssrVkFree(PocbCtx& c)
 {
+	// v0.18.6: v1 的 view/framebuffer 指着入向/出向两张图 ⇒ 必须先销毁, 再销毁图
+	ssrV1Free(c);
+	g_ssrVkCanSample = true; // 下次重建重新试带 SAMPLED 的用法
+	g_ssrV1AttachOk = true;
 	if (g_ssrVkImg)
 	{
 		c.fns.vkDeviceWaitIdle(c.vdev); // 先确认 GPU 真的不再碰这块内存, 再销毁
@@ -1607,7 +1637,23 @@ void ssrOutVkBuild(PocbCtx& c)
 		return false;
 	};
 
-	// --- 1) 出向 VkImage: usage = TRANSFER_DST, handle 类型沿用已验通的 D3D11_TEXTURE_BIT ---
+	// --- 0) 出向图若还在 (入向图换过 / 上一轮建过) ⇒ 先整套退掉: 否则下面的 vkCreateImage 会
+	//     把 g_ssrVkImgOut 直接覆盖 (老图+老显存泄漏), 且 v1 的 view/framebuffer 还指着老图。
+	//     ssrV1Free 连 view 一起销毁 ⇒ 换新图后由 ssrV1Build 重建。
+	if (g_ssrVkImgOut != VK_NULL_HANDLE)
+	{
+		ssrV1Free(c);
+		c.fns.vkDeviceWaitIdle(c.vdev);
+		c.fns.vkDestroyImage(c.vdev, g_ssrVkImgOut, nullptr);
+		g_ssrVkImgOut = VK_NULL_HANDLE;
+		c.fns.vkFreeMemory(c.vdev, g_ssrVkMemOut, nullptr);
+		g_ssrVkMemOut = VK_NULL_HANDLE;
+		g_ssrVkCmdOutSrc = VK_NULL_HANDLE;
+		g_ssrV1AttachOk = true;
+		logLine("SSR侦察: [2d] 出向图重建 (入向图已换) → 退掉旧出向图+旧 v1 资源");
+	}
+
+	// --- 1) 出向 VkImage: usage = TRANSFER_DST (+ COLOR_ATTACHMENT 供 v1 渲染), handle 沿用 D3D11_TEXTURE_BIT ---
 	VkExternalMemoryImageCreateInfo emi{};
 	emi.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
 	emi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
@@ -1621,10 +1667,23 @@ void ssrOutVkBuild(PocbCtx& c)
 	ici.arrayLayers = 1;
 	ici.samples = VK_SAMPLE_COUNT_1_BIT;
 	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-	ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT; // 只作拷贝目的地 (入向图才是 SRC)
+	ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+	            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT; // v0.18.6: v1 要当 render pass 的 color attachment
+	                                                  // (2d 纯拷贝只需要 TRANSFER_DST; 建不出就退回它)
 	ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkResult vr = c.fns.vkCreateImage(c.vdev, &ici, nullptr, &g_ssrVkImgOut);
+	g_ssrV1AttachOk = (ici.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0;
+	if (vr != VK_SUCCESS)
+	{
+		// v0.18.6: COLOR_ATTACHMENT 建不出 (外部内存 × usage 组合被驱动拒) ⇒ 退回只有
+		// TRANSFER_DST 的原样: 2d 出向回写照常, 只是 v1 没有可渲染的出向图 (ssrV1Build 关自己)。
+		ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		g_ssrV1AttachOk = false;
+		logLine("SSR侦察: [v1] 出向图带 COLOR_ATTACHMENT vkCreateImage = " + pocbCode(vr) +
+		        " → 退回 TRANSFER_DST (2d 照常, SSR v1 关自己)");
+		vr = c.fns.vkCreateImage(c.vdev, &ici, nullptr, &g_ssrVkImgOut);
+	}
 	if (vr != VK_SUCCESS)
 	{
 		failOut("出向 vkCreateImage = " + pocbCode(vr));
@@ -1750,75 +1809,27 @@ void ssrOutVkBuild(PocbCtx& c)
 		}
 		g_ssrVkCmdOut = cmds[0];
 	}
-	auto barrier = [&](VkImage img, VkPipelineStageFlags ss, VkAccessFlags sa,
-	                   VkPipelineStageFlags ds, VkAccessFlags da, VkImageLayout ol,
-	                   VkImageLayout nl) {
-		VkImageMemoryBarrier imb{};
-		imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-		imb.srcAccessMask = sa;
-		imb.dstAccessMask = da;
-		imb.oldLayout = ol;
-		imb.newLayout = nl;
-		imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		imb.image = img;
-		imb.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-		c.fns.vkCmdPipelineBarrier(g_ssrVkCmdOut, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &imb);
-	};
-	VkCommandBufferBeginInfo cbb{};
-	cbb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	if (c.fns.vkBeginCommandBuffer(g_ssrVkCmdOut, &cbb) != VK_SUCCESS)
+	// --- 3) 录命令 (v0.18.6 起交给 ssrV1RecordOut) ---
+	// 它按开关选两种姿势之一: ssr.v1=1 且 v1 建得成 ⇒ 全屏三角 render pass (采 324 + 520,
+	// 视图空间 ray march 出屏幕空间反射); 否则 ⇒ 2d 原样拷 (入向→出向), 行为与 v0.18.5 一致。
+	if (!ssrV1RecordOut(c, od.Width, od.Height))
 	{
+		ssrV1Free(c); // 录制失败可能已建了一半 v1 资源 (出向图马上要销毁, 视图不能留着)
 		c.fns.vkDeviceWaitIdle(c.vdev);
 		c.fns.vkDestroyImage(c.vdev, g_ssrVkImgOut, nullptr);
 		g_ssrVkImgOut = VK_NULL_HANDLE;
 		c.fns.vkFreeMemory(c.vdev, g_ssrVkMemOut, nullptr);
 		g_ssrVkMemOut = VK_NULL_HANDLE;
-		failOut("vkBeginCommandBuffer(出向)");
-		return;
-	}
-	// ① 入向 GENERAL → TRANSFER_SRC: srcAccess=MEMORY_WRITE 把 D3D11 上一帧的跨 API 写算进去
-	//    (那笔写不归 VK 记账, 用"全部写"让 VK 侧缓存失效才读得到新内容)。
-	barrier(g_ssrVkImg, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
-	        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
-	        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-	// ② 出向 UNDEFINED → TRANSFER_DST: 每帧都整幅重写, oldLayout=UNDEFINED 允许丢弃上一帧
-	barrier(g_ssrVkImgOut, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT,
-	        VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-	        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	{
-		VkImageCopy icp{};
-		icp.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-		icp.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-		icp.extent = VkExtent3D{od.Width, od.Height, 1};
-		c.fns.vkCmdCopyImage(g_ssrVkCmdOut, g_ssrVkImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		                     g_ssrVkImgOut, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &icp);
-	}
-	// ③ 入向复原 GENERAL —— 下一帧 D3D11 要直接往里 CopyResource, 布局不复原就会撞车
-	barrier(g_ssrVkImg, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT,
-	        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
-	// ④ 出向 TRANSFER_DST → GENERAL + dstAccess=MEMORY_READ: 跨 API 交接只认 GENERAL,
-	//    让驱动把这次写做完再放行 (真正的交接仍靠 CPU 的 vkWaitForFences)
-	barrier(g_ssrVkImgOut, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT,
-	        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
-	if (c.fns.vkEndCommandBuffer(g_ssrVkCmdOut) != VK_SUCCESS)
-	{
-		c.fns.vkDeviceWaitIdle(c.vdev);
-		c.fns.vkDestroyImage(c.vdev, g_ssrVkImgOut, nullptr);
-		g_ssrVkImgOut = VK_NULL_HANDLE;
-		c.fns.vkFreeMemory(c.vdev, g_ssrVkMemOut, nullptr);
-		g_ssrVkMemOut = VK_NULL_HANDLE;
-		failOut("vkEndCommandBuffer(出向)");
+		failOut("录出向命令失败 (vkBegin/vkEnd)");
 		return;
 	}
 	g_ssrVkCmdOutSrc = g_ssrVkImg;
 	g_ssrVkOutState = 1;
 	logLine("SSR侦察: [2d] 出向图就绪: " + std::to_string(od.Width) + "x" +
-	        std::to_string(od.Height) + " RGBA16F TRANSFER_DST → 导入 handle=" + hexOf(g_ssrOutHC) +
-	        " (矩阵 " + std::to_string(ntry) + " 次) 命令已录 — 本帧只建不提, 下帧起每帧出向");
+	        std::to_string(od.Height) + " RGBA16F 导入 handle=" + hexOf(g_ssrOutHC) +
+	        " (矩阵 " + std::to_string(ntry) + " 次) 命令=" +
+	        (g_ssrV1RecSrc ? "SSR v1 全屏三角 (render pass)" : "入向→出向 原样拷 (2d)") +
+	        " — 本帧只建不提, 下帧起每帧出向");
 }
 
 // 每帧 (pocbInject 尾部, 紧跟 ssrInVkFrame): 入向镜像 → 出向镜像 拷一次 + CPU fence 等完,
@@ -1839,6 +1850,15 @@ void ssrOutVkFrame(PocbCtx& c)
 	if (g_ssrVkImgOut == VK_NULL_HANDLE || g_ssrVkCmdOutSrc != g_ssrVkImg)
 	{
 		ssrOutVkBuild(c); // 成功 → 本帧不提 (与 2c-β "只建不比" 同节奏); 失败 → 内部已关闸
+		return;
+	}
+	if (ssrV1Dirty())
+	{
+		// v1 依赖变了 (深度图刚就绪 / mode 或相机参数改 / v1 被关掉) ⇒ 只重录命令, 资源不动。
+		// 与"建图帧只建不提"同节奏: 重录的这一帧不提交, 下一帧起生效。
+		D3D11_TEXTURE2D_DESC od{};
+		g_ssrOutTexC->GetDesc(&od);
+		ssrV1RecordOut(c, od.Width, od.Height);
 		return;
 	}
 	c.fns.vkResetFences(c.vdev, 1, &c.fence);
@@ -1865,8 +1885,23 @@ void ssrOutVkFrame(PocbCtx& c)
 	}
 	g_ssrOutReady = true; // 1 帧延迟: D3D11 下一帧特征B 才读, 不存在跨 API GPU 栅栏
 	const long k = ++g_ssrVkOutN;
+	const bool v1 = g_ssrV1RecSrc != VK_NULL_HANDLE;
+	if (v1)
+	{
+		// v0.18.6: 这次提的是 SSR v1 render pass, 额外出一行 [v1] 专用日志 (run2c §#16 判据)
+		const long v = ++g_ssrV1N;
+		if (v <= 8 || (v % 128) == 0)
+			logLine("SSR侦察: [v1] 渲染#" + std::to_string(v) + " 全屏三角 324色+520深度 → 出向 " +
+			        std::to_string(g_ssrVkW) + "x" + std::to_string(g_ssrVkH) +
+			        " mode=" + std::to_string(g_ssrV1Mode) +
+			        " fence=" + std::to_string(ms).substr(0, 5) +
+			        "ms 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed)) +
+			        " [下帧特征B 回写585]");
+	}
+	// [2d] VK出向# 两种模式都照打 (12e/12f 判据不因 v1 断档), 文案按模式区分
 	if (k <= 8 || (k % 128) == 0)
-		logLine("SSR侦察: [2d] VK出向#" + std::to_string(k) + " 入向→出向 " +
+		logLine("SSR侦察: [2d] VK出向#" + std::to_string(k) + " " +
+		        (v1 ? std::string("全屏三角→出向 ") : std::string("入向→出向 ")) +
 		        std::to_string(g_ssrVkW) + "x" + std::to_string(g_ssrVkH) +
 		        " RGBA16F fence=" + std::to_string(ms).substr(0, 5) +
 		        "ms 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed)) +
@@ -2499,6 +2534,655 @@ void ssrInGateWait(PocbCtx& c) // vkrenderer.h 有声明 (非 static), 定义必
 		        std::to_string(ms).substr(0, 5) + "ms 累计均值=" +
 		        std::to_string(g_ssrInGateMs / static_cast<double>(k)).substr(0, 5) +
 		        "ms 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed)));
+}
+
+// ===========================================================================
+// SSR v1 shader 采样 (v0.18.6, docs/05 D4 / Step 3; R4 = 反推 inv(投影) 定案)
+// ---------------------------------------------------------------------------
+// 2d 出向回写此前是"入向图整幅拷进出向图" (v0 passthrough), v1 把那次拷贝换成
+// **一次全屏三角渲染**:
+//   输入 = 324 场景色镜像 (sampler2D, 段16 前的快照) + 520 深度快照 (depth aspect)
+//         + push constant 里的相机参数 (fov / aspect / near / far, 由 ssr.fov / ssr.near /
+//           ssr.far 反推 inv(投影) —— 行进全程在视图空间做, **不需要 view 矩阵**, R4 定案)
+//   输出 = fresnel 合成的屏幕空间反射, 覆盖式写进出向镜像 → 下帧特征B 拷进 585。
+// 降级链 (每级只关自己, 2c / 2d / 深度分支全不受影响):
+//   ssr.v1=0 或 ssr.mode=0          → 记录 2d 原样拷 (与 v0.18.5 同行为)
+//   入向图没 SAMPLED / 出向图没 COLOR_ATTACHMENT → 建图时退回原 usage + v1 关自己
+//   深度 KMT 图没就绪               → 先跑 2d 原样拷, 就绪后 ssrV1Dirty() 自动切 v1
+//   v1 任何一步建不成               → ssrV1Free + state=2
+static int             g_ssrV1State = 0;   // 0=未建 1=就绪 2=关自己 (只打一次失败日志)
+static VkDevice        g_ssrV1Dev = VK_NULL_HANDLE;
+static VkRenderPass    g_ssrV1Rp = VK_NULL_HANDLE;
+static VkImageView     g_ssrV1ViewOut = VK_NULL_HANDLE; // 出向图 color view (attachment)
+static VkImage         g_ssrV1OutImg = VK_NULL_HANDLE;  // 上面那个 view 属于哪张出向图
+static VkFramebuffer   g_ssrV1Fb = VK_NULL_HANDLE;
+static VkShaderModule  g_ssrV1Vs = VK_NULL_HANDLE, g_ssrV1Fs = VK_NULL_HANDLE;
+static VkPipelineLayout g_ssrV1Pl = VK_NULL_HANDLE;
+static VkPipeline      g_ssrV1Pipe = VK_NULL_HANDLE;
+static VkDescriptorSetLayout g_ssrV1Dsl = VK_NULL_HANDLE;
+static VkDescriptorPool g_ssrV1Dpool = VK_NULL_HANDLE;
+static VkDescriptorSet g_ssrV1Set = VK_NULL_HANDLE;
+static VkSampler       g_ssrV1SmpC = VK_NULL_HANDLE; // 色: LINEAR + clamp (反射跳点要插值)
+static VkSampler       g_ssrV1SmpD = VK_NULL_HANDLE; // 深: NEAREST + clamp (深度不能线性滤)
+static VkImageView     g_ssrV1ViewC = VK_NULL_HANDLE; // 采样用的入向色 view
+static VkImage         g_ssrV1CSrc = VK_NULL_HANDLE;  // 上面那个 view 属于哪张入向图
+static VkImageView     g_ssrV1ViewD = VK_NULL_HANDLE; // 采样用的深度 view (**只要 depth aspect**;
+static VkImage         g_ssrV1DSrc = VK_NULL_HANDLE;  //  KMT 那张是 DEPTH|STENCIL, 采样要分开)
+static VkImage         g_ssrV1RecDep = VK_NULL_HANDLE; // 录命令时用的深度图
+static unsigned long long g_ssrV1RecSig = 0;           // 录命令时的依赖签名 (见 ssrV1Sig)
+static bool            g_ssrV1DepLog = false;          // "深度没就绪先跑 2d" 只打一次
+
+// 依赖签名: 只要影响"命令内容"的任何东西变了, 签名就变 ⇒ 需要重录 (不重建资源)。
+// 返回 0 = 本帧应当录成**纯拷贝** (v1 关着 / mode=0 / 前置能力缺 / 深度没就绪)。
+static unsigned long long ssrV1Sig()
+{
+	if (!g_ssrV1On.load(std::memory_order_relaxed) || g_ssrV1State == 2)
+		return 0;
+	if (!g_ssrVkCanSample || !g_ssrV1AttachOk || g_ssrV1Mode == 0)
+		return 0;
+	if (g_ssrVkImg == VK_NULL_HANDLE || g_ssrVkImgOut == VK_NULL_HANDLE ||
+	    g_ssrKmtImg == VK_NULL_HANDLE)
+		return 0;
+	auto mix = [](unsigned long long s, unsigned long long v) {
+		v += 0x9E3779B97F4A7C15ULL + (s << 6) + (s >> 2);
+		return (s ^ v) * 0xBF58476D1CE4E5B9ULL;
+	};
+	union { float f; unsigned int u; } cv;
+	unsigned long long s = 0x1BF29C1D5A3ULL;
+	s = mix(s, (unsigned long long)(uintptr_t)g_ssrVkImg);
+	s = mix(s, (unsigned long long)(uintptr_t)g_ssrKmtImg);
+	s = mix(s, (unsigned long long)(uintptr_t)g_ssrVkImgOut);
+	s = mix(s, (unsigned long long)(unsigned)g_ssrV1Mode);
+	s = mix(s, g_ssrKmtCanRead ? 1ULL : 0ULL);
+	cv.f = g_ssrV1Fov; s = mix(s, cv.u);
+	cv.f = g_ssrV1Near; s = mix(s, cv.u);
+	cv.f = g_ssrV1Far; s = mix(s, cv.u);
+	cv.f = g_ssrV1Steps; s = mix(s, cv.u);
+	cv.f = g_ssrV1Strength; s = mix(s, cv.u);
+	cv.f = g_ssrV1Dist; s = mix(s, cv.u);
+	cv.f = g_ssrV1Rev; s = mix(s, cv.u);
+	return s ? s : 1;
+}
+
+static bool ssrV1Dirty()
+{
+	return ssrV1Sig() != g_ssrV1RecSig;
+}
+
+// 销毁 v1 全套 (设备还活着才调; 换设备走 ssrV1Drop 只丢不毁)
+static void ssrV1Free(PocbCtx& c)
+{
+	if (c.vdev && (g_ssrV1Pipe || g_ssrV1Fb || g_ssrV1Set))
+		c.fns.vkDeviceWaitIdle(c.vdev); // 命令里正引用着这些对象, 先等 GPU 用完
+	auto dset = [&](VkDescriptorSet& h) { h = VK_NULL_HANDLE; };
+	dset(g_ssrV1Set);
+	if (g_ssrV1Pipe) { c.fns.vkDestroyPipeline(c.vdev, g_ssrV1Pipe, nullptr); g_ssrV1Pipe = VK_NULL_HANDLE; }
+	if (g_ssrV1Pl) { c.fns.vkDestroyPipelineLayout(c.vdev, g_ssrV1Pl, nullptr); g_ssrV1Pl = VK_NULL_HANDLE; }
+	if (g_ssrV1Vs) { c.fns.vkDestroyShaderModule(c.vdev, g_ssrV1Vs, nullptr); g_ssrV1Vs = VK_NULL_HANDLE; }
+	if (g_ssrV1Fs) { c.fns.vkDestroyShaderModule(c.vdev, g_ssrV1Fs, nullptr); g_ssrV1Fs = VK_NULL_HANDLE; }
+	if (g_ssrV1Fb) { c.fns.vkDestroyFramebuffer(c.vdev, g_ssrV1Fb, nullptr); g_ssrV1Fb = VK_NULL_HANDLE; }
+	if (g_ssrV1Rp) { c.fns.vkDestroyRenderPass(c.vdev, g_ssrV1Rp, nullptr); g_ssrV1Rp = VK_NULL_HANDLE; }
+	if (g_ssrV1ViewOut) { c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewOut, nullptr); g_ssrV1ViewOut = VK_NULL_HANDLE; }
+	if (g_ssrV1ViewC) { c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewC, nullptr); g_ssrV1ViewC = VK_NULL_HANDLE; }
+	if (g_ssrV1ViewD) { c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewD, nullptr); g_ssrV1ViewD = VK_NULL_HANDLE; }
+	if (g_ssrV1Dpool) { c.fns.vkDestroyDescriptorPool(c.vdev, g_ssrV1Dpool, nullptr); g_ssrV1Dpool = VK_NULL_HANDLE; }
+	if (g_ssrV1Dsl) { c.fns.vkDestroyDescriptorSetLayout(c.vdev, g_ssrV1Dsl, nullptr); g_ssrV1Dsl = VK_NULL_HANDLE; }
+	if (g_ssrV1SmpC) { c.fns.vkDestroySampler(c.vdev, g_ssrV1SmpC, nullptr); g_ssrV1SmpC = VK_NULL_HANDLE; }
+	if (g_ssrV1SmpD) { c.fns.vkDestroySampler(c.vdev, g_ssrV1SmpD, nullptr); g_ssrV1SmpD = VK_NULL_HANDLE; }
+	g_ssrV1OutImg = VK_NULL_HANDLE;
+	g_ssrV1CSrc = VK_NULL_HANDLE;
+	g_ssrV1DSrc = VK_NULL_HANDLE;
+	g_ssrV1RecSrc = VK_NULL_HANDLE;
+	g_ssrV1RecDep = VK_NULL_HANDLE;
+	g_ssrV1RecSig = 0;
+	g_ssrV1Dev = VK_NULL_HANDLE;
+}
+
+// 入向图要被销毁/换掉之前先调: 只摘 color view (全量 ssrV1Free 太重, 会连 pipeline 一起拆)。
+// 换新图后下一次 ssrV1Build 看到 g_ssrV1CSrc 对不上会重建 view + 重填描述符。
+static void ssrV1DropViewC(PocbCtx& c)
+{
+	if (g_ssrV1ViewC)
+	{
+		c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewC, nullptr);
+		g_ssrV1ViewC = VK_NULL_HANDLE;
+	}
+	g_ssrV1CSrc = VK_NULL_HANDLE;
+}
+
+// 换设备: 旧 device 上的句柄**不能**拿来 destroy, 也不该在新 device 上引用 —— 只丢不毁
+static void ssrV1Drop()
+{
+	g_ssrV1State = 0;
+	g_ssrV1Pipe = VK_NULL_HANDLE;
+	g_ssrV1Pl = VK_NULL_HANDLE;
+	g_ssrV1Vs = VK_NULL_HANDLE;
+	g_ssrV1Fs = VK_NULL_HANDLE;
+	g_ssrV1Fb = VK_NULL_HANDLE;
+	g_ssrV1Rp = VK_NULL_HANDLE;
+	g_ssrV1ViewOut = VK_NULL_HANDLE;
+	g_ssrV1ViewC = VK_NULL_HANDLE;
+	g_ssrV1ViewD = VK_NULL_HANDLE;
+	g_ssrV1Dpool = VK_NULL_HANDLE;
+	g_ssrV1Dsl = VK_NULL_HANDLE;
+	g_ssrV1SmpC = VK_NULL_HANDLE;
+	g_ssrV1SmpD = VK_NULL_HANDLE;
+	g_ssrV1Set = VK_NULL_HANDLE;
+	g_ssrV1OutImg = VK_NULL_HANDLE;
+	g_ssrV1CSrc = VK_NULL_HANDLE;
+	g_ssrV1DSrc = VK_NULL_HANDLE;
+	g_ssrV1RecSrc = VK_NULL_HANDLE;
+	g_ssrV1RecDep = VK_NULL_HANDLE;
+	g_ssrV1RecSig = 0;
+	g_ssrV1Dev = VK_NULL_HANDLE;
+}
+
+// 幂等建资源: 齐了返回 true; 前置没就绪 (深度) 返回 false (下帧再试, 不关自己);
+// 真失败 (驱动拒) 返回 false 且 state=2。
+static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
+{
+	if (g_ssrV1State == 2)
+		return false;
+	if (!g_ssrV1On.load(std::memory_order_relaxed))
+		return false;
+	if (c.state.load() != 2 || !c.vdev)
+		return false;
+	auto fail = [&](const std::string& why) -> bool {
+		logLine("SSR侦察: [v1] " + why + " → v1 关自己 (出向退回 2d 原样拷)");
+		ssrV1Free(c);
+		g_ssrV1State = 2;
+		return false;
+	};
+	// 深度: v1 必须有 (没深度就没法反推视图空间位置)。KMT 分支原本跟着 D3D11 的节流读回走
+	// (前3次+每600次), v1 要每帧用 ⇒ 这里主动把它提前建起来。
+	if (g_ssrKmtImg == VK_NULL_HANDLE && g_ssrKmtState == 0)
+		ssrKmtVkBuild(c);
+	if (g_ssrKmtImg == VK_NULL_HANDLE || !g_ssrKmtCanRead)
+	{
+		if (!g_ssrV1DepLog)
+		{
+			g_ssrV1DepLog = true;
+			logLine("SSR侦察: [v1] 深度KMT 图还没就绪 → 本帧出向先跑 2d 原样拷, 就绪后自动切 v1");
+		}
+		return false;
+	}
+	// 换设备 ⇒ 旧句柄作废 (不能拿旧 VkDevice destroy)
+	if (g_ssrV1Dev && g_ssrV1Dev != c.vdev)
+	{
+		logLine("SSR侦察: [v1] 检测到 VkDevice 变更 → 丢弃旧句柄重建");
+		ssrV1Drop();
+	}
+	g_ssrV1Dev = c.vdev;
+
+	// --- 1) 出向 color view (出向图会随分辨率/设备重建) ---
+	if (!g_ssrV1ViewOut || g_ssrV1OutImg != g_ssrVkImgOut)
+	{
+		if (g_ssrV1ViewOut)
+			c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewOut, nullptr);
+		if (g_ssrV1Fb)
+		{
+			c.fns.vkDestroyFramebuffer(c.vdev, g_ssrV1Fb, nullptr);
+			g_ssrV1Fb = VK_NULL_HANDLE;
+		}
+		VkImageViewCreateInfo v{};
+		v.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		v.image = g_ssrVkImgOut;
+		v.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		v.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+		v.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		if (c.fns.vkCreateImageView(c.vdev, &v, nullptr, &g_ssrV1ViewOut) != VK_SUCCESS)
+			return fail("出向图 color view 建不出");
+		g_ssrV1OutImg = g_ssrVkImgOut;
+	}
+
+	// --- 2) render pass: UNDEFINED 丢弃旧内容 → GENERAL 交给跨 API (与 2d 交接口径一致) ---
+	if (!g_ssrV1Rp)
+	{
+		VkAttachmentDescription att{};
+		att.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+		att.samples = VK_SAMPLE_COUNT_1_BIT;
+		att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; // 全屏三角必然盖满, 不需要读旧值
+		att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		att.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+		VkAttachmentReference cref{};
+		cref.attachment = 0;
+		cref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		VkSubpassDescription sub{};
+		sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		sub.colorAttachmentCount = 1;
+		sub.pColorAttachments = &cref;
+		VkSubpassDependency deps[2]{};
+		deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+		deps[0].dstSubpass = 0;
+		deps[0].srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+		deps[0].srcAccessMask = 0; // 旧内容被丢弃, 不需要内存依赖
+		deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		deps[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+		deps[1].srcSubpass = 0;
+		deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+		deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		deps[1].dstStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+		deps[1].dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+		deps[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+		VkRenderPassCreateInfo rp{};
+		rp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		rp.attachmentCount = 1;
+		rp.pAttachments = &att;
+		rp.subpassCount = 1;
+		rp.pSubpasses = &sub;
+		rp.dependencyCount = 2;
+		rp.pDependencies = deps;
+		if (c.fns.vkCreateRenderPass(c.vdev, &rp, nullptr, &g_ssrV1Rp) != VK_SUCCESS)
+			return fail("vkCreateRenderPass 建不出");
+	}
+
+	// --- 3) 采样用的两张 view: 色 = 入向图 color aspect; 深 = **只取 depth aspect** ---
+	if (!g_ssrV1ViewC || g_ssrV1CSrc != g_ssrVkImg)
+	{
+		if (g_ssrV1ViewC)
+			c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewC, nullptr);
+		VkImageViewCreateInfo v{};
+		v.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		v.image = g_ssrVkImg;
+		v.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		v.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+		v.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		if (c.fns.vkCreateImageView(c.vdev, &v, nullptr, &g_ssrV1ViewC) != VK_SUCCESS)
+			return fail("入向色图 view 建不出");
+		g_ssrV1CSrc = g_ssrVkImg;
+	}
+	if (!g_ssrV1ViewD || g_ssrV1DSrc != g_ssrKmtImg)
+	{
+		if (g_ssrV1ViewD)
+			c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewD, nullptr);
+		VkImageViewCreateInfo v{};
+		v.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		v.image = g_ssrKmtImg;
+		v.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		v.format = VK_FORMAT_D24_UNORM_S8_UINT;
+		v.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+		if (c.fns.vkCreateImageView(c.vdev, &v, nullptr, &g_ssrV1ViewD) != VK_SUCCESS)
+			return fail("深度图 depth-aspect view 建不出 (采样要 DEPTH, KMT 那张是 DEPTH|STENCIL)");
+		g_ssrV1DSrc = g_ssrKmtImg;
+	}
+
+	// --- 4) 采样器: 色线性 / 深 NEAREST, 都 clamp-to-edge (出屏兜底靠 clamp) ---
+	if (!g_ssrV1SmpC || !g_ssrV1SmpD)
+	{
+		auto mk = [&](VkSampler& h, VkFilter f) -> bool {
+			VkSamplerCreateInfo s{};
+			s.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+			s.magFilter = f;
+			s.minFilter = f;
+			s.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+			s.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+			s.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+			s.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+			s.minLod = 0.0f;
+			s.maxLod = 0.0f;
+			return c.fns.vkCreateSampler(c.vdev, &s, nullptr, &h) == VK_SUCCESS;
+		};
+		if (!g_ssrV1SmpC && !mk(g_ssrV1SmpC, VK_FILTER_LINEAR))
+			return fail("vkCreateSampler(色) 建不出");
+		if (!g_ssrV1SmpD && !mk(g_ssrV1SmpD, VK_FILTER_NEAREST))
+			return fail("vkCreateSampler(深度) 建不出");
+	}
+
+	// --- 5) 描述符: 两个 COMBINED_IMAGE_SAMPLER (binding 0 色 / binding 1 深) ---
+	if (!g_ssrV1Dsl)
+	{
+		VkDescriptorSetLayoutBinding b[2]{};
+		b[0].binding = 0;
+		b[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		b[0].descriptorCount = 1;
+		b[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		b[1] = b[0];
+		b[1].binding = 1;
+		VkDescriptorSetLayoutCreateInfo li{};
+		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		li.bindingCount = 2;
+		li.pBindings = b;
+		if (c.fns.vkCreateDescriptorSetLayout(c.vdev, &li, nullptr, &g_ssrV1Dsl) != VK_SUCCESS)
+			return fail("vkCreateDescriptorSetLayout 建不出");
+	}
+	if (!g_ssrV1Dpool)
+	{
+		VkDescriptorPoolSize ps{};
+		ps.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		ps.descriptorCount = 2;
+		VkDescriptorPoolCreateInfo pi{};
+		pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		pi.maxSets = 1;
+		pi.poolSizeCount = 1;
+		pi.pPoolSizes = &ps;
+		if (c.fns.vkCreateDescriptorPool(c.vdev, &pi, nullptr, &g_ssrV1Dpool) != VK_SUCCESS)
+			return fail("vkCreateDescriptorPool 建不出");
+	}
+	if (!g_ssrV1Set)
+	{
+		VkDescriptorSetAllocateInfo ai{};
+		ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		ai.descriptorPool = g_ssrV1Dpool;
+		ai.descriptorSetCount = 1;
+		ai.pSetLayouts = &g_ssrV1Dsl;
+		if (c.fns.vkAllocateDescriptorSets(c.vdev, &ai, &g_ssrV1Set) != VK_SUCCESS)
+			return fail("vkAllocateDescriptorSets 建不出");
+		// 先填一次 (view 变了会在下面重新填; 未填的 set 绝不能提交)
+	}
+	{
+		VkDescriptorImageInfo di[2]{};
+		di[0].sampler = g_ssrV1SmpC;
+		di[0].imageView = g_ssrV1ViewC;
+		di[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		di[1].sampler = g_ssrV1SmpD;
+		di[1].imageView = g_ssrV1ViewD;
+		di[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		VkWriteDescriptorSet w[2]{};
+		w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		w[0].dstSet = g_ssrV1Set;
+		w[0].dstBinding = 0;
+		w[0].descriptorCount = 1;
+		w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		w[0].pImageInfo = &di[0];
+		w[1] = w[0];
+		w[1].dstBinding = 1;
+		w[1].pImageInfo = &di[1];
+		c.fns.vkUpdateDescriptorSets(c.vdev, 2, w, 0, nullptr);
+	}
+
+	// --- 6) framebuffer (出向图 view / 尺寸变了要重建) ---
+	if (!g_ssrV1Fb)
+	{
+		VkFramebufferCreateInfo fi{};
+		fi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		fi.renderPass = g_ssrV1Rp;
+		fi.attachmentCount = 1;
+		fi.pAttachments = &g_ssrV1ViewOut;
+		fi.width = w;
+		fi.height = h;
+		fi.layers = 1;
+		if (c.fns.vkCreateFramebuffer(c.vdev, &fi, nullptr, &g_ssrV1Fb) != VK_SUCCESS)
+			return fail("vkCreateFramebuffer 建不出");
+	}
+
+	// --- 7) shader / pipeline layout (push constant 48B: p0 相机, p1 模式, p2 尺寸) / pipeline ---
+	if (!g_ssrV1Vs)
+	{
+		VkShaderModuleCreateInfo sm{};
+		sm.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		sm.codeSize = kSsrVertSpvBytes;
+		sm.pCode = kSsrVertSpv;
+		if (c.fns.vkCreateShaderModule(c.vdev, &sm, nullptr, &g_ssrV1Vs) != VK_SUCCESS)
+			return fail("vkCreateShaderModule(ssr.vert) 建不出");
+	}
+	if (!g_ssrV1Fs)
+	{
+		VkShaderModuleCreateInfo sm{};
+		sm.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		sm.codeSize = kSsrFragSpvBytes;
+		sm.pCode = kSsrFragSpv;
+		if (c.fns.vkCreateShaderModule(c.vdev, &sm, nullptr, &g_ssrV1Fs) != VK_SUCCESS)
+			return fail("vkCreateShaderModule(ssr.frag) 建不出");
+	}
+	if (!g_ssrV1Pl)
+	{
+		VkPushConstantRange pcr{};
+		pcr.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		pcr.offset = 0;
+		pcr.size = 48;
+		VkPipelineLayoutCreateInfo li{};
+		li.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		li.setLayoutCount = 1;
+		li.pSetLayouts = &g_ssrV1Dsl;
+		li.pushConstantRangeCount = 1;
+		li.pPushConstantRanges = &pcr;
+		if (c.fns.vkCreatePipelineLayout(c.vdev, &li, nullptr, &g_ssrV1Pl) != VK_SUCCESS)
+			return fail("vkCreatePipelineLayout 建不出");
+	}
+	if (!g_ssrV1Pipe)
+	{
+		VkPipelineShaderStageCreateInfo st[2]{};
+		st[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+		st[0].module = g_ssrV1Vs;
+		st[0].pName = "main";
+		st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+		st[1].module = g_ssrV1Fs;
+		st[1].pName = "main";
+		VkPipelineVertexInputStateCreateInfo vi{};
+		vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+		VkPipelineInputAssemblyStateCreateInfo ia{};
+		ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+		ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+		VkPipelineViewportStateCreateInfo vs{};
+		vs.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+		vs.viewportCount = 1;
+		vs.scissorCount = 1;
+		VkPipelineRasterizationStateCreateInfo rs{};
+		rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+		rs.polygonMode = VK_POLYGON_MODE_FILL;
+		rs.cullMode = VK_CULL_MODE_NONE;
+		rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+		rs.lineWidth = 1.0f;
+		VkPipelineMultisampleStateCreateInfo ms{};
+		ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+		ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+		VkPipelineDepthStencilStateCreateInfo ds{};
+		ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+		ds.depthTestEnable = VK_FALSE;
+		ds.depthWriteEnable = VK_FALSE;
+		VkPipelineColorBlendAttachmentState cba{};
+		cba.colorWriteMask = 0xF;
+		VkPipelineColorBlendStateCreateInfo cb{};
+		cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+		cb.attachmentCount = 1;
+		cb.pAttachments = &cba;
+		VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+		VkPipelineDynamicStateCreateInfo dy{};
+		dy.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+		dy.dynamicStateCount = 2;
+		dy.pDynamicStates = dyn;
+		VkGraphicsPipelineCreateInfo gp{};
+		gp.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+		gp.stageCount = 2;
+		gp.pStages = st;
+		gp.pVertexInputState = &vi;
+		gp.pInputAssemblyState = &ia;
+		gp.pViewportState = &vs;
+		gp.pRasterizationState = &rs;
+		gp.pMultisampleState = &ms;
+		gp.pDepthStencilState = &ds;
+		gp.pColorBlendState = &cb;
+		gp.pDynamicState = &dy;
+		gp.layout = g_ssrV1Pl;
+		gp.renderPass = g_ssrV1Rp;
+		gp.subpass = 0;
+		if (c.fns.vkCreateGraphicsPipelines(c.vdev, VK_NULL_HANDLE, 1, &gp, nullptr, &g_ssrV1Pipe)
+		    != VK_SUCCESS)
+			return fail("vkCreateGraphicsPipelines 建不出");
+	}
+
+	g_ssrV1State = 1;
+	logLine("SSR侦察: [v1] SSR v1 就绪: 全屏三角 + 2 sampler + push constant 48B "
+	        "mode=" + std::to_string(g_ssrV1Mode) +
+	        " fov=" + std::to_string(g_ssrV1Fov) +
+	        " near=" + std::to_string(g_ssrV1Near) +
+	        " far=" + std::to_string(g_ssrV1Far) +
+	        " steps=" + std::to_string(static_cast<int>(g_ssrV1Steps)) +
+	        " dist=" + std::to_string(static_cast<int>(g_ssrV1Dist)) +
+	        " strength=" + std::to_string(g_ssrV1Strength) +
+	        " — 输入=324色+520深度, 输出=出向镜像(下帧特征B 进 585)");
+	return true;
+}
+
+// 2d 原样拷 (v0.18.5 及以前的出向命令, 逐字节行为不变)
+static bool ssrV1RecordCopy(PocbCtx& c, unsigned w, unsigned h)
+{
+	auto barrier = [&](VkImage img, VkPipelineStageFlags ss, VkAccessFlags sa,
+	                   VkPipelineStageFlags ds, VkAccessFlags da, VkImageLayout ol,
+	                   VkImageLayout nl) {
+		VkImageMemoryBarrier imb{};
+		imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		imb.srcAccessMask = sa;
+		imb.dstAccessMask = da;
+		imb.oldLayout = ol;
+		imb.newLayout = nl;
+		imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.image = img;
+		imb.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		c.fns.vkCmdPipelineBarrier(g_ssrVkCmdOut, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &imb);
+	};
+	// 入向 GENERAL → TRANSFER_SRC: srcAccess=MEMORY_WRITE 把 D3D11 上一帧的跨 API 写算进去
+	barrier(g_ssrVkImg, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+	        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+	        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	barrier(g_ssrVkImgOut, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT,
+	        VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+	        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	{
+		VkImageCopy icp{};
+		icp.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+		icp.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+		icp.extent = VkExtent3D{w, h, 1};
+		c.fns.vkCmdCopyImage(g_ssrVkCmdOut, g_ssrVkImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		                     g_ssrVkImgOut, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &icp);
+	}
+	// 入向复原 GENERAL (下一帧 D3D11 要直接往里 CopyResource) + 出向交接 GENERAL
+	barrier(g_ssrVkImg, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT,
+	        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+	barrier(g_ssrVkImgOut, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT,
+	        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+	return true;
+}
+
+// v1 render pass 版: 色/深 转 SHADER_READ_ONLY → 全屏三角 → 两边复原 GENERAL
+static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
+{
+	auto barrier = [&](VkImage img, VkImageAspectFlags aspect, VkPipelineStageFlags ss,
+	                   VkAccessFlags sa, VkPipelineStageFlags ds, VkAccessFlags da,
+	                   VkImageLayout ol, VkImageLayout nl) {
+		VkImageMemoryBarrier imb{};
+		imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		imb.srcAccessMask = sa;
+		imb.dstAccessMask = da;
+		imb.oldLayout = ol;
+		imb.newLayout = nl;
+		imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.image = img;
+		imb.subresourceRange = {aspect, 0, 1, 0, 1};
+		c.fns.vkCmdPipelineBarrier(g_ssrVkCmdOut, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &imb);
+	};
+	// ① 色: GENERAL → SHADER_READ_ONLY (跨 API 写用 MEMORY_WRITE + ALL_COMMANDS 兜住)
+	barrier(g_ssrVkImg, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+	        VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+	        VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+	        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	// ② 深: 常驻 GENERAL (KMT 建图时的初转把它转过去了); 初转没跑过就按 UNDEFINED 处理。
+	//    组合深度/模板格式的布局迁移**必须**同时带 DEPTH 与 STENCIL 两位 (规范要求,
+	//    与 KMT 读回命令同口径) —— 采样用的 view 才只取 depth aspect, 两回事。
+	barrier(g_ssrKmtImg, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+	        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+	        g_ssrKmtCanRead ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
+	        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+	VkRenderPassBeginInfo rb{};
+	rb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	rb.renderPass = g_ssrV1Rp;
+	rb.framebuffer = g_ssrV1Fb;
+	rb.renderArea.offset = {0, 0};
+	rb.renderArea.extent = VkExtent2D{w, h};
+	rb.clearValueCount = 0; // loadOp = DONT_CARE, 不需要 clearValue
+	c.fns.vkCmdBeginRenderPass(g_ssrVkCmdOut, &rb, VK_SUBPASS_CONTENTS_INLINE);
+	c.fns.vkCmdBindPipeline(g_ssrVkCmdOut, VK_PIPELINE_BIND_POINT_GRAPHICS, g_ssrV1Pipe);
+	c.fns.vkCmdBindDescriptorSets(g_ssrVkCmdOut, VK_PIPELINE_BIND_POINT_GRAPHICS, g_ssrV1Pl, 0, 1,
+	                              &g_ssrV1Set, 0, nullptr);
+	VkViewport vp{};
+	vp.x = 0.0f;
+	vp.y = 0.0f;
+	vp.width = static_cast<float>(w);
+	vp.height = static_cast<float>(h);
+	vp.minDepth = 0.0f;
+	vp.maxDepth = 1.0f;
+	c.fns.vkCmdSetViewport(g_ssrVkCmdOut, 0, 1, &vp);
+	VkRect2D sc{};
+	sc.offset = {0, 0};
+	sc.extent = VkExtent2D{w, h};
+	c.fns.vkCmdSetScissor(g_ssrVkCmdOut, 0, 1, &sc);
+	{
+		// 相机参数在这里算好塞进 push constant: 着色器只做反推 (见 ssr.frag viewZ)
+		struct
+		{
+			float p0[4];
+			float p1[4];
+			float p2[4];
+		} pc;
+		pc.p0[0] = std::tan(g_ssrV1Fov * 3.14159265358979f / 360.0f); // tan(垂直FOV/2)
+		pc.p0[1] = static_cast<float>(w) / static_cast<float>(h ? h : 1);
+		pc.p0[2] = g_ssrV1Near;
+		pc.p0[3] = g_ssrV1Far;
+		pc.p1[0] = static_cast<float>(g_ssrV1Mode);
+		pc.p1[1] = g_ssrV1Steps;
+		pc.p1[2] = g_ssrV1Strength;
+		pc.p1[3] = g_ssrV1Dist * g_ssrV1Near; // 最大行进距离: **以 near 为单位** (尺度自洽: 反推
+		                                       // 只有"近平面尺度"自由度, 乘 near 后与 ssr.near 取值无关)
+		pc.p2[0] = static_cast<float>(w);
+		pc.p2[1] = static_cast<float>(h);
+		pc.p2[2] = g_ssrV1Rev; // 反向深度开关 (ssr.rev=1 时着色器把深度翻回标准口径)
+		pc.p2[3] = 0.0f;
+		c.fns.vkCmdPushConstants(g_ssrVkCmdOut, g_ssrV1Pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+		                         sizeof(pc), &pc);
+	}
+	c.fns.vkCmdDraw(g_ssrVkCmdOut, 3, 1, 0, 0);
+	c.fns.vkCmdEndRenderPass(g_ssrVkCmdOut);
+
+	// ③ 两边复原 GENERAL: 色给下帧 D3D11 的 CopyResource 目的地, 深给 KMT 读回的 oldLayout
+	barrier(g_ssrVkImg, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+	        VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+	        VK_ACCESS_MEMORY_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	        VK_IMAGE_LAYOUT_GENERAL);
+	barrier(g_ssrKmtImg, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+	        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT,
+	        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+	return true;
+}
+
+// 录出向命令 (唯一入口): v1 建得成就录 render pass, 否则录 2d 原样拷。
+// 返回 false = vkBegin/vkEnd 失败 (调用方按致命处理, 出向图一并销毁重建)。
+static bool ssrV1RecordOut(PocbCtx& c, unsigned w, unsigned h)
+{
+	bool v1 = false;
+	if (g_ssrV1On.load(std::memory_order_relaxed) && g_ssrV1State != 2)
+		v1 = ssrV1Build(c, w, h); // 幂等: 资源齐=true; 深度没就绪/关闸=false
+	VkCommandBufferBeginInfo cbb{};
+	cbb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	if (c.fns.vkBeginCommandBuffer(g_ssrVkCmdOut, &cbb) != VK_SUCCESS)
+	{
+		g_ssrV1RecSig = 0; // 录失败 ⇒ 下帧 dirty 恒真, 会重试
+		return false;
+	}
+	const bool ok = v1 ? ssrV1RecordRender(c, w, h) : ssrV1RecordCopy(c, w, h);
+	if (!ok || c.fns.vkEndCommandBuffer(g_ssrVkCmdOut) != VK_SUCCESS)
+	{
+		g_ssrV1RecSig = 0;
+		return false;
+	}
+	g_ssrV1RecSrc = v1 ? g_ssrVkImg : VK_NULL_HANDLE;
+	g_ssrV1RecDep = v1 ? g_ssrKmtImg : VK_NULL_HANDLE;
+	g_ssrV1RecSig = ssrV1Sig(); // 记下这次录制的依赖集合 (纯拷贝 = 0)
+	return true;
 }
 
 // 每帧: 提交一次 Vulkan 命令 → fence 等待 → 读回像素 → 拷进 backbuffer

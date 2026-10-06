@@ -49,32 +49,42 @@ function Emit-Array([string]$name, [string]$spvPath) {
     return $sb.ToString()
 }
 
-$vertSrc = Join-Path $shDir "pocb.vert"
-$fragSrc = Join-Path $shDir "pocb.frag"
-foreach ($f in @($vertSrc, $fragSrc)) { if (-not (Test-Path $f)) { throw "缺 GLSL 源: $f" } }
+$pairs = @(
+    @{ src = "pocb.vert"; stage = "vert"; name = "PocbVert" },
+    @{ src = "pocb.frag"; stage = "frag"; name = "PocbFrag" },
+    @{ src = "ssr.vert"; stage = "vert"; name = "SsrVert" },
+    @{ src = "ssr.frag"; stage = "frag"; name = "SsrFrag" }
+)
 
-$vertSpv = Join-Path $shDir "pocb.vert.spv"
-$fragSpv = Join-Path $shDir "pocb.frag.spv"
-Compile-Spv $vertSrc "vert" $vertSpv
-Compile-Spv $fragSrc "frag" $fragSpv
+$spvList = @()
+foreach ($p in $pairs) {
+    $s = Join-Path $shDir $p.src
+    if (-not (Test-Path $s)) { throw "缺 GLSL 源: $s" }
+    $o = Join-Path $shDir ($p.src + ".spv")
+    Compile-Spv $s $p.stage $o
+    $spvList += @{ name = $p.name; path = $o }
+}
 
 $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine("// pocb_shaders.h — 由 tools\make_shaders.ps1 生成, 请勿手改")
 [void]$sb.AppendLine("//")
-[void]$sb.AppendLine("// 源: src\poc-presenter\shaders\pocb.vert + pocb.frag (GLSL 450 -> SPIR-V 1.x)")
+[void]$sb.AppendLine("// 源: src\poc-presenter\shaders\*.vert/*.frag (GLSL 450 -> SPIR-V 1.x)")
+[void]$sb.AppendLine("//      pocb.* = PoC-B 注入三角; ssr.* = SSR v1 全屏三角 + 采样 (v0.18.6)")
 [void]$sb.AppendLine("// 再生成: powershell -NoProfile -ExecutionPolicy Bypass -File tools\make_shaders.ps1")
 [void]$sb.AppendLine("//")
-[void]$sb.AppendLine("// SPIR-V 规范要求 module 大小是 4 的倍数, 且 pCode 按 uint32 对齐 → 这里存字。")
+[void]$sb.AppendLine("// SPIR-V 规范要求 module 大小是 4 的倍数, 且 pCode 按 uint32 对齐 => 这里存字。")
 [void]$sb.AppendLine("#pragma once")
 [void]$sb.AppendLine("")
-[void]$sb.AppendLine((Emit-Array "kPocbVertSpv" $vertSpv))
-[void]$sb.AppendLine((Emit-Array "kPocbFragSpv" $fragSpv))
-[void]$sb.AppendLine(("static const unsigned int kPocbVertSpvBytes = sizeof(kPocbVertSpv);"))
-[void]$sb.AppendLine(("static const unsigned int kPocbFragSpvBytes = sizeof(kPocbFragSpv);"))
+foreach ($e in $spvList) {
+    [void]$sb.AppendLine((Emit-Array ("k" + $e.name + "Spv") $e.path))
+}
+foreach ($e in $spvList) {
+    [void]$sb.AppendLine(("static const unsigned int k" + $e.name + "SpvBytes = sizeof(k" + $e.name + "Spv);"))
+}
 
 # UTF-8 无 BOM (内容为 ASCII + 注释), 与 MSVC /utf-8 兼容
 [System.IO.File]::WriteAllText($OutHeader, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
 
 "OK: $OutHeader"
-"    vert.spv = $((Get-Item $vertSpv).Length) B, frag.spv = $((Get-Item $fragSpv).Length) B"
+foreach ($e in $spvList) { "    $(Split-Path $e.path -Leaf) = $((Get-Item $e.path).Length) B" }
 "    头文件行数 = $((Get-Content $OutHeader).Count)"

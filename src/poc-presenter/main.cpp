@@ -492,6 +492,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <fstream>
@@ -781,6 +782,39 @@ bool iniFlag(const char* key, bool def)
 			out = !(ch == '0' || ch == 'f' || ch == 'F' || ch == 'n' || ch == 'N');
 			break;
 		}
+	}
+	return out;
+}
+
+// v0.18.6: 数值型 ini (ssr.fov / ssr.near / ssr.far / ssr.steps / ssr.strength / ssr.dist /
+// ssr.mode) —— 与 iniFlag 同一份文件、同一套解析口径 (键小写比较, 允许 "key = value"、
+// 行尾 "#..." 注释)。ini 启动只读一次 (调用方在 probeIniRead 一次性块里)。
+double iniNum(const char* key, double def)
+{
+	std::ifstream f(pluginDir() + "\\poc-presenter.ini");
+	std::string line;
+	double out = def;
+	while (std::getline(f, line))
+	{
+		const size_t eq = line.find('=');
+		if (eq == std::string::npos)
+			continue;
+		std::string k = lowerCopy(line.substr(0, eq));
+		while (!k.empty() && std::isspace(static_cast<unsigned char>(k.back())))
+			k.pop_back();
+		if (k != key)
+			continue;
+		std::string v = line.substr(eq + 1);
+		const size_t cm = v.find_first_of("#;");
+		if (cm != std::string::npos)
+			v.erase(cm);
+		const size_t b0 = v.find_first_not_of(" \t\r");
+		if (b0 == std::string::npos)
+			continue;
+		v.erase(0, b0);
+		const size_t e0 = v.find_last_not_of(" \t\r");
+		v.erase(e0 + 1);
+		out = std::atof(v.c_str());
 	}
 	return out;
 }
@@ -1250,6 +1284,20 @@ bool  g_ssrOutReady = false;             // VK 已填好 → 本帧特征B 可�
 long  g_ssrOutN = 0;                     // 2d 回写 585 累计次数
 static long  g_ssrOutChkN = 0;           // 出向读回自校验节流 (前3次 + 每600次, 同 2c)。
                                          // C-7: 计数 = 回写事件数, 进门先 ++ 再判节流
+
+// ---- SSR v1 shader 采样 (v0.18.6, docs/05 D4 / Step 3; R4 已按"反推 inv(投影)"定案) ----
+// 输出仍走 2d 出向回写 (1 帧延迟, 零跨 API 栅栏), 变的只是**出向内容**:
+// 2d 是"入向原样拷过去", v1 是"VK 跑一次全屏三角: 采 324 + 520 深度, 视图空间 ray march
+// 出屏幕空间反射, fresnel 合成后写出向镜像"。逃生门 = ini ssr.v1 (默认 0)。
+std::atomic<bool> g_ssrV1On{false}; // ini ssr.v1
+int   g_ssrV1Mode = 1;              // ini ssr.mode  0=透传(≈2d 原行为) 1=SSR
+float g_ssrV1Fov = 65.0f;           // ini ssr.fov   垂直视场角 (度) —— R4 反推 inv(投影) 用
+float g_ssrV1Near = 10.0f;          // ini ssr.near  视图单位, 与游戏投影不符时反射比例会偏
+float g_ssrV1Far = 100000.0f;       // ini ssr.far
+float g_ssrV1Steps = 32.0f;         // ini ssr.steps ray march 步数 (越大越准也越贵)
+float g_ssrV1Strength = 1.0f;       // ini ssr.strength 反射合成强度 (fresnel 之上再乘)
+float g_ssrV1Dist = 500.0f;         // ini ssr.dist  ray march 最大距离 (**以 near 为单位**)
+float g_ssrV1Rev = 0.0f;            // ini ssr.rev   游戏用反向深度 (近平面->1) 时置 1
 
 static SsrCtxEntry* lookupSsrCtx(void** vtbl)
 {
@@ -2760,6 +2808,56 @@ void installProbeOn(ID3D11Device* dev)
 		else if (g_ssrVkOutOn.load(std::memory_order_relaxed))
 			logLine("SSR侦察: ini ssr.vkout=1 但 ssr.shared=0 或 ssr=0 → 出向不生效 "
 			        "(需要 ssr=1 + ssr.shared=1 是总门)");
+		// ---- SSR v1 shader 采样 (v0.18.6): 出向内容从"原样拷"换成"跑一次全屏三角" ----
+		g_ssrV1On.store(iniFlag("ssr.v1", false), std::memory_order_relaxed);
+		g_ssrV1Mode = static_cast<int>(iniNum("ssr.mode", 1.0));
+		g_ssrV1Fov = static_cast<float>(iniNum("ssr.fov", 65.0));
+		g_ssrV1Near = static_cast<float>(iniNum("ssr.near", 10.0));
+		g_ssrV1Far = static_cast<float>(iniNum("ssr.far", 100000.0));
+		g_ssrV1Steps = static_cast<float>(iniNum("ssr.steps", 32.0));
+		g_ssrV1Strength = static_cast<float>(iniNum("ssr.strength", 1.0));
+		g_ssrV1Dist = static_cast<float>(iniNum("ssr.dist", 500.0));
+		g_ssrV1Rev = static_cast<float>(iniNum("ssr.rev", 0.0));
+		if (g_ssrV1Near < 0.01f || g_ssrV1Far <= g_ssrV1Near)
+		{
+			logLine("SSR侦察: ssr.near/ssr.far 不合法 (" + std::to_string(g_ssrV1Near) +
+			        " / " + std::to_string(g_ssrV1Far) + ") → 回退 10 / 100000");
+			g_ssrV1Near = 10.0f;
+			g_ssrV1Far = 100000.0f;
+		}
+		if (g_ssrV1Steps < 4.0f) // 着色器 stepLen = maxT / steps, 0 会除零
+		{
+			logLine("SSR侦察: ssr.steps 不合法 (" + std::to_string(g_ssrV1Steps) + ") → 回退 32");
+			g_ssrV1Steps = 32.0f;
+		}
+		if (g_ssrV1Dist < 1.0f)
+		{
+			logLine("SSR侦察: ssr.dist 不合法 (" + std::to_string(g_ssrV1Dist) + ") → 回退 500");
+			g_ssrV1Dist = 500.0f;
+		}
+		if (g_ssrV1Rev != 0.0f && g_ssrV1Rev != 1.0f)
+			g_ssrV1Rev = g_ssrV1Rev > 0.5f ? 1.0f : 0.0f;
+		if (g_ssrV1Strength < 0.0f)
+			g_ssrV1Strength = 0.0f;
+		if (g_ssrV1Strength > 4.0f)
+			g_ssrV1Strength = 4.0f;
+		if (g_ssrV1On.load(std::memory_order_relaxed) &&
+		    g_ssrVkOutOn.load(std::memory_order_relaxed) &&
+		    g_ssrSharedOn.load(std::memory_order_relaxed) &&
+		    g_ssrOn.load(std::memory_order_relaxed))
+			logLine("SSR侦察: ini ssr.v1=1 → 出向内容改由 VK 全屏三角产出 (采 324+520, "
+			        "视图空间 ray march) mode=" + std::to_string(g_ssrV1Mode) +
+			        " fov=" + std::to_string(g_ssrV1Fov) + " near=" +
+			        std::to_string(g_ssrV1Near) + " far=" + std::to_string(g_ssrV1Far) +
+			        " steps=" + std::to_string(static_cast<int>(g_ssrV1Steps)) +
+			        " dist=" + std::to_string(static_cast<int>(g_ssrV1Dist)) +
+			        " strength=" + std::to_string(g_ssrV1Strength) +
+			        " rev=" + std::to_string(static_cast<int>(g_ssrV1Rev)) +
+			        "; dist 单位 = near; 逃生门 ssr.v1=0 (R4 = 反推 inv(投影), "
+			        "倒影位置/比例不对先调 fov, 深度反向先试 ssr.rev=1)");
+		else if (g_ssrV1On.load(std::memory_order_relaxed))
+			logLine("SSR侦察: ini ssr.v1=1 但 ssr/ssr.shared/ssr.vkout 有没开的 → v1 不生效 "
+			        "(需要 ssr=1 + ssr.shared=1 + ssr.vkout=1)");
 	}
 	if (!g_probeOn.load(std::memory_order_relaxed))
 	{
@@ -4472,7 +4570,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.5 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) + v0.18.5: 路线1' 导入分支落地(深度改单独SHARED老式handle→VK KMT 直入, [2d-5] 深度跨API三候选比对) ====");
+	logLine("==== poc-presenter v0.18.6 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) + v0.18.5: 路线1' 导入分支落地(深度改单独SHARED老式handle→VK KMT 直入, [2d-5] 深度跨API三候选比对) + v0.18.6: SSR v1 shader 采样(ssr.vert/ssr.frag 全屏三角, descriptor+2 sampler+push constant 相机, 出向由 2d 原样拷改为 shader 产出, R4=反推inv投影, 门 ssr.v1/ssr.mode/ssr.fov/ssr.near/ssr.far/ssr.steps/ssr.dist/ssr.strength) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

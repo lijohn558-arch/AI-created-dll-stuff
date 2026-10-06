@@ -71,7 +71,8 @@
 	X(vkCreateDescriptorSetLayout) X(vkDestroyDescriptorSetLayout) \
 	X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) \
 	X(vkAllocateDescriptorSets) X(vkFreeDescriptorSets) X(vkUpdateDescriptorSets) \
-	X(vkCmdBindDescriptorSets) // P1-1: 能分配也能释放单 set (按材质索引换绑定时不留泄漏点)
+	X(vkCmdBindDescriptorSets) X(vkCmdPushConstants) // P1-1: 能分配也能释放单 set (按材质索引换绑定时不留泄漏点) \
+	                                                   // v0.18.6: SSR v1 相机参数走 push constant (免掉一张 UBO)
 
 #define POCB_DECL_FN(n) PFN_##n n = nullptr;
 
@@ -193,4 +194,14 @@ namespace pocmain
 	extern HANDLE                  g_ssrOutHC;        // 出向镜像 NT handle (VK 导入源)
 	extern bool                    g_ssrOutReady;     // VK 已把结果填进出向镜像
 	extern long                    g_ssrOutN;         // 已回写 585 的累计次数
+	// ---- SSR v1 shader 采样 (v0.18.6, docs/05 D4 / Step3 / R4) ----
+	extern std::atomic<bool>       g_ssrV1On;         // ini ssr.v1 (默认 0 = 只上代码不开跑)
+	extern int                     g_ssrV1Mode;       // ini ssr.mode  0=透传 1=SSR (R4 之外唯一的观感开关)
+	extern float                   g_ssrV1Fov;        // ini ssr.fov   垂直视场角 (度) —— R4 反推用
+	extern float                   g_ssrV1Near;       // ini ssr.near
+	extern float                   g_ssrV1Far;        // ini ssr.far
+	extern float                   g_ssrV1Steps;      // ini ssr.steps ray march 步数
+	extern float                   g_ssrV1Strength;   // ini ssr.strength 反射合成强度
+	extern float                   g_ssrV1Dist;       // ini ssr.dist  ray march 最大距离 (以 near 为单位)
+	extern float                   g_ssrV1Rev;        // ini ssr.rev   反向深度开关 (近->1 时置 1)
 }
