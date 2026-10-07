@@ -188,6 +188,13 @@ namespace pocmain
 	extern bool                    g_ssrInQLive;      // 已 End、还没等到 (一次性消费)
 	extern long                    g_ssrInGateN;      // 闸等到的累计次数
 	extern double                  g_ssrInGateMs;     // 闸累计等待 ms
+	// ---- v0.18.8 正解B: 段后水深镜像 (第5张) —— 法线/反射原点输入, 520 只当行进层级 ----
+	extern std::atomic<bool>       g_ssrWDepOn;       // ini ssr.wdep (默认 1, 只关自己)
+	extern ID3D11Texture2D*        g_ssrWDepTex;      // 段后水深镜像 (源 461, 特征B 后首次换绑拷)
+	extern HANDLE                  g_ssrWDepH;        // 镜像 handle (KMT 或 NT, 与深度镜像同轴)
+	extern bool                    g_ssrWDepKmt;      // true = 老式 SHARED → VK 走 KMT handleType
+	extern ID3D11Query*            g_ssrWDepQ;        // 第二条 EVENT (排在 2c 闸之后, 2c 等不到它)
+	extern bool                    g_ssrWDepQLive;    // 已 End、还没等到 (一次性消费)
 	// ---- 2d-1 出向回写 (v0.18.0) ----
 	extern std::atomic<bool>       g_ssrVkOutOn;      // ini ssr.vkout (2d 出向独立逃生门)
 	extern ID3D11Texture2D*        g_ssrOutTexC;      // 出向 SHARED 镜像 (desc 照抄 324 ≡ 585)
@@ -207,7 +214,7 @@ namespace pocmain
 	// ---- v0.18.7: A 平滑批 (倒影破碎) + B 水色保留 (第4张底色镜像) ----
 	extern int                     g_ssrV1Smooth;     // ini ssr.smooth 法线差分邻域 (px, 1..16)
 	extern int                     g_ssrV1Blur;       // ini ssr.blur   反射 5tap 空间平滑 0/1
-	extern int                     g_ssrV1Debug;      // ini ssr.debug  0 正常 / 1 法线 / 2 命中 / 3 深度
+	extern int                     g_ssrV1Debug;      // ini ssr.debug  0 正常/1 法线/2 命中/3 深度/4 段后水深/5 水面像素
 	extern std::atomic<bool>       g_ssrBaseOn;       // ini ssr.base585 底色镜像独立门 (默认 1)
 	extern ID3D11Texture2D*        g_ssrBaseTex;      // 底色 SHARED 镜像 (585 段16 后 = 含水画面)
 	extern HANDLE                  g_ssrBaseH;        // 底色镜像 NT handle (VK 导入源)

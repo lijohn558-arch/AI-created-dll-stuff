@@ -1271,6 +1271,26 @@ long  g_ssrInGateN = 0;              // 等到次数
 double g_ssrInGateMs = 0;            // 累计等待 ms
 static bool g_ssrInGateWarn = false; // 创建失败只打一次
 
+// ---- v0.18.8 正解B (docs/02 §14.24 / docs/05 D4 补遗): 段后水深镜像 (第5张) ----
+// 水面像素的深度在**段16 之前的快照 520** 里是河床 (水那时还没画) ⇒ 逐像素差分拿到的法线
+// = 河床三角面法线 ⇒ 倒影碎成"不规则多边形拼图" (v0.18.7 实跑归因, docs/02 §14.22.1)。
+// 段17 那笔"深度测关写开"的水体并回会把**真·水面深度**写进源 461 ⇒ 拷一份当法线输入,
+// 520 照旧只当 ray march 的层级 (否则射线一出发就打在自己脚下的水面上, 一个也命中不了)。
+// 拷贝时机 = 特征B 之后的**第一次换绑** (段18 的 ev39585): 段17 那笔 draw 已排完, 还没走到
+// UI 中途 ClearDS (放到 Present 再拷会被清成全 1.0)。源 desc 变了 (换分辨率) 自动重建。
+std::atomic<bool> g_ssrWDepOn{true};    // ini ssr.wdep (默认 1) —— 只关自己
+ID3D11Texture2D* g_ssrWDepTex = nullptr; // 段后水深镜像 (desc 照抄源 461)
+HANDLE g_ssrWDepH = nullptr;             // 老式 handle(KMT) 或 NT handle (与深度镜像同轴)
+bool g_ssrWDepKmt = false;               // true = 老式 SHARED → KMT (本机深度走的那条)
+ID3D11Resource* g_ssrWDepSrc = nullptr;  // 源 461 活引用 (特征B 时绑定的那个 DSV 资源)
+ID3D11Query* g_ssrWDepQ = nullptr;       // EVENT: 拷完 End, ssrInGateWait 提交 VK 前等掉
+bool  g_ssrWDepQLive = false;            // 已 End、还没等到 (两侧共享, 一次性消费)
+static long  g_ssrWDepN = 0;             // 拷贝计数 (前8条 + 每128条打日志)
+static bool  g_ssrWDepArm = false;       // 特征B 置位 = 段17 已绑, 下一次换绑即可拷
+static bool  g_ssrWDepFire = false;      // 本帧待拷 (hook 在 real() 后执行)
+static bool  g_ssrWDepOff = false;       // 建不出 / desc 不一致 ⇒ 只关自己, 不再重试
+static bool  g_ssrWDepWarn = false;      // 失败日志只打一次
+
 // ---- Step 2d-1 (v0.18.0, docs/05 D3): 出向回写 —— VK 渲完的结果拷进 585 ----
 // 第 3 张 SHARED|NTHANDLE 镜像, desc 照抄 324 (= 585 的 desc, 2b 的 [desc一致] 已证)
 // → VK 导入后每帧 Present 拷一次 → **下一帧**特征B CopyResource(出向镜像 → 585)。
@@ -1300,7 +1320,7 @@ float g_ssrV1Dist = 500.0f;         // ini ssr.dist  ray march 最大距离 (**�
 float g_ssrV1Rev = 0.0f;            // ini ssr.rev   游戏用反向深度 (近平面->1) 时置 1
 int   g_ssrV1Smooth = 4;            // ini ssr.smooth 法线差分邻域 (px) —— v0.18.7 抗"倒影破碎"
 int   g_ssrV1Blur = 1;              // ini ssr.blur   反射色 5-tap 空间平滑 0/1
-int   g_ssrV1Debug = 0;             // ini ssr.debug  0 正常 / 1 法线 / 2 命中 / 3 深度
+int   g_ssrV1Debug = 0;             // ini ssr.debug  0 正常 / 1 法线 / 2 命中 / 3 深度 / 4 段后水深 / 5 水面像素
 
 // ---- v0.18.7 B 水色保留 (docs/05 D4 补遗): 585 在被出向回写覆盖**之前**抢一份当合成底色 ----
 // 为什么必须有它: 合成底色原先 = 324 快照 = 段16 (水体 pass) **之前**的画面, 里面没画水;
@@ -1410,6 +1430,15 @@ static bool ssrWatch(SsrCtxEntry* e, ID3D11DeviceContext* ctx)
 static void ssrReconOm(UINT n, ID3D11RenderTargetView* const* ppRTV, ID3D11DepthStencilView* pDSV)
 {
 	g_ssrFOm.fetch_add(1, std::memory_order_relaxed);
+	// ---- v0.18.8 B: 特征B (段16→段17 换绑) 之后的**第一次换绑** = 段17 那笔 draw 已排完 ----
+	// 放在最顶上 (早于一切 early return): 段17 与段18 之间的换绑才是要的时点, 中间若夹一条
+	// NumViews=0 的解绑也一样成立 (段17 的 draw 已经排进队列)。置 fire 后由 hook 在 real()
+	// 之后执行拷贝 —— 拷的源 = 下面特征B 里存下的那个 DSV 资源 (真机 461)。
+	if (g_ssrWDepArm && !g_ssrWDepFire)
+	{
+		g_ssrWDepArm = false;
+		g_ssrWDepFire = true;
+	}
 	// 每次换绑先假定"强特征通道已中断", 解析成功且确为强特征才回置 true —— 特征A 靠它
 	// 判断 clear 是否落在强特征通道进行期间 (真机 585 整帧不被清, 见 ssrReconClear)
 	const bool wasStrong = g_ssrInStrong;
@@ -1504,6 +1533,30 @@ static void ssrReconOm(UINT n, ID3D11RenderTargetView* const* ppRTV, ID3D11Depth
 		if (g_ssrSharedOn.load(std::memory_order_relaxed) && g_ssrReflRt &&
 		    g_ssrMainHdr && g_ssrMainHdr != g_ssrReflRt && g_ssrSceneRes)
 			g_ssrInPending = true;
+		// ---- v0.18.8 B: 记下段17 的 DSV 资源 (真机 461) 并 arm 下一次换绑去拷段后水深 ----
+		// 只在这里存 (段17 的 pDSV 才是"会写水面深度"的那块); 上一帧若没等到换绑就把 fire 清掉,
+		// 免得下一帧开头拿**旧帧**的水深去拷 (那份已被本帧的清屏/重画作废)。
+		if (g_ssrWDepOn.load(std::memory_order_relaxed) && pDSV)
+		{
+			ID3D11Resource* r = nullptr;
+			pDSV->GetResource(&r); // ID3D11View::GetResource 返回 void, 出参由被调方 AddRef
+			if (r)
+			{
+				if (g_ssrWDepSrc != r)
+				{
+					if (g_ssrWDepSrc)
+						g_ssrWDepSrc->Release();
+					g_ssrWDepSrc = r; // 活引用: 换绑换缓冲才换, 拷贝时一直可用
+				}
+				else
+					r->Release();
+			}
+			if (g_ssrWDepSrc)
+			{
+				g_ssrWDepFire = false;
+				g_ssrWDepArm = true;
+			}
+		}
 		const long k = ++g_ssrBLogN;
 		if (k <= 16 || (k % 64) == 0)
 			logLine("SSR侦察: 特征B(换绑)#" + std::to_string(k) + " 帧=" + std::to_string(fr) +
@@ -2510,6 +2563,106 @@ static bool copyResDescChecked(ID3D11DeviceContext* ctx, ID3D11Resource* dst,
 	return same;
 }
 
+// ---- v0.18.8 B: 段后水深 (源 461) → 第5张镜像 + EVENT 闸 ----
+// 调用点 = hookedOMSetRenderTargets 的 real() 之后, 且 g_ssrWDepFire 已置 (见 ssrReconOm):
+// 即特征B (段16→段17 换绑) 之后的**第一次换绑** —— 段17 那笔 depth 只写不测的水体并回已排完,
+// 源里是**真·水面深度**, 且还没走 UI 中途 ClearDS (晚到 Present 会被清成全 1.0)。
+// 与 2c 入向同一手法: 先比 desc 再拷 (CopyResource 失败不给码), 拷完 End 一条 EVENT, 由
+// renderer 侧 ssrInGateWait 在提交任何读水深的 VK 命令前等掉 (2c 那道闸排在本拷贝之前, 等不到它)。
+static void ssrWDepQueue(ID3D11DeviceContext* ctx)
+{
+	if (!g_ssrWDepOn.load(std::memory_order_relaxed) || g_ssrWDepOff || !ctx || !g_ssrWDepSrc)
+		return;
+	ID3D11Device* dev = nullptr;
+	ctx->GetDevice(&dev);
+	if (!dev)
+		return;
+	D3D11_TEXTURE2D_DESC sd{};
+	if (!ssrResObj(g_ssrWDepSrc, &sd, nullptr)) // 源 QI 不出 ID3D11Texture2D ⇒ 换不到 desc, 只能关
+	{
+		dev->Release();
+		return;
+	}
+	// 源 desc 变了 (换分辨率 / 换深度缓冲) ⇒ 退掉旧镜像按新源重建。VK 侧靠 handle 变化
+	// (g_ssrWDepH 变) 自动摘 view + 重导入, 与底色图同一套自愈路径。
+	if (g_ssrWDepTex)
+	{
+		D3D11_TEXTURE2D_DESC md{};
+		g_ssrWDepTex->GetDesc(&md);
+		if (!descEqual(md, sd))
+		{
+			logLine("SSR侦察: [wdep] 源 desc 变了 (" + descStr(md) + " → " + descStr(sd) +
+			        ") → 水深镜像重建");
+			g_ssrWDepTex->Release();
+			g_ssrWDepTex = nullptr;
+			g_ssrWDepH = nullptr; // 老式 handle 归资源所有, 不 CloseHandle (与 2c 同口径)
+			g_ssrWDepKmt = false;
+		}
+	}
+	if (!g_ssrWDepTex)
+	{
+		// 名字必须含"深度": ssrInMakeShared 的老式 SHARED 兜底只对深度源开 (与 520 同一道)
+		if (!ssrInMakeShared(dev, g_ssrWDepSrc, &g_ssrWDepTex, &g_ssrWDepH, "段后深度461",
+		                     &g_ssrWDepKmt))
+		{
+			g_ssrWDepOff = true;
+			logLine("SSR侦察: [wdep] 段后水深镜像建不出 → 水深法线关自己 (法线退回 520 河床 "
+			        "= v0.18.7 行为, 倒影仍是多边形拼图; 只关自己, 底色/行进/2d 全不受影响)");
+			dev->Release();
+			return;
+		}
+		logLine("SSR侦察: [wdep] 段后水深镜像就绪: 源=0x" + hexOf(g_ssrWDepSrc) + " → 镜像=0x" +
+		        hexOf(g_ssrWDepTex) + " handle=0x" + hexOf(g_ssrWDepH) +
+		        (g_ssrWDepKmt ? " [KMT/老式SHARED]" : " [NT]") + " — 本帧起当法线/原点输入");
+	}
+	// desc 预检: 按 CopyResource 合同只比 项/尺寸/格式/mips/数组/采样 (BindFlags 不比 ——
+	// 镜像 desc 照抄源建, 若因 SHARED 放宽过也不影响拷本身)。不一致 = 静默丢弃, 必须先拦。
+	{
+		D3D11_TEXTURE2D_DESC xd{};
+		g_ssrWDepTex->GetDesc(&xd);
+		if (!descEqual(xd, sd))
+		{
+			if (!g_ssrWDepWarn)
+			{
+				g_ssrWDepWarn = true;
+				logLine("SSR侦察: [wdep] 源/镜像 desc 不一致 (镜像=" + descStr(xd) +
+				        " 源=" + descStr(sd) + ") → 水深拷贝停用 (法线退回 520)");
+			}
+			g_ssrWDepOff = true;
+			dev->Release();
+			return;
+		}
+	}
+	const long k = ++g_ssrWDepN;
+	g_ssrSelfCopy = true; // 自己的拷贝不回灌进 2a 的 COPY= 计数与身份学习 (与 2b/2c 同法)
+	ctx->CopyResource(g_ssrWDepTex, g_ssrWDepSrc);
+	g_ssrSelfCopy = false;
+	if (k <= 8 || (k % 128) == 0)
+		logLine("SSR侦察: [wdep] 水深拷贝#" + std::to_string(k) + " 源461=0x" + hexOf(g_ssrWDepSrc) +
+		        " → 镜像=0x" + hexOf(g_ssrWDepTex) + " 帧=" +
+		        std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1));
+	// EVENT 闸 (与 2c 同款): 本拷贝排在 2c 的 g_ssrInQ End **之后**, 那道闸等不到它 ⇒ 自己 End
+	// 一条。建不出就降级为 Flush (与 2c 同一口径: 只慢一帧的可见性, 不卡帧)。
+	if (!g_ssrWDepQ)
+	{
+		D3D11_QUERY_DESC qd{};
+		qd.Query = D3D11_QUERY_EVENT;
+		const HRESULT hq = dev->CreateQuery(&qd, &g_ssrWDepQ);
+		if (FAILED(hq) || !g_ssrWDepQ)
+		{
+			g_ssrWDepQ = nullptr;
+			logLine("SSR侦察: [wdep] EVENT 查询建不出 " + hexHr(hq) + " → 水深无闸 (降级为 Flush)");
+		}
+	}
+	if (g_ssrWDepQ && !g_ssrWDepQLive)
+	{
+		ctx->End(g_ssrWDepQ);
+		g_ssrWDepQLive = true;
+	}
+	ctx->Flush(); // 尽早提交; 正式的等待在 renderer 侧 ssrInGateWait (零跨API栅栏设计不变)
+	dev->Release();
+}
+
 static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx, UINT n,
                                                        ID3D11RenderTargetView* const* ppRTV,
                                                        ID3D11DepthStencilView* pDSV)
@@ -2573,6 +2726,17 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 		                         hexOf(g_ssrBaseTex) + " 帧=" +
 		                         std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1);
 		copyResDescChecked(ctx, g_ssrBaseTex, g_ssrStrRes, pfxB, "底色", "585", kb);
+	}
+	// ---- v0.18.8 B: 段后水深 (第5张镜像) —— 特征B 之后第一次换绑时拷 (ssrReconOm 置的 fire) ----
+	// 此刻段17 的水体并回 (depth 只写不测) 已排完 ⇒ 源 461 里是**真·水面深度**, 法线/反射原点
+	// 由此改从它算; 520 快照继续当行进层级。放在 2d 回写/2c 入向之前无所谓先后 (只读源、只写我方镜像)。
+	if (g_ssrWDepFire)
+	{
+		g_ssrWDepFire = false;
+		if (g_ssrV1On.load(std::memory_order_relaxed) &&
+		    g_ssrVkOutOn.load(std::memory_order_relaxed) &&
+		    g_ssrSharedOn.load(std::memory_order_relaxed))
+			ssrWDepQueue(ctx);
 	}
 	// ---- Step 2d-1 出向回写 (v0.18.0, docs/05 D3): VK 上一帧 Present 填好的结果 → 585 ----
 	// 1 帧延迟: 本帧 Present 才由 VK 填出向镜像 ⇒ 这里回写的是**上一帧**的 SSR 结果。
@@ -2882,6 +3046,8 @@ void installProbeOn(ID3D11Device* dev)
 		g_ssrV1Smooth = static_cast<int>(iniNum("ssr.smooth", 4.0));
 		g_ssrV1Blur = static_cast<int>(iniNum("ssr.blur", 1.0));
 		g_ssrV1Debug = static_cast<int>(iniNum("ssr.debug", 0.0));
+		// ---- v0.18.8 正解B: 段后水深当法线/原点输入 (只关自己) ----
+		g_ssrWDepOn.store(iniFlag("ssr.wdep", true), std::memory_order_relaxed);
 		if (g_ssrV1Near < 0.01f || g_ssrV1Far <= g_ssrV1Near)
 		{
 			logLine("SSR侦察: ssr.near/ssr.far 不合法 (" + std::to_string(g_ssrV1Near) +
@@ -2913,10 +3079,10 @@ void installProbeOn(ID3D11Device* dev)
 		}
 		if (g_ssrV1Blur != 0)
 			g_ssrV1Blur = 1;
-		if (g_ssrV1Debug < 0 || g_ssrV1Debug > 3)
+		if (g_ssrV1Debug < 0 || g_ssrV1Debug > 5)
 		{
 			logLine("SSR侦察: ssr.debug 不合法 (" + std::to_string(g_ssrV1Debug) +
-			        ") → 回退 0 (0 正常/1 法线/2 命中/3 深度)");
+			        ") → 回退 0 (0 正常/1 法线/2 命中/3 深度/4 段后水深/5 水面像素)");
 			g_ssrV1Debug = 0;
 		}
 		if (g_ssrV1On.load(std::memory_order_relaxed) &&
@@ -2935,6 +3101,8 @@ void installProbeOn(ID3D11Device* dev)
 			        " blur=" + std::to_string(g_ssrV1Blur) +
 			        " debug=" + std::to_string(g_ssrV1Debug) + " base585=" +
 			        std::to_string(g_ssrBaseOn.load(std::memory_order_relaxed) ? 1 : 0) +
+			        " wdep=" +
+			        std::to_string(g_ssrWDepOn.load(std::memory_order_relaxed) ? 1 : 0) +
 			        "; dist 单位 = near; 逃生门 ssr.v1=0 (R4 = 反推 inv(投影), "
 			        "倒影位置/比例不对先调 fov, 深度反向先试 ssr.rev=1)");
 		else if (g_ssrV1On.load(std::memory_order_relaxed))
@@ -3368,6 +3536,12 @@ void notePresent(const char* via, IDXGISwapChain* sc)
 {
 	const uint64_t n = g_presentCount.fetch_add(1) + 1;
 	ssrReconPresent(n); // v0.13.0 Step1: 帧末汇总 (ssr=0 时内部早退, 零开销)
+	// ---- v0.18.8 B: 帧末对齐 —— 正常帧里 fire 早在"段18 换绑"处就消费完了, 两条都是 false;
+	// 段17 出现过却没有后续换绑 (特殊帧/段17 缺席) 时把 arm 丢掉, 免得下一帧开头拿**上一帧**
+	// 的水深去拷 —— 那时源 461 已被 UI 的 ClearDS 清掉或被本帧重画覆盖 (拷回来会被着色器的
+	// zW>zPre 判据拒掉, 不会算错, 但白拷一次还误导日志)。
+	g_ssrWDepArm = false;
+	g_ssrWDepFire = false;
 	// ---- 帧时基线 (v0.16.2): 每帧一次, 采样点就放在 Present 这里 ----
 	if (!g_ftIniRead)
 	{
@@ -4652,7 +4826,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.7 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) + v0.18.5: 路线1' 导入分支落地(深度改单独SHARED老式handle→VK KMT 直入, [2d-5] 深度跨API三候选比对) + v0.18.6: SSR v1 shader 采样(ssr.vert/ssr.frag 全屏三角, descriptor+2 sampler+push constant 相机, 出向由 2d 原样拷改为 shader 产出, R4=反推inv投影, 门 ssr.v1/ssr.mode/ssr.fov/ssr.near/ssr.far/ssr.steps/ssr.dist/ssr.strength) + v0.18.7: A 平滑批(法线差分邻域 ssr.smooth + 反射 5tap 空间平滑 ssr.blur + 诊断 ssr.debug 0正常/1法线/2命中/3深度, push constant 48B→64B) + B 水色保留(第4张 SHARED 底色镜像 = 段16 后的 585 含水画面, 每帧特征B 在 2d 回写前抢一份, VK 侧 binding2 当合成底色, 门 ssr.base585) ====");
+	logLine("==== poc-presenter v0.18.8 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) + v0.18.5: 路线1' 导入分支落地(深度改单独SHARED老式handle→VK KMT 直入, [2d-5] 深度跨API三候选比对) + v0.18.6: SSR v1 shader 采样(ssr.vert/ssr.frag 全屏三角, descriptor+2 sampler+push constant 相机, 出向由 2d 原样拷改为 shader 产出, R4=反推inv投影, 门 ssr.v1/ssr.mode/ssr.fov/ssr.near/ssr.far/ssr.steps/ssr.dist/ssr.strength) + v0.18.7: A 平滑批(法线差分邻域 ssr.smooth + 反射 5tap 空间平滑 ssr.blur + 诊断 ssr.debug 0正常/1法线/2命中/3深度, push constant 48B→64B) + B 水色保留(第4张 SHARED 底色镜像 = 段16 后的 585 含水画面, 每帧特征B 在 2d 回写前抢一份, VK 侧 binding2 当合成底色, 门 ssr.base585) + v0.18.8: 正解B 段后水深当法线(第5张 SHARED 镜像 = 特征B 后第一次换绑时拷的 461, 段17 已写入真·水面深度, 520 照旧只当行进层级, 着色器按 zW>zPre 判水面像素, VK binding3 + p2.w, 门 ssr.wdep, debug 4段后水深/5水面像素) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

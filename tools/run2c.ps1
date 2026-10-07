@@ -53,7 +53,7 @@ if ($bn -eq "") { $out.Add("  [FAIL] 没有 banner 行") }
 else {
     $m2 = [regex]::Match($bn, "poc-presenter (v[0-9.]+)")
     if ($m2.Success) { $ver = $m2.Groups[1].Value }
-    $out.Add("  expect v0.18.7: " + $(if ($ver -eq "v0.18.7") { "OK" } else { "MISMATCH -> " + $ver }))
+    $out.Add("  expect v0.18.8: " + $(if ($ver -eq "v0.18.8") { "OK" } else { "MISMATCH -> " + $ver }))
     $out.Add("  banner 含 ssr.shared: " + $(if ($bn.Contains("ssr.shared")) { "OK" } else { "FAIL (banner 没升)" }))
     $out.Add("  banner 含 Step2c-β: " + $(if ($bn.Contains("Step2c-β")) { "OK" } else { "FAIL (banner 没含 2c-β)" }))
     $out.Add("  banner 含 ssr.sentinel: " + $(if ($bn.Contains("ssr.sentinel")) { "OK" } else { "FAIL" }))
@@ -301,7 +301,7 @@ $out.Add("      [节奏跟随 D3D11 侧 [2c读回 深=] (前3次+每600次); 建
 foreach ($x in (Pick "[2d-5] 深度KMT读回#" 6)) { $out.Add("      " + $x) }
 $out.Add("")
 
-$out.Add("==== #16 SSR v1 shader 采样 (v0.18.7: 平滑批 + 底色) ====")
+$out.Add("==== #16 SSR v1 shader 采样 (v0.18.8: 平滑批 + 底色 + 段后水深法线) ====")
 $nV1Ini = Cnt "ini ssr.v1=1 →"
 $out.Add("  ini ssr.v1=1 读到 = $nV1Ini   [开了=1; 0 = 本轮只回归 (v1 关着, 也是合法一轮)]")
 $nV1Rdy = Cnt "[v1] SSR v1 就绪"
@@ -326,6 +326,18 @@ $out.Add("      [观感判据是人眼: 水面该出现屏幕空间倒影且**�
 $out.Add("  [base] 底色镜像 OK = $nBaseMk   底色图就绪(VK导入) = $nBaseRdy   底色# 拷贝行 = $nBaseWr   降级行 = $nBaseOff   [前三项 0/1, 拷贝行 >0]")
 $out.Add("      [底色 = 段16 画完水之后的 585, 当 v1 合成底色 ⇒ 水色由此回来; 缺它则退回 324 底色 = 水仍偏透明]")
 foreach ($x in (Pick "[base]" 5)) { $out.Add("      " + $x) }
+# ---- v0.18.8 正解B 段后水深 (第5张 SHARED 镜像 = 461 段17 后的真·水面深度) ----
+$nWDepMk  = Cnt "[wdep] 段后水深镜像就绪"   # D3D11 侧镜像建成 (建一次)
+$nWDepRdy = Cnt "[wdep] 段后水深图就绪"     # VK 侧导入成 (建一次)
+$nWDepWr  = Cnt "[wdep] 水深拷贝#"          # 每帧特征B 后首次换绑 (前8条+每128条)
+$nWDepBad = Cnt "[wdep] 源/镜像 desc 不一致" # CopyResource 会静默丢弃 ⇒ 停用
+$nWDepOff = (Cnt "段后水深关自己") + (Cnt "段后水深镜像建不出") + (Cnt "水深拷贝停用")
+$nWDepGate= Cnt "[wdep] 段后水深EVENT闸#"   # 第二道闸 (排在 2c 闸之后)
+$nWDepTo  = Cnt "[wdep] 段后水深EVENT闸 等待超"
+$out.Add("  [wdep] 镜像就绪 = $nWDepMk   VK导入就绪 = $nWDepRdy   水深拷贝# 行 = $nWDepWr   闸行 = $nWDepGate (超时 $nWDepTo)   降级行 = $nWDepOff   [前三项 0/1, 拷贝行 >0]")
+$out.Add("      [段后水深 = 特征B 之后第一次换绑时拷的 461 (段17 已写入真·水面深度), 当法线/反射原点输入; 520 快照只当行进层级]")
+$out.Add("      [缺它 => 法线退回 520 河床 = v0.18.7 行为 (倒影仍多边形拼图), 只关自己; 验证顺序: ssr.debug=4 水深灰度 -> 5 水面像素 -> 0 正常]")
+foreach ($x in (Pick "[wdep]" 6)) { $out.Add("      " + $x) }
 $out.Add("")
 
 $out.Add("==== 末 10 行原始日志 ====")
@@ -349,7 +361,7 @@ if ($hookN -ne 1) {
     $out.Add("  [根因] " + $root)
     $out.Add("         -> 本页其余 FAIL 均为该根因的下游; 换 DLL、重跑图之前先确认 ini 五个开关")
 }
-if ($ver -ne "v0.18.7") { $fail.Add("#0 banner 不是 v0.18.7 -> DLL 没换") }
+if ($ver -ne "v0.18.8") { $fail.Add("#0 banner 不是 v0.18.8 -> DLL 没换") }
 if ($n_shr -ne 1) { $fail.Add("#1 ini ssr.shared=1 未读到 -> ini 没写或 ssr=0") }
 if ($n_sen -gt 0) { $fail.Add("#1 ssr.sentinel 还开着 -> 应为0, 否则水会消失干扰判读") }
 if ($n_c -ne 1) { $fail.Add("#2 色镜像 OK 行 != 1") }
@@ -428,7 +440,7 @@ if ($nKmtRoute -ge 1) {
     $warn.Add("#3 深度镜像 OK 却没标路线1' -> 走的是 NTHANDLE 老路 (D24 家族实测不该通, 换源格式了?)")
 }
 # --- #16 SSR v1 shader 采样 (v0.18.7: 平滑批 + 底色) ---
-if ($nV1Rdr -gt 0 -and $nV1Rdy -eq 0) { $fail.Add("#16 有 [v1] 渲染# 行却没有 [v1] SSR v1 就绪 行 -> 状态不一致 (就绪行漏打或 DLL 不是 v0.18.7)") }
+if ($nV1Rdr -gt 0 -and $nV1Rdy -eq 0) { $fail.Add("#16 有 [v1] 渲染# 行却没有 [v1] SSR v1 就绪 行 -> 状态不一致 (就绪行漏打或 DLL 不是 v0.18.8)") }
 if ($nV1Rdy -gt 1) { $warn.Add("#16 [v1] 就绪行 = $nV1Rdy > 1 -> v1 资源被反复重建 (依赖签名抖动? 看有无换设备/换分辨率行)") }
 if ($nV1Ini -gt 0 -and $nV1Rdy -eq 0 -and $nV1Off -eq 0 -and $nV1Dep -eq 0) { $warn.Add("#16 ini ssr.v1=1 但既没就绪也没降级行 -> v1 压根没走到建图 (出向/入向图没建, 或 ssr/ssr.shared/ssr.vkout 有没开的)") }
 if (($nV1Off + $nV1Att + $nV1Sam) -gt 0) { $warn.Add("#16 v1 关自己 / usage 退回 -> 按行文归因; 出向已退回 2d 原样拷 (只关自己)") }
@@ -446,6 +458,22 @@ if ($nBaseRdy -gt 0 -and $nBaseWr -eq 0) {
 if ($nV1Rdy -gt 0 -and $nBaseMk -eq 0 -and $nBaseOff -eq 0) {
     $warn.Add("#16 一行 [base] 都没有 -> 底色没开 (ini ssr.base585=0, 或 ssr.v1/ssr.vkout 没开) => 水色仍会偏透明, 属预期")
 }
+# --- #16 段后水深 (v0.18.8 正解B: 水面像素的法线/原点输入) ---
+if ($nWDepBad -gt 0) { $fail.Add("#16 段后水深拷贝 desc不一致 $nWDepBad 次 -> CopyResource 静默丢弃, 水深镜像是旧内容 (看 [wdep] 水深拷贝# 行; 源/镜像不一致会停用)") }
+if ($nWDepMk -gt 1) { $warn.Add("#16 [wdep] 镜像就绪 = $nWDepMk > 1 -> 建了不止一次 (源 desc 变过? 看'源 desc 变了'行)") }
+if ($nWDepRdy -gt 1) { $warn.Add("#16 [wdep] VK导入就绪 = $nWDepRdy > 1 -> 反复重建 (D3D11 侧 handle 换过 / 换分辨率, 看'换了 handle'行)") }
+if ($nV1Rdy -gt 0 -and $nWDepMk -gt 0 -and $nWDepRdy -eq 0) {
+    $warn.Add("#16 段后水深镜像建成但 VK 没导入 -> 看上方 [wdep] 失败行; 法线退回 520 河床 (只关自己 = v0.18.7 行为, 倒影仍多边形拼图)")
+}
+if ($nWDepRdy -gt 0 -and $nWDepWr -eq 0) {
+    $warn.Add("#16 段后水深图就绪却没有 [wdep] 水深拷贝# 行 -> 特征B 之后没等到换绑 (段17 缺席帧 / g_ssrWDepArm 没 arm), 水深内容不会更新")
+}
+if ($nWDepRdy -gt 0 -and $nWDepGate -eq 0) {
+    $warn.Add("#16 段后水深有拷贝却没 [wdep] 段后水深EVENT闸# 行 -> 第二道闸没消费 (VK 没起来 / ssrInGateWait 没跑到), 水深可见性靠 Flush 兜")
+}
+if ($nV1Rdy -gt 0 -and $nWDepMk -eq 0 -and $nWDepOff -eq 0) {
+    $warn.Add("#16 一行 [wdep] 都没有 -> 段后水深没开 (ini ssr.wdep=0, 或 ssr.v1/ssr.vkout/ssr.shared 有没开的) => 法线仍取 520 河床, 倒影仍会多边形拼图")
+}
 if ($warn.Count -gt 0) {
     $out.Add("  [已知/告警] " + $warn.Count + " 项:")
     foreach ($w in $warn) { $out.Add("    ~ " + $w) }
@@ -460,10 +488,11 @@ if ($fail.Count -eq 0) {
     if ($nVkoIni -gt 0) {
         $out.Add("  2d-1 出向回写落地: 回写 $nOutWr 行 desc一致 $nOutDescOk, 出向读回 一致 $nOutOk / 不一致 $nOutBad; 入向EVENT闸等了 $nGate 次 (超时 $nGateTo)")
         if ($nV1Rdy -gt 0) {
-            $out.Add("  SSR v1 落地 (v0.18.7): 全屏三角渲染 $nV1Rdr 次 (就绪 $nV1Rdy; 降级: 关自己 $nV1Off / 深度没就绪 $nV1Dep)")
+            $out.Add("  SSR v1 落地 (v0.18.8): 全屏三角渲染 $nV1Rdr 次 (就绪 $nV1Rdy; 降级: 关自己 $nV1Off / 深度没就绪 $nV1Dep)")
             $out.Add("  底色通路: 镜像 $nBaseMk / VK导入 $nBaseRdy / 每帧拷贝行 $nBaseWr (desc不一致 $nBaseBad; 降级 $nBaseOff)")
-            $out.Add("  下一步: 目视①水面倒影是否呈屏幕空间内容 ②水色是否回来 (不再近乎透明) (人眼判据) -> 判读入档 docs/02 §14.23;")
-            $out.Add("          观感对不上先调 ini ssr.fov/ssr.near/ssr.far; 倒影仍碎 -> 调 ssr.smooth (1..16) / ssr.blur; 定位用 ssr.debug=1法线/2命中/3深度")
+            $out.Add("  段后水深通路 (正解B): 镜像 $nWDepMk / VK导入 $nWDepRdy / 每帧拷贝行 $nWDepWr (desc不一致 $nWDepBad; 降级 $nWDepOff; 闸 $nWDepGate)")
+            $out.Add("  下一步: 目视①水面倒影是否呈屏幕空间内容 ②水色是否回来 ③倒影是否连成片 (不再多边形拼图) (人眼判据) -> 判读入档 docs/02 §14.23.1;")
+            $out.Add("          观感对不上先调 ini ssr.fov/ssr.near/ssr.far; 倒影仍碎 -> 调 ssr.smooth (1..16) / ssr.blur; 定位用 ssr.debug=1法线/2命中/3深度/4段后水深/5水面像素")
         } else {
             $out.Add("  下一步: v1 没起 (ini ssr.v1 没开 / ssr.shared / ssr.vkout 有没开的 / 深度没就绪) -> 开 ssr.v1=1 再跑一轮; 兜底 = 2d 原样拷 (v0.18.5 行为)")
         }

@@ -110,6 +110,19 @@ static bool  g_ssrVkBaseLog = false; // "底色图就绪/失败" 只打一次
 static VkDevice g_ssrVkBaseDev = VK_NULL_HANDLE; // 建图用的 device (换设备要整套丢弃重建)
 static VkCommandBuffer g_ssrVkCmdB = VK_NULL_HANDLE; // 底色布局初转命令 (分配一次, POCB_DEV_FNS 没有 vkFreeCommandBuffers)
 
+// ---- v0.18.8 正解B: 第 5 张 SHARED 镜像 (源 461 段17 后 = 真·水面深度) 的 VK 导入 ----
+// 为什么需要: 水面像素在段16 之前的 520 快照里是**河床** (水那时还没画) ⇒ 差分出来的法线
+// = 河床三角面法线 ⇒ 倒影碎成"不规则多边形拼图" (v0.18.7 实跑)。段17 的 depth 只写不测把
+// 真·水面深度写进 461, 每帧特征B 之后第一次换绑时 D3D11 拷一份 (g_ssrWDepTex) 当 binding3。
+// 用法与底色同款: usage 只 SAMPLED、每帧幂等建、失败只关自己 (p2.w=0 ⇒ 着色器退回 520 =
+// v0.18.7 行为, 倒影仍会多边形拼图)。
+static VkImage        g_ssrWDepImg = VK_NULL_HANDLE;
+static VkDeviceMemory g_ssrWDepMem = VK_NULL_HANDLE;
+static HANDLE         g_ssrWDepSrcH = nullptr; // 导入时用的 handle (D3D11 侧换了才重建)
+static int   g_ssrWDepState = 0;   // 0=未建 1=OK 2=失败禁用 (只关自己)
+static bool  g_ssrWDepLog = false; // "段后水深图就绪/失败" 只打一次
+static VkDevice g_ssrWDepDev = VK_NULL_HANDLE; // 建图用的 device (换设备整套只丢不毁)
+
 // ---------- 原 main.cpp: PoC-B 实现 (pocbCode/pocbFail/pocbEnabled/pocbInit/2c-β/pocbInject) ----------
 static VkImage        g_ssrV1RecSrc = VK_NULL_HANDLE; // 录命令时用的入向图 (纯拷贝录制 = NULL)
 static long           g_ssrV1N = 0;                   // v1 渲染计数 (节流日志用, ssrOutVkFrame 也读)
@@ -122,7 +135,9 @@ static void ssrV1Free(PocbCtx& c); // 销毁 v1 全套 (换设备/关闸时)
 static void ssrV1DropViewC(PocbCtx& c); // 入向图要换/要销毁前, 先摘掉 v1 指着它的 color view
 static void ssrV1DropViewD(PocbCtx& c); // 深度 KMT 图要换/要销毁前, 先摘掉 v1 指着它的 depth view
 static void ssrV1DropViewB(PocbCtx& c); // v0.18.7: 底色图要换/要销毁前, 先摘掉 v1 指着它的 view
+static void ssrV1DropViewW(PocbCtx& c); // v0.18.8: 段后水深图要换/要销毁前, 先摘掉 v1 指着它的 view
 static void ssrBaseVkBuild(PocbCtx& c); // v0.18.7 B: 底色镜像导入 (每帧 ssrOutVkFrame 开头调)
+static void ssrWDepVkBuild(PocbCtx& c); // v0.18.8 B: 段后水深镜像导入 (每帧 ssrOutVkFrame 开头调)
 
 static std::string pocbCode(long v)
 {
@@ -1535,6 +1550,22 @@ void ssrVkFree(PocbCtx& c)
 	g_ssrVkBaseState = 0; // 拆干净了 ⇒ 下次从头再试 (含上次失败的用法)
 	g_ssrVkBaseLog = false;
 	g_ssrVkBaseDev = VK_NULL_HANDLE;
+	// v0.18.8 B: 段后水深图 (第5张) 一并退 —— 与底色同口径 (ssrV1Free 已把 view 摘了)
+	if (g_ssrWDepImg)
+	{
+		c.fns.vkDeviceWaitIdle(c.vdev);
+		c.fns.vkDestroyImage(c.vdev, g_ssrWDepImg, nullptr);
+		g_ssrWDepImg = VK_NULL_HANDLE;
+	}
+	if (g_ssrWDepMem)
+	{
+		c.fns.vkFreeMemory(c.vdev, g_ssrWDepMem, nullptr);
+		g_ssrWDepMem = VK_NULL_HANDLE;
+	}
+	g_ssrWDepSrcH = nullptr;
+	g_ssrWDepState = 0; // 拆干净了 ⇒ 下次从头再试
+	g_ssrWDepLog = false;
+	g_ssrWDepDev = VK_NULL_HANDLE;
 	g_ssrVkCmdB = VK_NULL_HANDLE; // 初转命令属于 c.pool ⇒ 拆干净后不再复用 (无 vkFree; 只在换槽时走到)
 	g_ssrVkCmdOutSrc = VK_NULL_HANDLE;
 	g_ssrVkOutState = 0;
@@ -2132,6 +2163,259 @@ static void ssrBaseVkBuild(PocbCtx& c)
 	}
 }
 
+// ---- v0.18.8 正解B: 段后水深镜像导入 (第5张, 源 461 段17 后 = 真·水面深度) ----
+// 为什么有它: 水面像素在段16 之前的 520 快照里是**河床** (水那时还没画) ⇒ 差分出来的法线
+// = 河床三角面法线 ⇒ 倒影碎成"不规则多边形拼图" (v0.18.7 实跑, docs/02 §14.22.1)。段17 那笔
+// depth 只写不测的水体并回把真·水面深度写进 461, D3D11 每帧在特征B 后第一次换绑时拷一份,
+// 这里导入当 binding3: 着色器按 zW>zPre 判出水面像素就用它算法线/反射原点, 520 只当行进层级。
+// 建法 = ssrBaseVkBuild (NT handle) 与 ssrKmtVkBuild (老式 handle→KMT) 的并集: handle 轴按
+// D3D11 侧 ssrInMakeShared 实际建成的那条走 (g_ssrWDepKmt), usage 只 SAMPLED (无读回),
+// 布局初转也照做 (建好时立即提交等完; 按规范这次转换可能丢掉刚拷的内容, 下一次拷就补回来)。
+static void ssrWDepVkBuild(PocbCtx& c)
+{
+	if (g_ssrWDepState == 2)
+		return;
+	// 换设备: 旧 device 上的句柄**不能**拿来 destroy (同 ssrBaseVkBuild) ⇒ 整套只丢不毁
+	if (g_ssrWDepDev && c.vdev && g_ssrWDepDev != c.vdev)
+	{
+		ssrV1DropViewW(c);
+		g_ssrWDepImg = VK_NULL_HANDLE;
+		g_ssrWDepMem = VK_NULL_HANDLE;
+		g_ssrWDepSrcH = nullptr;
+		g_ssrWDepState = 0;
+		g_ssrWDepLog = false;
+		g_ssrWDepDev = VK_NULL_HANDLE;
+		logLine("SSR侦察: [wdep] 检测到 VkDevice 变更 → 丢弃旧水深句柄重建");
+	}
+	// D3D11 侧水深镜像换了 handle (源 desc 变→镜像重建) ⇒ 先摘 v1 指着旧图的 view 再退旧图
+	if (g_ssrWDepImg != VK_NULL_HANDLE && g_ssrWDepSrcH != g_ssrWDepH)
+	{
+		ssrV1DropViewW(c);
+		c.fns.vkDeviceWaitIdle(c.vdev);
+		c.fns.vkDestroyImage(c.vdev, g_ssrWDepImg, nullptr);
+		g_ssrWDepImg = VK_NULL_HANDLE;
+		c.fns.vkFreeMemory(c.vdev, g_ssrWDepMem, nullptr);
+		g_ssrWDepMem = VK_NULL_HANDLE;
+		logLine("SSR侦察: [wdep] D3D11 侧水深镜像换了 handle → 退掉旧水深图重建");
+	}
+	if (g_ssrWDepImg != VK_NULL_HANDLE)
+		return; // 已就绪
+	if (c.state.load() != 2 || !c.vdev || !c.queue || !c.pool || !c.fence)
+		return; // PoC-B 还没就绪, 下帧再试
+	if (!g_ssrWDepOn.load(std::memory_order_relaxed) ||
+	    !g_ssrVkOutOn.load(std::memory_order_relaxed) ||
+	    !g_ssrSharedOn.load(std::memory_order_relaxed) ||
+	    !g_ssrV1On.load(std::memory_order_relaxed))
+		return;
+	if (!g_ssrWDepTex || !g_ssrWDepH)
+		return; // D3D11 侧还没拷过 (特征B 还没触发) —— 下帧再试, 不算失败
+	D3D11_TEXTURE2D_DESC wd{};
+	g_ssrWDepTex->GetDesc(&wd);
+	auto giveup = [&](const std::string& why) {
+		if (!g_ssrWDepLog)
+		{
+			g_ssrWDepLog = true;
+			logLine("SSR侦察: [wdep] " + why + " → 段后水深关自己 (法线退回 520 河床 = v0.18.7 "
+			        "行为, 倒影仍多边形拼图; 底色/行进/2d 全不受影响)");
+		}
+		g_ssrWDepState = 2;
+	};
+	auto kill = [&]() {
+		if (g_ssrWDepImg)
+		{
+			c.fns.vkDestroyImage(c.vdev, g_ssrWDepImg, nullptr);
+			g_ssrWDepImg = VK_NULL_HANDLE;
+		}
+		if (g_ssrWDepMem)
+		{
+			c.fns.vkFreeMemory(c.vdev, g_ssrWDepMem, nullptr);
+			g_ssrWDepMem = VK_NULL_HANDLE;
+		}
+	};
+	// D24 家族 (真机源 Format=44 R24G8_TYPELESS; 镜像 desc 照抄源) —— 与 2d-5/入向深度同一张表
+	const bool d24 = (wd.Format == DXGI_FORMAT_R24G8_TYPELESS ||
+	                  wd.Format == DXGI_FORMAT_D24_UNORM_S8_UINT ||
+	                  wd.Format == DXGI_FORMAT_R24_UNORM_X8_TYPELESS ||
+	                  wd.Format == DXGI_FORMAT_X24_TYPELESS_G8_UINT);
+	if (!d24)
+	{
+		giveup("水深镜像格式 " + ssrFmtName(wd.Format) + " 不在 D24 家族映射表");
+		return;
+	}
+	if (wd.MipLevels != 1 || wd.ArraySize != 1 || wd.SampleDesc.Count != 1)
+	{
+		giveup("水深镜像不是单mip/单array/无MSAA (mips" + std::to_string(wd.MipLevels) + " arr" +
+		       std::to_string(wd.ArraySize) + " msaa" + std::to_string(wd.SampleDesc.Count) + ")");
+		return;
+	}
+	const bool kmt = g_ssrWDepKmt; // 与深度镜像同一条 handle 轴 (本机 = 老式 SHARED → KMT)
+	// --- 1) VkImage: usage = SAMPLED (v1 只采样它; 无读回, 比 2d-5 少一条通路) ---
+	VkExternalMemoryImageCreateInfo emi{};
+	emi.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+	emi.handleTypes = kmt ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT
+	                       : VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+	VkImageCreateInfo ici{};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.pNext = &emi;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_D24_UNORM_S8_UINT; // D24 家族的 VK 对应格 (depth+stencil 都在)
+	ici.extent = VkExtent3D{wd.Width, wd.Height, 1};
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VkResult vr = c.fns.vkCreateImage(c.vdev, &ici, nullptr, &g_ssrWDepImg);
+	if (vr != VK_SUCCESS)
+	{
+		g_ssrWDepImg = VK_NULL_HANDLE;
+		giveup("水深图 vkCreateImage(" + std::string(kmt ? "KMT" : "NT") + ") = " + pocbCode(vr));
+		return;
+	}
+
+	// --- 2) 导入 handle: 分配即导入 (链进 VkMemoryAllocateInfo); KMT 那侧支持度实测
+	//     features=0x0005 = DEDICATED_ONLY|IMPORTABLE ⇒ 优先 dedicated, 被拒再退不带的 ---
+	VkMemoryRequirements req{};
+	c.fns.vkGetImageMemoryRequirements(c.vdev, g_ssrWDepImg, &req);
+	VkPhysicalDeviceMemoryProperties mp{};
+	c.fns.vkGetPhysicalDeviceMemoryProperties(c.phys, &mp);
+	const int tDev = pocbMemType(mp, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	const int tAny = pocbMemType(mp, req.memoryTypeBits, 0);
+	if (!req.size || (tDev < 0 && tAny < 0))
+	{
+		kill();
+		giveup("水深导入无可用内存类型 (memoryTypeBits=" + std::to_string(req.memoryTypeBits) + ")");
+		return;
+	}
+	VkResult ar = VK_ERROR_OUT_OF_HOST_MEMORY;
+	int tUsed = -1;
+	bool usedDed = false;
+	int ntry = 0;
+	for (int ti = 0; ti < 2 && ar != VK_SUCCESS; ++ti)
+	{
+		const int t = (ti == 0) ? tDev : tAny;
+		if (t < 0 || (ti == 1 && tAny == tDev))
+			continue;
+		for (int di = 0; di < 2 && ar != VK_SUCCESS; ++di)
+		{
+			++ntry;
+			VkImportMemoryWin32HandleInfoKHR imp{};
+			imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+			imp.handleType = kmt ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT
+			                     : VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+			imp.handle = g_ssrWDepH; // 只借用不接管 —— 归 D3D11 侧, 不 CloseHandle
+			VkMemoryDedicatedAllocateInfo dai{};
+			dai.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+			dai.pNext = &imp;
+			dai.image = g_ssrWDepImg;
+			VkMemoryAllocateInfo mai{};
+			mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+			mai.pNext = (di == 0) ? static_cast<const void*>(&dai) : static_cast<const void*>(&imp);
+			mai.allocationSize = req.size;
+			mai.memoryTypeIndex = static_cast<uint32_t>(t);
+			ar = c.fns.vkAllocateMemory(c.vdev, &mai, nullptr, &g_ssrWDepMem);
+			if (ar == VK_SUCCESS)
+			{
+				tUsed = t;
+				usedDed = (di == 0);
+			}
+		}
+	}
+	if (ar != VK_SUCCESS)
+	{
+		kill();
+		giveup("水深导入矩阵 " + std::to_string(ntry) + " 次全失败 = " + pocbCode(ar) +
+		       " (VK报size=" + std::to_string((long long)req.size) + ")");
+		return;
+	}
+	VkResult br = c.fns.vkBindImageMemory(c.vdev, g_ssrWDepImg, g_ssrWDepMem, 0);
+	if (br != VK_SUCCESS)
+	{
+		kill();
+		giveup("水深 vkBindImageMemory = " + pocbCode(br));
+		return;
+	}
+
+	// --- 3) 布局初转 (UNDEFINED→GENERAL) 单独一条, 建好时立即提交并等完; 命令 buffer 复用
+	//     底色那条 (POCB_DEV_FNS 没有 vkFreeCommandBuffers, 分配一次)。按规范这次转换可能丢掉
+	//     D3D11 刚拷进来的内容 ⇒ 本帧按上一次的水深算, 下次拷就补上 (与入向/底色同一口径)。
+	//     aspect 必须 DEPTH|STENCIL 两位都带 (规范对组合格式的要求, 与 2d-5 初转同款)。
+	if (!g_ssrVkCmdB)
+	{
+		VkCommandBufferAllocateInfo cbai{};
+		cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		cbai.commandPool = c.pool;
+		cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		cbai.commandBufferCount = 1;
+		if (c.fns.vkAllocateCommandBuffers(c.vdev, &cbai, &g_ssrVkCmdB) != VK_SUCCESS)
+		{
+			g_ssrVkCmdB = VK_NULL_HANDLE;
+			kill();
+			giveup("水深初转 vkAllocateCommandBuffers 失败");
+			return;
+		}
+	}
+	{
+		VkCommandBufferBeginInfo cbb{};
+		cbb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		if (c.fns.vkBeginCommandBuffer(g_ssrVkCmdB, &cbb) != VK_SUCCESS)
+		{
+			kill();
+			giveup("水深初转 vkBeginCommandBuffer 失败");
+			return;
+		}
+		VkImageMemoryBarrier imb{};
+		imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		imb.srcAccessMask = 0;
+		imb.dstAccessMask = 0;
+		imb.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imb.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+		imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.image = g_ssrWDepImg;
+		imb.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
+		c.fns.vkCmdPipelineBarrier(g_ssrVkCmdB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1,
+		                           &imb);
+		if (c.fns.vkEndCommandBuffer(g_ssrVkCmdB) != VK_SUCCESS)
+		{
+			kill();
+			giveup("水深初转 vkEndCommandBuffer 失败");
+			return;
+		}
+		c.fns.vkResetFences(c.vdev, 1, &c.fence);
+		VkSubmitInfo si{};
+		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		si.commandBufferCount = 1;
+		si.pCommandBuffers = &g_ssrVkCmdB;
+		vr = c.fns.vkQueueSubmit(c.queue, 1, &si, c.fence);
+		if (vr == VK_SUCCESS)
+			vr = c.fns.vkWaitForFences(c.vdev, 1, &c.fence, VK_TRUE, 5000000000ULL);
+		if (vr != VK_SUCCESS)
+		{
+			kill();
+			giveup("水深初转 vkQueueSubmit/vkWaitForFences = " + pocbCode(vr));
+			return;
+		}
+	}
+
+	g_ssrWDepSrcH = g_ssrWDepH;
+	g_ssrWDepDev = c.vdev;
+	g_ssrWDepState = 1;
+	if (!g_ssrWDepLog)
+	{
+		g_ssrWDepLog = true;
+		logLine("SSR侦察: [wdep] 段后水深图就绪: " + std::to_string(wd.Width) + "x" +
+		        std::to_string(wd.Height) + " D24/S8 导入 handle=" + hexOf(g_ssrWDepH) + " 轴=" +
+		        (kmt ? "KMT" : "NT") + " (矩阵 " + std::to_string(ntry) + " 次) alloc=" +
+		        (usedDed ? "dedicated" : "plain") + " 内存类型#" + std::to_string(tUsed) +
+		        " usage=SAMPLED — 每帧特征B 后首次换绑拷段17 后的 461, 本帧起当法线/原点输入");
+	}
+}
+
 // 每帧 (pocbInject 尾部, 紧跟 ssrInVkFrame): 入向镜像 → 出向镜像 拷一次 + CPU fence 等完,
 // 置 g_ssrOutReady 让 D3D11 在**下一帧**特征B 拷进 585。失败只关出向。
 void ssrOutVkFrame(PocbCtx& c)
@@ -2150,6 +2434,9 @@ void ssrOutVkFrame(PocbCtx& c)
 	// v0.18.7 B: 底色镜像 (第4张) 的导入放这里 —— 每帧幂等; 建成/失败都会让签名变 ⇒ 下面
 	// ssrV1Dirty() 自动重录 (成功后多采一个 binding2, 失败后退回采 uColor)。
 	ssrBaseVkBuild(c);
+	// v0.18.8 B: 段后水深镜像 (第5张) 同样放这里 —— 每帧幂等, 建成/失败同样让签名变 ⇒
+	// ssrV1Dirty() 自动重录 (成功后多采 binding3 + p2.w=1, 失败后法线退回 520 = v0.18.7)。
+	ssrWDepVkBuild(c);
 	if (g_ssrVkImgOut == VK_NULL_HANDLE || g_ssrVkCmdOutSrc != g_ssrVkImg)
 	{
 		ssrOutVkBuild(c); // 成功 → 本帧不提 (与 2c-β "只建不比" 同节奏); 失败 → 内部已关闸
@@ -2812,32 +3099,61 @@ void ssrKmtVkFrame(PocbCtx& c) // vkrenderer.h 有声明 (非 static), 定义必
 // main.cpp 侧在拷贝后 End 了 EVENT 查询, 这里在提交任何读入向镜像的 VK 命令之前把它等掉 ——
 // 与 pocbInject 里 PoC-B 的 copyQ 同款: GetData 带 DONOTFLUSH (不替我们 Flush)、Sleep(0) 自旋、
 // 2000ms 超时放行 (绝不卡死帧), 超时也把 live 消费掉免得下一帧等旧结果。
+// v0.18.8: 段后水深那道闸自己的计数 (与 2c 的 g_ssrInGateN/Ms 分开, 免得 12e 闸判据被两道闸串味)
+static long g_ssrWDepGateN = 0;
+static double g_ssrWDepGateMs = 0.0;
+
 void ssrInGateWait(PocbCtx& c) // vkrenderer.h 有声明 (非 static), 定义必须同链接性
 {
-	if (!g_ssrInQLive || !g_ssrInQ || !c.ctx)
+	// ---- 两道闸 (v0.18.4 的 2c 入向 + v0.18.8 的段后水深), 各自一次性消费 ----
+	// 水深那条排在 2c 那条 End **之后** (拷贝发生在段18 换绑, 特征B 的 ssrInQueue 已经 End 完),
+	// 2c 那道闸等不到它 ⇒ 必须单列一条; 两条都要等完才能提交任何会读水深的 VK 命令。
+	// 顺序无所谓 (都只是 CPU 自旋等 D3D11 EVENT), 但 VK 没起来时**两条都**要消费掉。
+	// c.ctx 必须在消费前判空 —— 否则下面 wait() 里的 GetData 会拿空指针去调 (原实现的第一行门)。
+	const bool inLive = g_ssrInQLive && g_ssrInQ && c.ctx;
+	const bool wLive = g_ssrWDepQLive && g_ssrWDepQ && c.ctx;
+	if (!inLive && !wLive)
 		return;
-	g_ssrInQLive = false; // 一次性消费: 本帧的闸用掉了 (超时也放行, 免得下一帧等旧结果)
+	g_ssrInQLive = false;   // 一次性消费: 本帧的闸用掉了 (超时也放行, 免得下一帧等旧结果)
+	g_ssrWDepQLive = false;
 	if (c.state.load() != 2 || !c.vdev)
-		return; // VK 没起来/已降级 → 没人读入向镜像, 不必白等 (但消费掉, 下一帧照常重新 End)
-	const auto g0 = std::chrono::steady_clock::now();
-	while (c.ctx->GetData(g_ssrInQ, nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_FALSE)
-	{
-		if (std::chrono::steady_clock::now() - g0 > std::chrono::milliseconds(2000))
+		return; // VK 没起来/已降级 → 没人读镜像, 不必白等 (但消费掉, 下一帧照常重新 End)
+	auto wait = [&](ID3D11Query* q, const char* tag) -> double {
+		const auto g0 = std::chrono::steady_clock::now();
+		while (c.ctx->GetData(q, nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_FALSE)
 		{
-			logLine("SSR侦察: [2c] 入向EVENT闸 等待超 2000ms → 放行本帧 (12e 可能不一致)");
-			break;
+			if (std::chrono::steady_clock::now() - g0 > std::chrono::milliseconds(2000))
+			{
+				logLine(std::string("SSR侦察: ") + tag + "EVENT闸 等待超 2000ms → 放行本帧 (12e 可能不一致)");
+				break;
+			}
+			Sleep(0);
 		}
-		Sleep(0);
+		return std::chrono::duration<double, std::milli>(
+		    std::chrono::steady_clock::now() - g0).count();
+	};
+	if (inLive)
+	{
+		const double ms = wait(g_ssrInQ, "[2c] 入向");
+		g_ssrInGateMs += ms;
+		const long k = ++g_ssrInGateN;
+		if (k <= 8 || (k % 128) == 0)
+			logLine("SSR侦察: [2c] 入向EVENT闸#" + std::to_string(k) + " 等待=" +
+			        std::to_string(ms).substr(0, 5) + "ms 累计均值=" +
+			        std::to_string(g_ssrInGateMs / static_cast<double>(k)).substr(0, 5) +
+			        "ms 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed)));
 	}
-	const double ms = std::chrono::duration<double, std::milli>(
-	    std::chrono::steady_clock::now() - g0).count();
-	g_ssrInGateMs += ms;
-	const long k = ++g_ssrInGateN;
-	if (k <= 8 || (k % 128) == 0)
-		logLine("SSR侦察: [2c] 入向EVENT闸#" + std::to_string(k) + " 等待=" +
-		        std::to_string(ms).substr(0, 5) + "ms 累计均值=" +
-		        std::to_string(g_ssrInGateMs / static_cast<double>(k)).substr(0, 5) +
-		        "ms 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed)));
+	if (wLive)
+	{
+		const double ms = wait(g_ssrWDepQ, "[wdep] 段后水深");
+		g_ssrWDepGateMs += ms;
+		const long k = ++g_ssrWDepGateN;
+		if (k <= 8 || (k % 128) == 0)
+			logLine("SSR侦察: [wdep] 段后水深EVENT闸#" + std::to_string(k) + " 等待=" +
+			        std::to_string(ms).substr(0, 5) + "ms 累计均值=" +
+			        std::to_string(g_ssrWDepGateMs / static_cast<double>(k)).substr(0, 5) +
+			        "ms 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed)));
+	}
 }
 
 // ===========================================================================
@@ -2874,6 +3190,8 @@ static VkImageView     g_ssrV1ViewD = VK_NULL_HANDLE; // 采样用的深度 view
 static VkImage         g_ssrV1DSrc = VK_NULL_HANDLE;  //  KMT 那张是 DEPTH|STENCIL, 采样要分开)
 static VkImageView     g_ssrV1ViewB = VK_NULL_HANDLE; // v0.18.7: 底色 view (585 段16 后); 没底色 = 空
 static VkImage         g_ssrV1BSrc = VK_NULL_HANDLE;  // 上面那个 view 属于哪张底色图
+static VkImageView     g_ssrV1ViewW = VK_NULL_HANDLE; // v0.18.8: 段后水深 view (461 段17 后); 没水深 = 空
+static VkImage         g_ssrV1WSrc = VK_NULL_HANDLE;  // 上面那个 view 属于哪张水深图
 static VkImage         g_ssrV1RecDep = VK_NULL_HANDLE; // 录命令时用的深度图
 static unsigned long long g_ssrV1RecSig = 0;           // 录命令时的依赖签名 (见 ssrV1Sig)
 static bool            g_ssrV1DepLog = false;          // "深度没就绪先跑 2d" 只打一次
@@ -2909,6 +3227,8 @@ static unsigned long long ssrV1Sig()
 	cv.f = g_ssrV1Rev; s = mix(s, cv.u);
 	// v0.18.7: 底色图 (没建/建失败 = NULL, 着色器 p3.w 跟着变) + 三个新调参也要重录
 	s = mix(s, (unsigned long long)(uintptr_t)g_ssrVkImgBase);
+	// v0.18.8: 段后水深图 (没建/失败 = NULL ⇒ 着色器 p2.w=0, 法线退回 520 = v0.18.7 行为)
+	s = mix(s, (unsigned long long)(uintptr_t)g_ssrWDepImg);
 	s = mix(s, (unsigned long long)(unsigned)g_ssrV1Smooth);
 	s = mix(s, (unsigned long long)(unsigned)g_ssrV1Blur);
 	s = mix(s, (unsigned long long)(unsigned)g_ssrV1Debug);
@@ -2937,6 +3257,7 @@ static void ssrV1Free(PocbCtx& c)
 	if (g_ssrV1ViewC) { c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewC, nullptr); g_ssrV1ViewC = VK_NULL_HANDLE; }
 	if (g_ssrV1ViewD) { c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewD, nullptr); g_ssrV1ViewD = VK_NULL_HANDLE; }
 	if (g_ssrV1ViewB) { c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewB, nullptr); g_ssrV1ViewB = VK_NULL_HANDLE; }
+	if (g_ssrV1ViewW) { c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewW, nullptr); g_ssrV1ViewW = VK_NULL_HANDLE; }
 	if (g_ssrV1Dpool) { c.fns.vkDestroyDescriptorPool(c.vdev, g_ssrV1Dpool, nullptr); g_ssrV1Dpool = VK_NULL_HANDLE; }
 	if (g_ssrV1Dsl) { c.fns.vkDestroyDescriptorSetLayout(c.vdev, g_ssrV1Dsl, nullptr); g_ssrV1Dsl = VK_NULL_HANDLE; }
 	if (g_ssrV1SmpC) { c.fns.vkDestroySampler(c.vdev, g_ssrV1SmpC, nullptr); g_ssrV1SmpC = VK_NULL_HANDLE; }
@@ -2945,6 +3266,7 @@ static void ssrV1Free(PocbCtx& c)
 	g_ssrV1CSrc = VK_NULL_HANDLE;
 	g_ssrV1DSrc = VK_NULL_HANDLE;
 	g_ssrV1BSrc = VK_NULL_HANDLE;
+	g_ssrV1WSrc = VK_NULL_HANDLE;
 	g_ssrV1RecSrc = VK_NULL_HANDLE;
 	g_ssrV1RecDep = VK_NULL_HANDLE;
 	g_ssrV1RecSig = 0;
@@ -2985,6 +3307,17 @@ static void ssrV1DropViewB(PocbCtx& c)
 	g_ssrV1BSrc = VK_NULL_HANDLE;
 }
 
+// v0.18.8: 段后水深图要被销毁/换掉之前先调 (同上, 只是换水深 view)
+static void ssrV1DropViewW(PocbCtx& c)
+{
+	if (g_ssrV1ViewW)
+	{
+		c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewW, nullptr);
+		g_ssrV1ViewW = VK_NULL_HANDLE;
+	}
+	g_ssrV1WSrc = VK_NULL_HANDLE;
+}
+
 // 换设备: 旧 device 上的句柄**不能**拿来 destroy, 也不该在新 device 上引用 —— 只丢不毁
 static void ssrV1Drop()
 {
@@ -2999,6 +3332,7 @@ static void ssrV1Drop()
 	g_ssrV1ViewC = VK_NULL_HANDLE;
 	g_ssrV1ViewD = VK_NULL_HANDLE;
 	g_ssrV1ViewB = VK_NULL_HANDLE;
+	g_ssrV1ViewW = VK_NULL_HANDLE;
 	g_ssrV1Dpool = VK_NULL_HANDLE;
 	g_ssrV1Dsl = VK_NULL_HANDLE;
 	g_ssrV1SmpC = VK_NULL_HANDLE;
@@ -3008,6 +3342,7 @@ static void ssrV1Drop()
 	g_ssrV1CSrc = VK_NULL_HANDLE;
 	g_ssrV1DSrc = VK_NULL_HANDLE;
 	g_ssrV1BSrc = VK_NULL_HANDLE;
+	g_ssrV1WSrc = VK_NULL_HANDLE;
 	g_ssrV1RecSrc = VK_NULL_HANDLE;
 	g_ssrV1RecDep = VK_NULL_HANDLE;
 	g_ssrV1RecSig = 0;
@@ -3175,6 +3510,35 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		ssrV1DropViewB(c); // 底色图被退掉 (关闸/handle 变) ⇒ 摘 view, 描述符下次填回色
 	}
 
+	// --- 3c) v0.18.8 段后水深 view: 水深图由 ssrWDepVkBuild 每帧幂等建, 这里只负责 view ---
+	// 没水深 (ssr.wdep 关着 / 还没拷过 / 建失败) ⇒ 不建 view, 描述符 binding3 指向色 view +
+	// p2.w=0 ⇒ 着色器全部走 520 快照 = v0.18.7 行为 (倒影仍多边形拼图, 不算新故障)。
+	// 取 depth aspect (与 viewD 同口径): 那张是 D24S8, 采样只要深度面。
+	if (g_ssrWDepImg != VK_NULL_HANDLE && (!g_ssrV1ViewW || g_ssrV1WSrc != g_ssrWDepImg))
+	{
+		if (g_ssrV1ViewW)
+			c.fns.vkDestroyImageView(c.vdev, g_ssrV1ViewW, nullptr);
+		VkImageViewCreateInfo v{};
+		v.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		v.image = g_ssrWDepImg;
+		v.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		v.format = VK_FORMAT_D24_UNORM_S8_UINT;
+		v.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+		if (c.fns.vkCreateImageView(c.vdev, &v, nullptr, &g_ssrV1ViewW) != VK_SUCCESS)
+		{
+			// 只关水深这半边: 不 return, v1 照跑 (法线退回 520), 下次 dirty 再试
+			g_ssrV1ViewW = VK_NULL_HANDLE;
+			g_ssrV1WSrc = VK_NULL_HANDLE;
+			logLine("SSR侦察: [wdep] 段后水深 view 建不出 → 本帧法线退回 520 (v1 照跑)");
+		}
+		else
+			g_ssrV1WSrc = g_ssrWDepImg;
+	}
+	else if (g_ssrWDepImg == VK_NULL_HANDLE && g_ssrV1ViewW)
+	{
+		ssrV1DropViewW(c); // 水深图被退掉 (关闸/handle 变/设备变) ⇒ 摘 view, 描述符下次填回色
+	}
+
 	// --- 4) 采样器: 色线性 / 深 NEAREST, 都 clamp-to-edge (出屏兜底靠 clamp) ---
 	if (!g_ssrV1SmpC || !g_ssrV1SmpD)
 	{
@@ -3197,12 +3561,13 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 			return fail("vkCreateSampler(深度) 建不出");
 	}
 
-	// --- 5) 描述符: 三个 COMBINED_IMAGE_SAMPLER (binding 0 色 / 1 深 / 2 底色) ---
+	// --- 5) 描述符: 四个 COMBINED_IMAGE_SAMPLER (binding 0 色 / 1 深 / 2 底色 / 3 段后水深) ---
 	// v0.18.7: binding2 没底色时指向**色 view** (描述符必须始终有效), 由 push constant p3.w
 	// 告诉着色器采不采它 —— 免得出现"没底色却采了空 view"的未定义行为。
+	// v0.18.8: binding3 同理, 没水深时也指色 view, 由 p2.w 说了算。
 	if (!g_ssrV1Dsl)
 	{
-		VkDescriptorSetLayoutBinding b[3]{};
+		VkDescriptorSetLayoutBinding b[4]{};
 		b[0].binding = 0;
 		b[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		b[0].descriptorCount = 1;
@@ -3211,9 +3576,11 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		b[1].binding = 1;
 		b[2] = b[0];
 		b[2].binding = 2;
+		b[3] = b[0];
+		b[3].binding = 3;
 		VkDescriptorSetLayoutCreateInfo li{};
 		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-		li.bindingCount = 3;
+		li.bindingCount = 4;
 		li.pBindings = b;
 		if (c.fns.vkCreateDescriptorSetLayout(c.vdev, &li, nullptr, &g_ssrV1Dsl) != VK_SUCCESS)
 			return fail("vkCreateDescriptorSetLayout 建不出");
@@ -3222,7 +3589,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 	{
 		VkDescriptorPoolSize ps{};
 		ps.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		ps.descriptorCount = 3;
+		ps.descriptorCount = 4;
 		VkDescriptorPoolCreateInfo pi{};
 		pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		pi.maxSets = 1;
@@ -3243,7 +3610,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		// 先填一次 (view 变了会在下面重新填; 未填的 set 绝不能提交)
 	}
 	{
-		VkDescriptorImageInfo di[3]{};
+		VkDescriptorImageInfo di[4]{};
 		di[0].sampler = g_ssrV1SmpC;
 		di[0].imageView = g_ssrV1ViewC;
 		di[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -3253,7 +3620,10 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		di[2].sampler = g_ssrV1SmpC;
 		di[2].imageView = g_ssrV1ViewB ? g_ssrV1ViewB : g_ssrV1ViewC;
 		di[2].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		VkWriteDescriptorSet w[3]{};
+		di[3].sampler = g_ssrV1SmpD;
+		di[3].imageView = g_ssrV1ViewW ? g_ssrV1ViewW : g_ssrV1ViewC;
+		di[3].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		VkWriteDescriptorSet w[4]{};
 		w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		w[0].dstSet = g_ssrV1Set;
 		w[0].dstBinding = 0;
@@ -3266,7 +3636,10 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		w[2] = w[0];
 		w[2].dstBinding = 2;
 		w[2].pImageInfo = &di[2];
-		c.fns.vkUpdateDescriptorSets(c.vdev, 3, w, 0, nullptr);
+		w[3] = w[0];
+		w[3].dstBinding = 3;
+		w[3].pImageInfo = &di[3];
+		c.fns.vkUpdateDescriptorSets(c.vdev, 4, w, 0, nullptr);
 	}
 
 	// --- 6) framebuffer (出向图 view / 尺寸变了要重建) ---
@@ -3383,7 +3756,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 	}
 
 	g_ssrV1State = 1;
-	logLine("SSR侦察: [v1] SSR v1 就绪: 全屏三角 + 3 binding(色/深/底色) + push constant 64B "
+	logLine("SSR侦察: [v1] SSR v1 就绪: 全屏三角 + 4 binding(色/深/底色/段后水深) + push constant 64B "
 	        "mode=" + std::to_string(g_ssrV1Mode) +
 	        " fov=" + std::to_string(g_ssrV1Fov) +
 	        " near=" + std::to_string(g_ssrV1Near) +
@@ -3395,7 +3768,9 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 	        " blur=" + std::to_string(g_ssrV1Blur) +
 	        " debug=" + std::to_string(g_ssrV1Debug) +
 	        " 底色=" + std::string(g_ssrV1ViewB ? "585段16后(含水)" : "324(ssr.base585 关/没建)") +
-	        " — 输入=324色+520深度, 输出=出向镜像(下帧特征B 进 585)");
+	        " 水深=" +
+	        std::string(g_ssrV1ViewW ? "461段17后(真水面深度)" : "520河床(ssr.wdep 关/没拷)") +
+	        " — 输入=324色+520深度+585底色+461段后水深, 输出=出向镜像(下帧特征B 进 585)");
 	return true;
 }
 
@@ -3480,6 +3855,14 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		        VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 		        VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
 		        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	// ③b 段后水深 (v0.18.8 正解B): GENERAL → SHADER_READ_ONLY, 组合深度/模板格式必须同时带
+	//    DEPTH|STENCIL 两位 (规范要求, 与②同口径); 没水深 (viewW 空) 整段跳过 —— 只关自己。
+	//    跨 API 写 (每帧 D3D11 CopyResource) 用 ALL_COMMANDS + MEMORY_WRITE 兜住, 与色/底色同款。
+	if (g_ssrV1ViewW)
+		barrier(g_ssrWDepImg, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+		        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+		        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+		        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
 	VkRenderPassBeginInfo rb{};
 	rb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -3526,10 +3909,10 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		pc.p2[0] = static_cast<float>(w);
 		pc.p2[1] = static_cast<float>(h);
 		pc.p2[2] = g_ssrV1Rev; // 反向深度开关 (ssr.rev=1 时着色器把深度翻回标准口径)
-		pc.p2[3] = 0.0f;
+		pc.p2[3] = g_ssrV1ViewW ? 1.0f : 0.0f; // v0.18.8: 段后水深开关 (没水深 ⇒ 法线用 520)
 		pc.p3[0] = static_cast<float>(g_ssrV1Smooth); // 法线差分邻域 (px) —— 抗"倒影破碎"主力
 		pc.p3[1] = static_cast<float>(g_ssrV1Blur);   // 反射色 5tap 空间平滑
-		pc.p3[2] = static_cast<float>(g_ssrV1Debug);  // 0 正常 / 1 法线 / 2 命中 / 3 深度
+		pc.p3[2] = static_cast<float>(g_ssrV1Debug);  // 0 正常/1 法线/2 命中/3 深度/4 段后水深/5 水面像素
 		pc.p3[3] = g_ssrV1ViewB ? 1.0f : 0.0f;        // 底色开关 (没底色 ⇒ 采 uColor 当底色)
 		c.fns.vkCmdPushConstants(g_ssrVkCmdOut, g_ssrV1Pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
 		                         sizeof(pc), &pc);
@@ -3552,6 +3935,13 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		        VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
 		        VK_ACCESS_MEMORY_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 		        VK_IMAGE_LAYOUT_GENERAL);
+	// ④b 段后水深复原 GENERAL: 下帧段18 换绑时 D3D11 要 CopyResource(461 → 水深镜像) 进它
+	//    (跨 API 只认 GENERAL) —— 不复原的话下一次写进来的还是 SHADER_READ_ONLY, 那是错的布局。
+	if (g_ssrV1ViewW)
+		barrier(g_ssrWDepImg, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+		        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+		        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT,
+		        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
 	return true;
 }
 

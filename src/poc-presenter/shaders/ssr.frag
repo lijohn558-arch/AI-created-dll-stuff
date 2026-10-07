@@ -14,20 +14,32 @@
 //     含水) —— fresnel 正对相机时权重只有 ~0.08, 92% 是底色, 底色没水 ⇒ 水看起来仍透明。
 //     ssr.base585 关着/建不出时 p3.w=0 ⇒ 退回采 uColor (v0.18.6 行为)。
 //
+// v0.18.8 正解B (v0.18.7 实跑归因: A 平滑只治一半, 倒影仍碎成"不规则多边形拼图"):
+//   根因 = 水面像素在 uDepth(520, 段16 **之前** 的快照) 里读到的是**河床三角面** ⇒ 差分出的
+//   法线 = 河床的面法线, 一整块三角形一个法线 ⇒ 反射方向按三角形跳变 ⇒ 拼图。半径调大只是
+//   把碎石糊成大石, 面间跳变永远在 —— 换数据源才治本。
+//   uWdep (第5张镜像 = 461 段17 之后) 里是**真·水面深度** (段17 那笔 depth 只写不测的水体并回
+//   写进去的), 水面像素法线/反射原点改用它: 判据 = 水深比河床更近 (zW > zPre) ⇒ 只在水面上切
+//   换, 非水面自动保持原样; 461 被 UI 中途 ClearDS 清掉时判据不成立 ⇒ 整帧退回 520 = v0.18.7
+//   行为, 天生自愈。**ray march 的层级仍用 uDepth** —— 射线从水面出发, 用水面深度当层级会
+//   一出门就打在自己脚下的水面上, 一个也命中不了。
+//
 // 输入: uColor = 324 场景色镜像 (RGBA16F, 段16 前的快照) —— 反射源
-//       uDepth = 520 深度快照  (D24, 取 depth aspect)
+//       uDepth = 520 深度快照  (D24, 取 depth aspect) —— 行进层级 + 非水面像素的法线源
 //       uBase  = 585 段16 后镜像 (RGBA16F, 含水画面) —— 合成底色 (可缺)
+//       uWdep  = 461 段17 后镜像 (D24, 真·水面深度) —— 水面像素的法线/原点 (可缺)
 // 输出: 覆盖式写进出向镜像 (下帧特征B 整幅拷进 585)
 layout(set = 0, binding = 0) uniform sampler2D uColor;
 layout(set = 0, binding = 1) uniform sampler2D uDepth;
 layout(set = 0, binding = 2) uniform sampler2D uBase;
+layout(set = 0, binding = 3) uniform sampler2D uWdep; // v0.18.8: 缺时填色 view + p2.w=0
 
 layout(push_constant) uniform PC
 {
 	vec4 p0; // x=tanHalfY  y=aspect  z=near  w=far
 	vec4 p1; // x=mode(0 透传 / 1 SSR)  y=steps  z=strength  w=march 最大距离 (**单位 = near**)
-	vec4 p2; // x=width  y=height  z=rev(反向深度开关)  w 备用
-	vec4 p3; // x=smooth(法线差分邻域 px)  y=blur(0/1)  z=debug(0/1/2/3)  w=用底色(1=采 uBase)
+	vec4 p2; // x=width  y=height  z=rev(反向深度开关)  w=用段后水深(1=采 uWdep)
+	vec4 p3; // x=smooth(法线差分邻域 px)  y=blur(0/1)  z=debug(0..5)  w=用底色(1=采 uBase)
 } pc;
 
 layout(location = 0) in vec2 vUV;
@@ -60,9 +72,19 @@ vec3 viewPos(vec2 uv, float d)
 }
 
 // 采一格深度并反推视图空间位置 (uv 先 clamp 到屏内 => 大邻域取样不会出界)
-vec3 PAt(vec2 uv)
+// v0.18.8: wdep=true 时改从 uWdep (段后水深) 取 —— 法线差分的 4 个邻点用**与中心同一个源**,
+// 免得水面/河床两种几何混在一个叉积里 (那会在水边线拉出假棱)。
+float dAt(vec2 uv, bool wdep)
 {
-	return viewPos(uv, texture(uDepth, clamp(uv, vec2(0.0), vec2(1.0))).r);
+	vec2 c = clamp(uv, vec2(0.0), vec2(1.0));
+	if (!wdep)
+		return texture(uDepth, c).r;
+	return texture(uWdep, c).r;
+}
+
+vec3 PAt(vec2 uv, bool wdep)
+{
+	return viewPos(uv, dAt(uv, wdep));
 }
 
 vec2 projectUV(vec3 q)
@@ -79,7 +101,30 @@ void main()
 {
 	vec2 uv = vUV;
 	vec4 base = texture(uColor, uv);
-	float d = linD(texture(uDepth, uv).r); // 反向深度先翻回标准口径
+	float dPreR = texture(uDepth, uv).r; // 520 段16 前快照 (raw, 可能是反向深度)
+	float d = linD(dPreR);               // 反向深度先翻回标准口径
+
+	// ---- v0.18.8 正解B: 段后水深判据 ----
+	// 三条件: p2.w 说有水深镜像 + 水深本身有效 + 水深比河床更近 (viewZ 更大 = 离相机更近)。
+	// 第三条是关键: 非水面像素上 461 与 520 同源同内容 (不成立), 水面像素上 461 = 水面 (成立)
+	// ⇒ 只在水面切源; 461 若被 UI 中途 ClearDS 清成全 1.0 ⇒ 更远 ⇒ 不成立 ⇒ 整帧退回 520 =
+	// v0.18.7 行为 —— 不会算出比上一版更坏的结果 (自愈)。**行进层级仍固定用 uDepth**, 见文件头。
+	float dWr = (pc.p2.w > 0.5) ? texture(uWdep, uv).r : -1.0;
+	bool useW = (pc.p2.w > 0.5) && dWr > 0.0 && dWr < 1.0 && (viewZ(dWr) > viewZ(dPreR));
+
+	// debug=4: 段后水深灰度 (没水深时全黑) —— 验证第5张镜像的内容是不是"平滑的水面"
+	// (若与 debug=3 (520=河床) 几乎一样 ⇒ 拷的时机/源不对, 先看日志 [wdep] 判据)
+	if (pc.p3.z > 3.5 && pc.p3.z < 4.5)
+	{
+		oColor = vec4(vec3(dWr >= 0.0 ? linD(dWr) : 0.0), 1.0);
+		return;
+	}
+	// debug=5: 水面像素判定图 (绿 = 用了段后水深, 背景 = 520 深度灰度) —— 验证判据命中范围
+	if (pc.p3.z > 4.5)
+	{
+		oColor = useW ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(vec3(max(d, 0.0)), 1.0);
+		return;
+	}
 
 	// debug=3: 深度可视化 (灰度, 越白越近) —— 一眼看清水面像素读到的到底是河床还是水面
 	if (pc.p3.z > 2.5)
@@ -104,12 +149,14 @@ void main()
 	float R = clamp(pc.p3.x, 1.0, 16.0); // ssr.smooth 邻域半径 (px)
 	vec2 ox = vec2(px.x * R, 0.0);
 	vec2 oy = vec2(0.0, px.y * R);
-	vec3 P = viewPos(uv, d);
-	// 中心差分还原法线 (半径 R 可调, 见文件头 A): 水面像素深度 = 水底 ⇒ 小半径会拿到碎石法线
-	vec3 Pl = PAt(uv - ox);
-	vec3 Pr = PAt(uv + ox);
-	vec3 Pu = PAt(uv - oy);
-	vec3 Pd = PAt(uv + oy);
+	// 反射原点 + 法线的深度源: 水面像素用段后水深 (真水面), 其余用 520 (行进层级也是 520)
+	vec3 P = viewPos(uv, useW ? dWr : dPreR);
+	// 中心差分还原法线 (半径 R 可调, 见文件头 A): v0.18.8 起水面走 uWdep ⇒ 差出来的是平的水面,
+	// 河床三角面法线只影响非水面像素 (那里本来就该是地形法线)。
+	vec3 Pl = PAt(uv - ox, useW);
+	vec3 Pr = PAt(uv + ox, useW);
+	vec3 Pu = PAt(uv - oy, useW);
+	vec3 Pd = PAt(uv + oy, useW);
 	vec3 cx = cross(Pr - Pl, Pd - Pu);
 	// 平坦/退化时叉积接近 0 => 兜底一个朝相机的法线 (视图空间 +Z), 免得 normalize 出 NaN
 	vec3 N = (dot(cx, cx) > 1e-20) ? normalize(cx) : vec3(0.0, 0.0, 1.0);
