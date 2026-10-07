@@ -3235,6 +3235,9 @@ static unsigned long long ssrV1Sig()
 	// v0.18.9: 涟漪回注量也进签名 (push p4 变了 ⇒ 必须重录)
 	cv.f = g_ssrV1Ripple;
 	s = mix(s, cv.u);
+	// v0.18.10: 带宽与回注方式 (亮度/位移) 也是 push constant 的内容, 同样要重录
+	s = mix(s, (unsigned long long)(unsigned)g_ssrV1RippleSz);
+	s = mix(s, (unsigned long long)(unsigned)g_ssrV1RippleMode);
 	return s ? s : 1;
 }
 
@@ -3759,7 +3762,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 	}
 
 	g_ssrV1State = 1;
-	logLine("SSR侦察: [v1] SSR v1 就绪: 全屏三角 + 4 binding(色/深/底色/段后水深) + push constant 64B "
+	logLine("SSR侦察: [v1] SSR v1 就绪: 全屏三角 + 4 binding(色/深/底色/段后水深) + push constant 80B "
 	        "mode=" + std::to_string(g_ssrV1Mode) +
 	        " fov=" + std::to_string(g_ssrV1Fov) +
 	        " near=" + std::to_string(g_ssrV1Near) +
@@ -3770,6 +3773,9 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 	        " smooth=" + std::to_string(g_ssrV1Smooth) +
 	        " blur=" + std::to_string(g_ssrV1Blur) +
 	        " debug=" + std::to_string(g_ssrV1Debug) +
+	        " ripple=" + std::to_string(g_ssrV1Ripple) +
+	        " ripplesz=" + std::to_string(g_ssrV1RippleSz) +
+	        " ripplemode=" + std::to_string(g_ssrV1RippleMode) +
 	        " 底色=" + std::string(g_ssrV1ViewB ? "585段16后(含水)" : "324(ssr.base585 关/没建)") +
 	        " 水深=" +
 	        std::string(g_ssrV1ViewW ? "461段17后(真水面深度)" : "520河床(ssr.wdep 关/没拷)") +
@@ -3916,12 +3922,12 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		pc.p2[3] = g_ssrV1ViewW ? 1.0f : 0.0f; // v0.18.8: 段后水深开关 (没水深 ⇒ 法线用 520)
 		pc.p3[0] = static_cast<float>(g_ssrV1Smooth); // 法线差分邻域 (px) —— 抗"倒影破碎"主力
 		pc.p3[1] = static_cast<float>(g_ssrV1Blur);   // 反射色 5tap 空间平滑
-		pc.p3[2] = static_cast<float>(g_ssrV1Debug);  // 0 正常/1 法线/2 命中/3 深度/4 段后水深/5 水面像素
+		pc.p3[2] = static_cast<float>(g_ssrV1Debug);  // 0..7 (v0.18.10: +6 回注可视化 / +7 uBase 原样)
 		pc.p3[3] = g_ssrV1ViewB ? 1.0f : 0.0f;        // 底色开关 (没底色 ⇒ 采 uColor 当底色)
-		// v0.18.9 p4 = (涟漪回注量, 预留×3) —— 把 uBase 里段16 的高频涟漪调制乘回 SSR
+		// v0.18.9 p4 = (涟漪回注量); v0.18.10 填 y=带宽(px) z=回注方式 0亮度/1位移
 		pc.p4[0] = g_ssrV1Ripple;
-		pc.p4[1] = 0.0f;
-		pc.p4[2] = 0.0f;
+		pc.p4[1] = static_cast<float>(g_ssrV1RippleSz);
+		pc.p4[2] = static_cast<float>(g_ssrV1RippleMode);
 		pc.p4[3] = 0.0f;
 		c.fns.vkCmdPushConstants(g_ssrVkCmdOut, g_ssrV1Pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
 		                         sizeof(pc), &pc);

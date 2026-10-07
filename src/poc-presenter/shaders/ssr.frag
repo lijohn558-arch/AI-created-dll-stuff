@@ -40,6 +40,24 @@
 //     这里把 uBase 的**高频**亮度结构 (5tap 低频被除掉, 只剩涟漪那一档 ⇒ 不会把探针的山/天
 //     重新印上来) 按比例乘回 SSR, 量由 `ssr.ripple` (p4.x) 控制, 0 = 关。
 //
+// v0.18.10 (v0.18.9 实跑归因: ①回注出来的波纹"非常细小, 不如原本明显" ②倒影"仍然多重堆叠") ——
+//   先把段17 的权重从反汇编里逐条算死 (docs/analysis/S1-pass6-ps-disasm.txt:460-481):
+//     r1.z = 扭曲UV∈[0,1] 且 588.a==1; 合法时:
+//       cb2.z==0 ⇒ w = (0.95 - 0.85·mask339) · depthW[0.1..0.95] · cb2.w   (339≈1 ⇒ w ≤ 0.095)
+//       cb2.z!=0 ⇒ w = 0.95 (只给 5% 我们这层 —— 真机上反射看得见 ⇒ 走的必是上一支 ⇒ w≤0.095)
+//   ⇒ 最终水面 ≈ **90% 我们写的 585 + 9.5% 扭曲场景色**, 再叠段18 的水体混合。这三样是游戏自己的,
+//     换不掉; 能换的只有 585 这一层的内容。段18 首笔绑定 (ev39585: t0=19520 / t1=520 / t2=18483)
+//     证明它**不读 585**, `321→324` 拷贝 = ev39225 在段16 **之前** ⇒ 也没有跨帧递归 —— 所以
+//     "多层堆叠"只可能出在①我们这层自己 (回注印上来的轮廓 / 5tap 叠影) 或 ②游戏那 9.5%+水体,
+//     两者靠**只动一个旋钮的隔离试验**分开 (docs/02 §14.25.1): strength=0 → ripple=0 → blur=0。
+//   B 回注的两个缺陷就地修 (②仍是待验证项, 隔离试验说了算):
+//     ①带宽写死 2px ⇒ 只抓得住像素级噪点 (现象 = 波纹细小) ⇒ 改成 `ssr.ripplesz` (p4.y, 1..16px);
+//     ②只做亮度调制 ⇒ 原版涟漪本质是**反射方向被水面法线扰动**, 亮度做得再准也不像波纹
+//       ⇒ 新增 `ssr.ripplemode=1` **位移式**: 采样前拖 ruv, 梯度取「1px 梯度 − Rb 梯度」——
+//       阶跃轮廓两支梯度相近 ⇒ 相减归 0 (不把探针的山/天轮廓印上来); 波纹波长 ≈ 2·Rb 时两支
+//       差最大 ⇒ 拖动跟着波纹走, 且天然只对 Rb 这一档波长起效 (调 ripplesz = 调"认哪档波")。
+//     debug=6 回注可视化 / debug=7 uBase 原样 (看原版涟漪长啥样、波长多少 ⇒ 定 ripplesz 的依据)。
+//
 // 输入: uColor = 324 场景色镜像 (RGBA16F, 段16 前的快照) —— 反射源
 //       uDepth = 520 深度快照  (D24, 取 depth aspect) —— 行进层级 + 非水面像素的法线源
 //       uBase  = 585 段16 后镜像 (RGBA16F, 含水画面) —— 合成底色 (可缺)
@@ -55,8 +73,9 @@ layout(push_constant) uniform PC
 	vec4 p0; // x=tanHalfY  y=aspect  z=near  w=far
 	vec4 p1; // x=mode(0 透传 / 1 SSR)  y=steps  z=strength(**SSR 替换比 0..1**)  w=march 最大距离 (**单位 = near**)
 	vec4 p2; // x=width  y=height  z=rev(反向深度开关)  w=用段后水深(1=采 uWdep)
-	vec4 p3; // x=smooth(法线差分邻域 px)  y=blur(0/1)  z=debug(0..5)  w=用底色(1=采 uBase)
-	vec4 p4; // v0.18.9: x=ripple(涟漪回注量 0..1)  y/z/w 预留 (push constant 64B → 80B)
+	vec4 p3; // x=smooth(法线差分邻域 px)  y=blur(0/1)  z=debug(0..7)  w=用底色(1=采 uBase)
+	vec4 p4; // v0.18.9: x=ripple(涟漪回注量 0..1)  y=ripplesz(回注带宽 px 1..16)
+	         // v0.18.10: z=ripplemode(0=亮度调制 / 1=位移扭曲)  w=预留 (push constant 64B → 80B)
 } pc;
 
 layout(location = 0) in vec2 vUV;
@@ -137,14 +156,14 @@ void main()
 		return;
 	}
 	// debug=5: 水面像素判定图 (绿 = 用了段后水深, 背景 = 520 深度灰度) —— 验证判据命中范围
-	if (pc.p3.z > 4.5)
+	if (pc.p3.z > 4.5 && pc.p3.z < 5.5)
 	{
 		oColor = useW ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(vec3(max(d, 0.0)), 1.0);
 		return;
 	}
 
 	// debug=3: 深度可视化 (灰度, 越白越近) —— 一眼看清水面像素读到的到底是河床还是水面
-	if (pc.p3.z > 2.5)
+	if (pc.p3.z > 2.5 && pc.p3.z < 3.5)
 	{
 		oColor = vec4(vec3(d), 1.0);
 		return;
@@ -153,9 +172,9 @@ void main()
 	// mode=0 (或深度缺失: 深度会整片是 0/1 之外的垃圾) => 纯透传, 与 2d 出向拷贝等价
 	if (pc.p1.x < 0.5 || d <= 0.0 || d >= 1.0)
 	{
-		if (pc.p3.z > 1.5)
+		if (pc.p3.z > 1.5) // 2..7 (3/4/5 已在上面返回): 没可用深度 = 灰; 1 (法线) 照旧走透传
 		{
-			oColor = vec4(0.5); // debug=2: 这格没有可用深度 = 灰
+			oColor = vec4(0.5); // debug=2/6/7: 这格没有可用深度 = 灰
 			return;
 		}
 		oColor = base;
@@ -227,7 +246,8 @@ void main()
 	}
 
 	// ssr.debug 诊断画面 (1=重建法线, 2=命中绿/未命中红) —— 判读"倒影破碎"是法线问题还是命中问题
-	if (pc.p3.z > 0.5)
+	// (v0.18.10: 收成 [0.5,2.5) 区间, 否则 6/7 会在这里被提前 return 掉)
+	if (pc.p3.z > 0.5 && pc.p3.z < 2.5)
 	{
 		if (pc.p3.z < 1.5)
 		{
@@ -243,6 +263,48 @@ void main()
 
 	// 命中 => 采那一处的场景色; 未命中 => 屏幕边缘延展 (射线最后一个在屏位置)
 	vec2 ruv = clamp(hit ? hitUV : lastUV, vec2(0.0), vec2(1.0));
+
+	// ---- v0.18.9/v0.18.10 B: 涟漪回注的**场**先算 (位移式要赶在采样之前, 因为它改 ruv) ----
+	float ripA = clamp(pc.p4.x, 0.0, 1.0); // ssr.ripple   回注量 0..1
+	float Rb = clamp(pc.p4.y, 1.0, 16.0);  // ssr.ripplesz 带宽 (px)
+	float kf = 1.0;                        // mode0 亮度回注系数 (debug=6 画它)
+	vec2 ripd = vec2(0.0);                 // mode1 位移量 (uv 单位, 直接加到 ruv)
+	if (pc.p3.w > 0.5 && ripA > 0.001)
+	{
+		vec2 kx = vec2(px.x * Rb, 0.0);
+		vec2 ky = vec2(0.0, px.y * Rb);
+		if (pc.p4.z < 0.5)
+		{
+			// mode0 = v0.18.9 老路: 中心/宽带亮度比, 低频被 5tap 除掉 ⇒ 只剩涟漪那一档
+			vec3 cb = baseRGB * 0.4 + texture(uBase, uv + kx).rgb * 0.15 +
+			          texture(uBase, uv - kx).rgb * 0.15 + texture(uBase, uv + ky).rgb * 0.15 +
+			          texture(uBase, uv - ky).rgb * 0.15;
+			float l0 = dot(baseRGB, vec3(0.2126, 0.7152, 0.0722));
+			float lb = dot(cb, vec3(0.2126, 0.7152, 0.0722));
+			kf = clamp(l0 / max(lb, 1e-3), 0.4, 2.5); // ≈1 的高频比 (探针暗处也不会炸)
+		}
+		else
+		{
+			// mode1 = 位移式: 原版涟漪 = 反射方向被水面法线扰动 ⇒ 拖 ruv 才像波纹。
+			// 梯度取「1px 梯度 − Rb 梯度」: 阶跃轮廓两支梯度相近 ⇒ 相减归 0, 不把探针的山/天
+			// 轮廓印上来; 波纹波长 ≈ 2·Rb 时两支差最大 ⇒ 天然只对 ripplesz 这一档波长起效。
+			vec3 cL = texture(uBase, uv - vec2(px.x, 0.0)).rgb;
+			vec3 cR = texture(uBase, uv + vec2(px.x, 0.0)).rgb;
+			vec3 cU = texture(uBase, uv - vec2(0.0, px.y)).rgb;
+			vec3 cD = texture(uBase, uv + vec2(0.0, px.y)).rgb;
+			vec3 bL = texture(uBase, uv - kx).rgb;
+			vec3 bR = texture(uBase, uv + kx).rgb;
+			vec3 bU = texture(uBase, uv - ky).rgb;
+			vec3 bD = texture(uBase, uv + ky).rgb;
+			vec2 g1 = vec2(dot(cR - cL, vec3(0.2126, 0.7152, 0.0722)),
+			               dot(cD - cU, vec3(0.2126, 0.7152, 0.0722))); // 1px 梯度
+			vec2 g2 = vec2(dot(bR - bL, vec3(0.2126, 0.7152, 0.0722)),
+			               dot(bD - bU, vec3(0.2126, 0.7152, 0.0722))); // Rb 梯度
+			ripd = clamp((g1 - g2) * 10.0, vec2(-1.0), vec2(1.0)) * (6.0 * px) * ripA;
+			ruv = clamp(ruv + ripd, vec2(0.0), vec2(1.0));
+		}
+	}
+
 	vec3 refl;
 	if (pc.p3.y > 0.5)
 	{
@@ -260,22 +322,31 @@ void main()
 	else
 		refl = texture(uColor, ruv).rgb;
 
-	// ---- v0.18.9 B: 涟漪回注 (把段16 反射里的高频涟漪调制乘回 SSR) ----
-	// 低频用 5tap 除掉 ⇒ 只保留几像素级的结构 (涟漪), 探针自己的山/天是低频不会被印上来。
-	if (pc.p3.w > 0.5 && pc.p4.x > 0.001)
-	{
-		vec2 kx = vec2(px.x * 2.0, 0.0);
-		vec2 ky = vec2(0.0, px.y * 2.0);
-		vec3 cb = baseRGB * 0.4 + texture(uBase, uv + kx).rgb * 0.15 +
-		          texture(uBase, uv - kx).rgb * 0.15 + texture(uBase, uv + ky).rgb * 0.15 +
-		          texture(uBase, uv - ky).rgb * 0.15;
-		float l0 = dot(baseRGB, vec3(0.2126, 0.7152, 0.0722));
-		float lb = dot(cb, vec3(0.2126, 0.7152, 0.0722));
-		float kf = clamp(l0 / max(lb, 1e-3), 0.4, 2.5); // ≈1 的高频比 (探针暗处也不会炸)
-		refl *= mix(1.0, kf, clamp(pc.p4.x, 0.0, 1.0));
-	}
+	// mode0 的亮度回注放在**采样之后**乘 (位移式已在上面把 ruv 挪过了);
+	// 下面的兜底行在它之后 ⇒ "一跳都没进屏"时回注被原样盖掉, 保证 strength=0 是逐字节原版。
+	if (pc.p3.w > 0.5 && ripA > 0.001 && pc.p4.z < 0.5)
+		refl *= mix(1.0, kf, ripA);
 	if (!hit && lastUV == uv)
 		refl = baseRGB; // 一跳都没进屏 => 保持底色 (= 原版 cubemap 兜底, 覆盖掉上面的回注)
+
+	// debug=6: 回注可视化 —— mode0 画 kf (蓝=被提亮 / 红=被压暗 / 黑=这格没回注), mode1 画位移灰度
+	// debug=7: uBase 原样 (游戏自己写的那层) —— 对照原版涟漪的形态与波长, 据此定 ssr.ripplesz
+	if (pc.p3.z > 5.5)
+	{
+		if (pc.p3.z > 6.5)
+		{
+			oColor = vec4(texture(uBase, uv).rgb, 1.0);
+			return;
+		}
+		if (pc.p4.z < 0.5)
+		{
+			float dk = clamp((kf - 1.0) * 1.5, -1.0, 1.0);
+			oColor = dk >= 0.0 ? vec4(0.0, 0.0, dk, 1.0) : vec4(-dk, 0.0, 0.0, 1.0);
+		}
+		else
+			oColor = vec4(vec3(clamp(length(ripd) / (6.0 * px.x), 0.0, 1.0)), 1.0);
+		return;
+	}
 
 	// ---- v0.18.9 A: 585 = **纯反射层** (段17 契约, 见文件头) ----
 	// 层叠归段17: 我方只给"这一层是什么", 不再自算 fresnel 也不再把 cubemap 掺进合成里。
