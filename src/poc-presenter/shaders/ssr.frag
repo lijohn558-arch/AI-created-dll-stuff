@@ -57,6 +57,8 @@
 //       阶跃轮廓两支梯度相近 ⇒ 相减归 0 (不把探针的山/天轮廓印上来); 波纹波长 ≈ 2·Rb 时两支
 //       差最大 ⇒ 拖动跟着波纹走, 且天然只对 Rb 这一档波长起效 (调 ripplesz = 调"认哪档波")。
 //     debug=6 回注可视化 / debug=7 uBase 原样 (看原版涟漪长啥样、波长多少 ⇒ 定 ripplesz 的依据)。
+//     debug=8 v0.18.15 单位回补量 (Reinhard 灰度) —— 直接读出「ssr.v1det 能往哪加、能加多少」,
+//              不乘 det ⇒ v1det=0 也能拍, 因此不受跨图差分的机位/光照/水面动画噪音影响。
 //
 // v0.18.11 (v0.18.10 实跑截图 docs/analysis/Screenshot_SSR debug.png: 「扇形范围内是错误的倒影,
 //   屏幕两边一小部分水纹正常」) —— 把图和代码对上, 那个扇形是 **hit/miss 的结构**, 不是 bug 面积:
@@ -123,7 +125,7 @@ layout(push_constant) uniform PC
 	vec4 p0; // x=tanHalfY  y=aspect  z=near  w=far
 	vec4 p1; // x=mode(0 透传 / 1 SSR)  y=steps  z=strength(**SSR 替换比 0..1**)  w=march 最大距离 (**单位 = near**)
 	vec4 p2; // x=width  y=height  z=rev(反向深度开关)  w=用段后水深(1=采 uWdep)
-	vec4 p3; // x=smooth(法线差分邻域 px)  y=blur(0/1)  z=debug(0..7)  w=用底色(1=采 uBase)
+	vec4 p3; // x=smooth(法线差分邻域 px)  y=blur(0/1)  z=debug(0..8)  w=用底色(1=采 uBase)
 	vec4 p4; // v0.18.9: x=ripple(涟漪回注量 0..1)  y=ripplesz(回注带宽 px 1..16)
 	         // v0.18.10: z=ripplemode(0=亮度调制 / 1=位移扭曲)
 	         // v0.18.11: w=edge(0=未命中回原版层(默认) / 1=边缘延展) (push constant 64B → 80B)
@@ -237,9 +239,9 @@ void main()
 	// mode=0 (或深度缺失: 深度会整片是 0/1 之外的垃圾) => 纯透传, 与 2d 出向拷贝等价
 	if (pc.p1.x < 0.5 || d <= 0.0 || d >= 1.0)
 	{
-		if (pc.p3.z > 1.5) // 2..7 (3/4/5 已在上面返回): 没可用深度 = 灰; 1 (法线) 照旧走透传
+		if (pc.p3.z > 1.5) // 2..8 (3/4/5 已在上面返回): 没可用深度 = 灰; 1 (法线) 照旧走透传
 		{
-			oColor = vec4(0.5); // debug=2/6/7: 这格没有可用深度 = 灰
+			oColor = vec4(0.5); // debug=2/6/7/8: 这格没有可用深度 = 灰
 			return;
 		}
 		oColor = base;
@@ -468,6 +470,29 @@ void main()
 
 	// debug=6: 回注可视化 —— mode0 画 kf (蓝=被提亮 / 红=被压暗 / 黑=这格没回注), mode1 画位移灰度
 	// debug=7: uBase 原样 (游戏自己写的那层) —— 对照原版涟漪的形态与波长, 据此定 ssr.ripplesz
+	// debug=8: v0.18.15 单位回补量 —— 把**最终会加回去的那部分**渲成灰度 (Reinhard 压缩, 可逆):
+	//          l = dot(add, luma); y = l/(1+l) ⇒ 读数时 l = y/(1-y)。
+	//          加数与合成式**逐项同式** (max(baseRGB-refl,0) * gb * wSsr), 只是**不乘 ssr.v1det**
+	//          ⇒ 表示"det=1 时的满量程", 所以 v1det=0 也能拍。
+	//          为什么要它: 跨图差分已被光照漂移吃掉 (§14.31 实测 10 分钟水面外亮斑 +16.6%,
+	//          比回补量本身大), 而这是一张**直接读出"哪里能加、加多少"**的图, 不受机位/
+	//          光照/水面动画影响。黑 = 那里没得补 (refl 已 >= baseRGB, 或 wSsr=0 = 非命中/贴边),
+	//          白 = 那里原版比 SSR 亮很多且亮度门开满。
+	if (pc.p3.z > 7.5)
+	{
+		float k8 = clamp(pc.p1.z, 0.0, 1.0);
+		float w8 = hit ? (k8 * bf) : 0.0;
+		vec3 add8 = vec3(0.0);
+		if (w8 > 0.0001)
+		{
+			float lb8 = dot(baseRGB, vec3(0.2126, 0.7152, 0.0722));
+			float gb8 = smoothstep(0.35, 0.85, lb8);
+			add8 = max(baseRGB - refl, vec3(0.0)) * (gb8 * w8);
+		}
+		float l8 = dot(add8, vec3(0.2126, 0.7152, 0.0722));
+		oColor = vec4(vec3(l8 / (1.0 + l8)), 1.0);
+		return;
+	}
 	if (pc.p3.z > 5.5)
 	{
 		if (pc.p3.z > 6.5)
