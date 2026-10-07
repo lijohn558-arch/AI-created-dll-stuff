@@ -73,6 +73,22 @@
 //     那批, 它们的 hitUV 就落在屏幕边附近, 淡出之后边界两边都是反射 (锐 SSR <-> 原版层), 不再出现
 //     "镜像图 硬接 未镜像贴图" 那条接缝。
 //
+// v0.18.11 实跑三张图 (docs/analysis/Screenshot_ssr.edge=0.png / .edge=1.png / .debug=2.png)
+//   **坐实了上面的归因**: debug=2 的红(未命中)/绿(命中)分界与 v0.18.10 那块扇形同构 (绿 = 贴岸那条
+//   带 + 人下方一条竖带, 红 = 近处整片水面); edge=1 复现错位倒影 (整片水被贴成屏顶画面, 直边都在);
+//   edge=0 明显正常。用户回: 「只有 ssr.edge=0 效果较好」, 剩三处归 v0.18.12:
+//   ① **人物身体一圈区域 = 前景遮挡假命中**: 我们的射线从原点往**深处**走, 本来就碰不到站在它
+//      **前面**的人/石头; 但深度图是高度场, 轮廓处会**突然变浅**, `Q.z < sz` 一看「射线已经落在场景
+//      后面」就判命中 ⇒ 紧挨轮廓那一圈像素把身体颜色采进来糊在水上 (debug=2 里人物外圈那道绿边就是它)。
+//      ⇒ 命中多认一道 **`sz <= P.z * 0.98` = 反射目标不许比原点浅**; 人/石头正下方那条**合法**反射带
+//      不受影响 (那里的目标确实比原点深)。
+//   ② **倒影质量差 (块状/阶梯)** = 二分只有 3 次, 32 步时命中点精度 = 156/8 ≈ 19.5 单位 ⇒ 一跳一跳
+//      的色块。⇒ **二分 3 → 5 次** (精度 156/32 ≈ 4.9, 只多 2 次深度采样)。更细的还能用 ini
+//      `ssr.steps=64` / `ssr.blur=0` 调, 不用重编。
+//   ③ **倒影区域水波较小** = 位移幅度写死 `6.0 * px`, 与波长脱钩 ⇒ 改成随 ripplesz 缩放
+//      (`clamp(1.5 * Rb, 6, 16)` px; 默认 ripplesz=4 ⇒ 6px, **与原来逐位一致**), ripplesz 调大时
+//      波长与幅度一起长大; 亮度那一半 (sparkle 回来没) 走 mode0, 见 docs/02 §14.28。
+//
 // 输入: uColor = 324 场景色镜像 (RGBA16F, 段16 前的快照) —— 反射源
 //       uDepth = 520 深度快照  (D24, 取 depth aspect) —— 行进层级 + 非水面像素的法线源
 //       uBase  = 585 段16 后镜像 (RGBA16F, 含水画面) —— 合成底色 (可缺)
@@ -218,7 +234,7 @@ void main()
 	vec3 V = normalize(P); // 相机 -> 表面
 	vec3 Rf = reflect(V, N); // 反射方向 (离开表面)
 
-	// 线性步进 + 末段三次二分收紧 (docs/05 D4: 固定步数, 不做 Hi-Z)
+	// 线性步进 + 末段五次二分收紧 (docs/05 D4: 固定步数, 不做 Hi-Z)
 	int steps = int(pc.p1.y);
 	float maxT = pc.p1.w;
 	float stepLen = maxT / float(steps);
@@ -239,17 +255,24 @@ void main()
 			break; // 出屏 => 射线这一跳已在屏外, 用 lastUV 做边缘延展
 		lastUV = uq;
 		float sz = viewZ(texture(uDepth, uq).r);
-		if (Q.z < sz)
+		// v0.18.12 前景遮挡守卫: 反射目标必须**不浅于射线原点** (2% 容差)。
+		// 射线从 P 出发往深处走, 碰不到站在 P **前面**的东西 (站在水里的人/石头); 但深度图是高度场,
+		// 轮廓处会突然变浅, 单看 `Q.z < sz` 会把"射线落在它后面"当成命中 ⇒ 身体轮廓被糊进水里
+		// (用户报的「人物身体一圈区域」, debug=2 里人物外圈那道绿边就是它)。
+		// 人/石头**正下方**那条合法反射带不受影响: 那里的目标确实比原点深。
+		if (Q.z < sz && sz <= P.z * 0.98)
 		{
-			// 已经走到场景后面 => 在 [t-stepLen, t] 里二分三次收紧
+			// 已经走到场景后面 => 在 [t-stepLen, t] 里二分五次收紧 (v0.18.12: 3 -> 5, 治"倒影块状")
 			float lo = t - stepLen;
 			float hi = t;
-			for (int k = 0; k < 3; ++k)
+			for (int k = 0; k < 5; ++k)
 			{
 				float mid = (lo + hi) * 0.5;
 				vec3 M = P + Rf * mid;
 				vec2 um = projectUV(M);
-				if (M.z < viewZ(texture(uDepth, um).r))
+				float szm = viewZ(texture(uDepth, um).r);
+				// 守卫在二分里同样生效 (否则会往"轮廓变浅"那一侧收敛)
+				if (M.z < szm && szm <= P.z * 0.98)
 					hi = mid;
 				else
 					lo = mid;
@@ -286,6 +309,7 @@ void main()
 	float Rb = clamp(pc.p4.y, 1.0, 16.0);  // ssr.ripplesz 带宽 (px)
 	float kf = 1.0;                        // mode0 亮度回注系数 (debug=6 画它)
 	vec2 ripd = vec2(0.0);                 // mode1 位移量 (uv 单位, 直接加到 ruv)
+	float ripAmp = 6.0;                    // mode1 位移幅度上限 (px) — v0.18.12 起随 ripplesz 缩放
 	if (pc.p3.w > 0.5 && ripA > 0.001)
 	{
 		vec2 kx = vec2(px.x * Rb, 0.0);
@@ -317,7 +341,11 @@ void main()
 			               dot(cD - cU, vec3(0.2126, 0.7152, 0.0722))); // 1px 梯度
 			vec2 g2 = vec2(dot(bR - bL, vec3(0.2126, 0.7152, 0.0722)),
 			               dot(bD - bU, vec3(0.2126, 0.7152, 0.0722))); // Rb 梯度
-			ripd = clamp((g1 - g2) * 10.0, vec2(-1.0), vec2(1.0)) * (6.0 * px) * ripA;
+			// v0.18.12: 幅度与波长挂钩 (默认 ripplesz=4 ⇒ 6px, 与原来逐位一致), ripplesz 调大时
+			// 波长与幅度一起长大 —— 治「倒影区域水波较小」的"幅度"这一半; "亮度"那一半 (sparkle
+			// 有没有回来) 走 mode0, 见 docs/02 §14.28。
+			ripAmp = clamp(Rb * 1.5, 6.0, 16.0);
+			ripd = clamp((g1 - g2) * 10.0, vec2(-1.0), vec2(1.0)) * (ripAmp * px) * ripA;
 			ruv = clamp(ruv + ripd, vec2(0.0), vec2(1.0));
 		}
 	}
@@ -374,7 +402,7 @@ void main()
 			oColor = dk >= 0.0 ? vec4(0.0, 0.0, dk, 1.0) : vec4(-dk, 0.0, 0.0, 1.0);
 		}
 		else
-			oColor = vec4(vec3(clamp(length(ripd) / (6.0 * px.x), 0.0, 1.0)), 1.0);
+			oColor = vec4(vec3(clamp(length(ripd) / (ripAmp * px.x), 0.0, 1.0)), 1.0);
 		return;
 	}
 
