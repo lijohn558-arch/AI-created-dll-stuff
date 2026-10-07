@@ -701,6 +701,38 @@ layout×2 + pool×2 + allocate/update/**bind**×3）—— SSR v1 真要采样�
   `run2c.ps1` §#16 增 `[wdep] 镜像就绪 / 水深图就绪 / 水深拷贝# / desc不一致 / EVENT闸#` 五组判据
   + 6 条 fail/warn + banner `expect v0.18.8`。
 
+**✅ 585 契约 + 涟漪回注补遗落地（`v0.18.9`，2026-10-07，代码批已落地 ⇒ 待 CI + 待实跑 → `docs/02` §14.25）**
+—— `v0.18.8` 实跑（`docs/02` §14.24.1）：正解 B **PASS**（不再破碎）+ 水色 PASS，但冒出两个新症状：
+**①倒影像"很多层堆叠"、②有倒影的地方水面变平面（流动波纹消失）**。归因靠的是**段17 的 PS 17586
+反汇编 + 逐 draw 绑定表**（`docs/analysis/S1-pass6-ps-disasm.txt:418`、`S4-extract-pass6.json:131390`）：
+
+- **585 的契约 =「一层反射色」**：段17 `out = mix(585, 588@涟漪扭曲UV, w)`，`discard if 339<1e-4`
+  （只画有水像素），`w = (339*-0.85+0.95) * depthW[0.1..0.95] * cb2.w` ⇒ 水面像素 `w≈0.01..0.095`
+  ⇒ **585 占 90~99%**，层叠（mix 权重 / 遮罩 / 深度衰减）是**段17 的活**。
+- **① = 违反契约**：`v0.18.7/8` 写进 585 的是 `mix(cubemap(uBase), SSR, fresnel×strength×4)`
+  ⇒ 585 里同时躺着**探针反射 + 屏幕空间反射**两层，段17 再按 90% 叠上去 ⇒ 三层错位叠印。
+  自算的 fresnel 还与段17 的权重相乘，掠射角 `wgt→1` ⇒ 把②的波纹一起压没了。
+- **② = 涟漪长在被换掉的那层里**：段16 的 16 个 draw 按**水体自身的涟漪法线**采 501 cubemap 写
+  585（stencil `NotEqual ref=1` 像素门、`writeMask=7` 只写 RGB）⇒ 原版 585 自带逐像素涟漪；我方
+  换成 SSR 后法线 = 段后水深重建的**几何平面**（波纹在法线贴图里，深度里没有）⇒ 反射区成平面镜。
+- **修法 A（契约）**：585 只放一种反射 —— **删掉 Schlick fresnel 与 `!hit → wgt*0.5`**，合成改
+  `mix(baseRGB, refl, clamp(p1.z,0,1))`，`ssr.strength` **语义改为 SSR 替换比 0..1**（0 = 585 原样
+  = 游戏 cubemap = 原版观感，一号对照；CPU 侧上限 4→1）。未命中且一跳没进屏仍 `refl = baseRGB`
+  ⇒ 原版兜底。
+- **修法 B（涟漪回注）**：把 uBase（段16 快照）的**高频**亮度结构按比例乘回 SSR ——
+  `kf = clamp(lum(uBase)/lum(5tap(uBase)), 0.4, 2.5)`，低频（探针自己的山/天）被除掉 ⇒ **不会把
+  探针内容重新印上来**（即不会重新变回堆叠）；量由 `ssr.ripple` 控制，`0` = 关；只在
+  `ssr.base585=1`（uBase 在场）时生效；回注块放在 `!hit && lastUV==uv` 兜底**之前**（兜底要覆盖
+  它，保证 `strength=0` 是逐字节原版）。
+- **push constant 64B → 80B**（多一格 `p4` = 涟漪回注量），`ssrV1Sig` 吸收 `g_ssrV1Ripple` ⇒
+  改 ini 自动重录。
+- **降级链仍是「任一步只关自己」**：`ssr.ripple=0` 关 B；`ssr.strength=0` 回原版 cubemap；
+  `ssr.base585=0` ⇒ 无回注源（B 自动跳过）+ 水色回归 `v0.18.6` 行为；`ssr.wdep=0` 退回拼图；
+  总闸 `ssr=0` / `ssr.vkout=0` / `ssr.v1=0`。**A/B 只动 585 的内容，不改任何通路时序。**
+- **闸**：`make_shaders.ps1` 已跑（`ssr.frag.spv` 17536 → **18868 B**）、`check1.ps1` → **RESULT OK**
+  （`$need` 补 `g_ssrV1Ripple` / `ssr.ripple` / `v0.18.9`）、`run2c.ps1` banner `expect v0.18.9`
+  （判据本身不变，§#16 `[wdep]`/`[base]` 全当回归对照）。
+
 ### D5 配置与逃生门
 
 - `ssr=0/1`（`iniFlag` 模板），**默认 0（未过闸前）**，过闸后改默认 1 —— 总门：管挂不挂槽33/47/50；
@@ -715,6 +747,12 @@ layout×2 + pool×2 + allocate/update/**bind**×3）—— SSR v1 真要采样�
   独立开关：1 = 水面像素的法线/反射原点取段后水深，0 = `v0.18.7` 行为（法线仍取 520 河床 ⇒
   倒影多边形拼图）。**只关自己**：任一环失败（镜像建不出 / VK 导入失败 / view 失败 / 拷贝 desc
   不一致）也自动退回 `v0.18.7` 行为，不产生更坏的画面。`ssr=0` / `ssr.v1=0` 时一并失效。
+- **`ssr.ripple=0..1`，默认 1**（`v0.18.9` 新增）—— **涟漪回注量**：把段16 快照（`uBase`）的高频
+  亮度结构乘回 SSR，把"流动波纹"还给反射区（`v0.18.8` 换掉 585 内容时把涟漪一起换掉了 ⇒ 反射区
+  变平面镜）。`0` = 关（干净平面镜，A 契约仍在）；**`ssr.base585=0` 时无回注源 ⇒ 自动跳过**。
+- **`ssr.strength`（语义在 `v0.18.9` 变更）**：`0..4` 的 fresnel 增益**作废**，改为
+  **SSR 替换比 `0..1`** —— `0` = 585 原样 = 游戏 cubemap 反射 = **原版观感/一号对照**，
+  `1` = 纯 SSR。CPU 侧夹 `0..1`，老 ini 里 `>1` 的值静默夹到 1（v1 参数日志回显）。
 - 挂载受 `vulkan` 总闸 + `probe`（探针 fallback 依赖）联立把关，`ssr=0` 时零新增拦截。
 - **ini 只读一次**（`installProbeOn` 首次调用），改完必须重启游戏。
 
@@ -740,9 +778,13 @@ descriptor/sampler **推迟到 2d**，理由见 D2a-4）；**2c-β** VK `OPAQUE_
 > `docs/02` §14.22.1）⇒ **第八批 `v0.18.7`（A 平滑批 + B 底色镜像，push constant 48B→64B、
 > 描述符 3 binding）CI SUCCESS 并实跑：B 水色 PASS、A 只半修（碎渣 → 不规则多边形拼图，归因见
 > `docs/02` §14.23.1）** ⇒ **第九批 `v0.18.8`（正解 B：段后水深做算法线，描述符 4 binding、
-> 第 5 张 SHARED 镜像 + 第二道 EVENT 闸、`ssr.debug` 扩 0..5）已落地，待 CI + 待实跑**
-> ⇒ 判读模板改用 `docs/02` §14.24，ini 在 `ssr.v1=1` 之外再追加 `ssr.smooth=4` / `ssr.blur=1` /
-> `ssr.debug=0` / `ssr.base585=1` / `ssr.wdep=1`。
+> 第 5 张 SHARED 镜像 + 第二道 EVENT 闸、`ssr.debug` 扩 0..5）CI SUCCESS 并实跑：通路全绿 +
+> 正解 B PASS（不再破碎）+ 水色 PASS，但 585 契约错导致两个新症状（多层堆叠 / 反射区变平面
+> 丢波纹，归因见 `docs/02` §14.24.1）** ⇒ **第十批 `v0.18.9`（585 纯反射层契约 + 涟漪回注，
+> push constant 64B→80B、`ssr.strength` 语义改 SSR 替换比、新增 `ssr.ripple`）已落地，待 CI +
+> 待实跑**
+> ⇒ 判读模板改用 `docs/02` §14.25，ini 在 `ssr.v1=1` 之外再追加 `ssr.smooth=4` / `ssr.blur=1` /
+> `ssr.debug=0` / `ssr.base585=1` / `ssr.wdep=1` / `ssr.ripple=1`。
 | **4 过闸** | 套 `docs/02` §14.6 模板：抓 S5/S4 双帧 → declared-diff 闸（A 全绿 + F 必现 + B 归因）→ 帧时不劣于基线 5%（`docs/00:93`，1660Ti 1080p，S4/S5 各测；**基线数取 `v0.16.2` 的 `帧时基线` 行，采法见 `docs/02` §14.14**） | compare JSON + 帧时数据 + 判读入档 | R3 帧时 |
 | **5 收口** | 默认 `ssr=1`、docs/00 §1.1 与 docs/03 §7.1 回填、诚实边界新增 | commit + CI | — |
 
