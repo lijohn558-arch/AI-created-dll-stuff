@@ -755,7 +755,13 @@ layout×2 + pool×2 + allocate/update/**bind**×3）—— SSR v1 真要采样�
 - **A 契约一条没改**：585 仍只放一层反射，fresnel/权重仍归段17。
 - **闸**：`make_shaders.ps1` 已跑（`ssr.frag.spv` 18868 → **23340 B**）、`check1.ps1` → **RESULT OK**
   （`$need` 补 `g_ssrV1RippleSz` / `ssr.ripplesz` / `g_ssrV1RippleMode` / `ssr.ripplemode` /
-  `v0.18.10`）、`run2c.ps1` banner `expect v0.18.10`（判据本身不变，全当回归对照）。
+  `v0.18.10`）、`run2c.ps1` banner `expect v0.18.10`。`run2c` 另修**两处自身的判读缺口**（判据其余
+  条不变，全当回归对照）：①日志路径由写死的 `Skyrim Special Edition fsr` 改为**自动取最新**（那条
+  老路径已不存在，`v0.18.9` 实际日志在游戏 cwd `D:\...\Skyrim\poc-presenter.log`），搜不到给候选
+  列表并 `exit 1` 而不是 `Get-Item` 崩；②`2d 出向读回` 在 `[v1] 就绪 > 0` 时不判 —— 出向自 `v0.18.6`
+  起是 shader 产物，入/出向校验和必然不同（实测 10/10 不一致且差得彻底），原「≥1 次一致」只对
+  `ssr.v1=0` / `mode=0` 纯透传有意义，这条从 FAIL/WARN 降为信息行（对旧日志复跑：FAIL 2 → 1，
+  剩的那条就是 banner `v0.18.10` ≠ `v0.18.9` = DLL 还没换）。
 
 ### D5 配置与逃生门
 

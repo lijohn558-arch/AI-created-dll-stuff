@@ -1,11 +1,36 @@
 ﻿$ErrorActionPreference = "Stop"
-$logfile = "C:\Users\joker\AppData\Local\ModOrganizer\Skyrim Special Edition fsr\overwrite\SKSE\Plugins\poc-presenter.log"
 $base = "C:\Users\joker\AppData\Local\Temp\opencode"
 $out = New-Object System.Collections.Generic.List[string]
 
-if (-not (Test-Path $logfile)) { $out.Add("LOG NOT FOUND: $logfile") }
+# v0.18.10: 日志路径会随启动方式变 (cwd = 游戏根目录, 或各 MO2 实例的 overwrite),
+# 原来写死的 "Skyrim Special Edition fsr" 那条已不存在 ⇒ 改成自动取**最新**的一份
+# (实测: v0.18.9 的日志在 D:\The Elder Scrolls V Skyrim\poc-presenter.log)。
+# 要强制指定某一份, 把路径填进 $forceLog。
+$forceLog = ""
+$cand = New-Object System.Collections.Generic.List[string]
+if ($forceLog -ne "" -and (Test-Path $forceLog)) { $cand.Add($forceLog) }
+foreach ($g in @("D:\The Elder Scrolls V Skyrim\poc-presenter.log")) {
+    if (Test-Path $g) { $cand.Add($g) }
+}
+foreach ($g in @(Get-ChildItem -Path "C:\Users\joker\AppData\Local\ModOrganizer\*\overwrite\SKSE\Plugins\poc-presenter.log" -ErrorAction SilentlyContinue)) {
+    $cand.Add($g.FullName)
+}
+$logfile = ""
+$newest = [DateTime]::MinValue
+foreach ($g in $cand) {
+    $t = (Get-Item $g).LastWriteTime
+    if ($t -gt $newest) { $newest = $t; $logfile = $g }
+}
+if ($logfile -eq "" -or -not (Test-Path $logfile)) {
+    $out.Add("LOG NOT FOUND: 没搜到任何 poc-presenter.log, 候选如下 (填 $forceLog 可强制指定)")
+    foreach ($g in $cand) { $out.Add("  cand: $g") }
+    [System.IO.File]::WriteAllLines("$base\run2c.out", $out, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Output ("wrote " + "$base\run2c.out")
+    exit 1
+}
 $fi = Get-Item $logfile
 $lines = [System.IO.File]::ReadAllLines($logfile, [System.Text.Encoding]::UTF8)
+$out.Add("logfile=" + $logfile)
 $out.Add("bytes=" + $fi.Length + "  mtime=" + $fi.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss") + "  total_lines=" + $lines.Count)
 
 # 日志是**跨会话追加**的 (实测: v0.14.0 会话与 v0.15.0 会话同在一个文件)。
@@ -239,7 +264,7 @@ foreach ($x in (Pick "[2d] 回写#" 6)) { $out.Add("      " + $x) }
 $nOutChk = Cnt "[2d] 出向读回#"
 $nOutOk  = CntBoth "[2d] 出向读回#" "**一致✓**"
 $nOutBad = CntBoth "[2d] 出向读回#" "不一致✗"
-$out.Add("  [2d] 出向读回 行数 = $nOutChk   一致 = $nOutOk   不一致 = $nOutBad   [前3+每600; ≥1 一致 = passthrough 字节还原; v0.18.4 起入向 EVENT 闸 => 预期不一致 = 0; v0.18.3 只 Flush 实测 3/8]")
+$out.Add("  [2d] 出向读回 行数 = $nOutChk   一致 = $nOutOk   不一致 = $nOutBad   [前3+每600; ≥1 一致 = passthrough 字节还原; v0.18.4 起入向 EVENT 闸 => 预期不一致 = 0; v0.18.3 只 Flush 实测 3/8; v1 活着时出向=shader 产物 => 判据里不卡这条]")
 foreach ($x in (Pick "[2d] 出向读回#" 6)) { $out.Add("      " + $x) }
 # --- O-1 正式修法 (v0.18.4): 2c 入向 EVENT 闸 (ssrInQueue End / ssrInGateWait 等) ---
 $nGate   = Cnt "[2c] 入向EVENT闸#"
@@ -403,12 +428,21 @@ if ($nVkoIni -eq 0) {
         elseif ($ratio -lt 0.5) { $warn.Add("2d 回写只有 $ratio 次/帧 -> 一次性门过紧或特征B 没 arm (看 [2d出向已排队] 行)") }
     }
     if ($nOutDescBad -gt 0) { $fail.Add("2d 回写 desc不一致 $nOutDescBad 次 -> CopyResource 会静默丢弃") }
-    if ($nOutOk -eq 0) { $fail.Add("2d 出向读回 0 次一致 -> passthrough 没逐字节还原 (看上面不一致行的入向/出向值)") }
+    # --- 出向读回 (passthrough 字节还原) 只在 **v1 没在跑** 时才有意义 ---
+    # v0.18.10 修正: v1 活着 ($nV1Rdy > 0) 时出向 = shader 产物, 与入向本来就不同 (v0.18.6 起 2d
+    # 由原样拷改成 shader 产出) => 10/10 不一致是**设计行为**, 拿它判 EVENT 闸属误报 (实测 v0.18.9
+    # 日志: 入向 0xFA2A... / 出向 0x0D05..., 校验和差得彻底 = 内容确实被换过, 不是差一帧)。
+    # 这时只留信息行, 不给 fail/warn; v1 没跑 (ssr.v1=0 或 mode=0 纯透传) 才按老判据严格要求。
+    if ($nV1Rdy -gt 0) {
+        $out.Add("  2d 出向读回: v1 活着 => 出向=shader 产物, 与入向不同是设计行为 -> 这轮不判 passthrough 字节还原, 只记信息 (一致 $nOutOk / 不一致 $nOutBad)")
+    } else {
+        if ($nOutOk -eq 0) { $fail.Add("2d 出向读回 0 次一致 -> passthrough 没逐字节还原 (看上面不一致行的入向/出向值)") }
+        if ($nOutBad -gt 0) {
+            $warn.Add("2d 出向读回有 $nOutBad 次不一致 -> EVENT 闸没把差一帧消干净 (v0.18.3 只 Flush 实测 3/8; 根因 = 零跨API栅栏下 D3D11 拷贝没跑完 VK 已读)")
+        }
+    }
     # --- O-1 验收 (v0.18.4 EVENT 闸): 提交VK前把入向 CopyResource 等掉 => 预期 0 次不一致 ---
     if ($nGate -eq 0) { $warn.Add("入向 EVENT 闸一行都没有 -> O-1 正式修法没跑 (ssrInQueue 没 End / ssrInGateWait 没被调到)") }
-    if ($nOutBad -gt 0) {
-        $warn.Add("2d 出向读回有 $nOutBad 次不一致 -> EVENT 闸没把差一帧消干净 (v0.18.3 只 Flush 实测 3/8; 根因 = 零跨API栅栏下 D3D11 拷贝没跑完 VK 已读)")
-    }
     # --- C-7 验收 (v0.18.2): 节流计数须进门先推进 => 行数 ≈ 3 + 事件数/600, 事件数 ≈ 0.68*帧数 ---
     $minOut = [Math]::Max(3, [int][math]::Floor($nFr / 1000))
     if ($nFr -ge 1200 -and $nOutChk -lt $minOut) {
