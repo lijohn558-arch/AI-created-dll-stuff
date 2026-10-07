@@ -3247,6 +3247,9 @@ static unsigned long long ssrV1Sig()
 	s = mix(s, cv.u);
 	cv.f = g_ssrV1RipGain;
 	s = mix(s, cv.u);
+	// v0.18.15: 高光回补量也进签名 (push p5.w 变了 ⇒ 必须重录)
+	cv.f = g_ssrV1Det;
+	s = mix(s, cv.u);
 	return s ? s : 1;
 }
 
@@ -3789,6 +3792,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 	        " ripk=" + std::to_string(g_ssrV1RipK) +
 	        " ripamp=" + std::to_string(g_ssrV1RipAmp) +
 	        " ripgain=" + std::to_string(g_ssrV1RipGain) +
+	        " v1det=" + std::to_string(g_ssrV1Det) +
 	        " 底色=" + std::string(g_ssrV1ViewB ? "585段16后(含水)" : "324(ssr.base585 关/没建)") +
 	        " 水深=" +
 	        std::string(g_ssrV1ViewW ? "461段17后(真水面深度)" : "520河床(ssr.wdep 关/没拷)") +
@@ -3945,10 +3949,11 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		pc.p4[2] = static_cast<float>(g_ssrV1RippleMode);
 		pc.p4[3] = static_cast<float>(g_ssrV1Edge);
 		// v0.18.14 p5 = (输入端软限幅阈值 / 位移幅度 / 梯度增益), 三者 0 = 自动 = v0.18.13 行为
+		// v0.18.15 p5.w = (原版高光回补量), 0 = 关 = v0.18.14 行为 —— 复用空槽, push constant 仍 96B
 		pc.p5[0] = g_ssrV1RipK;
 		pc.p5[1] = g_ssrV1RipAmp;
 		pc.p5[2] = g_ssrV1RipGain;
-		pc.p5[3] = 0.0f; // 保留
+		pc.p5[3] = g_ssrV1Det;
 		c.fns.vkCmdPushConstants(g_ssrVkCmdOut, g_ssrV1Pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
 		                         sizeof(pc), &pc);
 	}

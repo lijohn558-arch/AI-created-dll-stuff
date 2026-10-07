@@ -457,10 +457,12 @@ void main()
 		refl = baseRGB;
 	// hit 但 hitUV 贴着屏幕边 (4%) => 淡回原版层: 扇形边界上的像素正是"再走一跳出屏就变 miss"那批,
 	// 它们的 hitUV 就落在屏幕边附近; 淡出后边界两边都是反射 (锐 SSR <-> 原版层), 不再是硬接缝。
+	// v0.18.15: bf (贴边淡出权重) 提到 if 外面 —— 下面合成处要拿它算"SSR 到底接管了多少原版层"。
+	float bf = 1.0;
 	if (hit)
 	{
 		vec2 dm = min(hitUV, vec2(1.0) - hitUV);
-		float bf = smoothstep(0.0, 0.04, min(dm.x, dm.y));
+		bf = smoothstep(0.0, 0.04, min(dm.x, dm.y));
 		refl = mix(baseRGB, refl, bf);
 	}
 
@@ -485,6 +487,23 @@ void main()
 
 	// ---- v0.18.9 A: 585 = **纯反射层** (段17 契约, 见文件头) ----
 	// 层叠归段17: 我方只给"这一层是什么", 不再自算 fresnel 也不再把 cubemap 掺进合成里。
-	float k = clamp(pc.p1.z, 0.0, 1.0); // ssr.strength = SSR 替换比 (0 = 原版 cubemap)
-	oColor = vec4(mix(baseRGB, refl, k), base.a);
+	float k = clamp(pc.p1.z, 0.0, 1.0);            // ssr.strength = SSR 替换比 (0 = 原版 cubemap)
+	float v1det = clamp(pc.p5.w, 0.0, 1.0);        // ssr.v1det 高光回补量, 0 = 关 (默认)
+
+	// ---- v0.18.15 A 正解: 把原版 585 层被顶掉的亮部高光按比例补回命中区 ----
+	// 起因 (§14.30.7 A 坐实): strength=1 时 mix 100% 用 refl 顶掉 baseRGB, 585 层里游戏
+	// 自己算的 specular (那批白亮斑) 跟着一起没了; strength=0.7 档 30% 回流 = "有亮斑但不如正常亮"。
+	// 修法: 只在 SSR 真正接管的像素上 (wSsr = strength * 贴边淡出权重), 把 baseRGB 比 refl
+	//       亮出来的那部分按 det 加回去 —— 亮处取二者较亮的一侧, 暗处不动 (max 只会补不会压)。
+	//       lb/gb 是绝对亮度门, 只让原版本身够亮的像素参与, 防止中等亮度整片倒回原版层削弱 SSR。
+	// 门: miss ⇒ wSsr=0 ⇒ 纯原版逐位不动; det=0 ⇒ 整块不进 ⇒ 退化成原合成式 = 逐位 v0.18.14。
+	float wSsr = hit ? (k * bf) : 0.0;
+	vec3 outRGB = mix(baseRGB, refl, k);
+	if (v1det > 0.001 && wSsr > 0.0001)
+	{
+		float lb = dot(baseRGB, vec3(0.2126, 0.7152, 0.0722));
+		float gb = smoothstep(0.35, 0.85, lb);
+		outRGB += max(baseRGB - refl, vec3(0.0)) * (v1det * gb * wSsr);
+	}
+	oColor = vec4(outRGB, base.a);
 }

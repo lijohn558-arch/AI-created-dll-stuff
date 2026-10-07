@@ -222,6 +222,7 @@ namespace pocmain
 	extern float                   g_ssrV1RipK;    // ini ssr.ripk 输入端软限幅阈值 (线性亮度, 0=关; v0.18.14, 默认 0)
 	extern float                   g_ssrV1RipAmp;  // ini ssr.ripamp 位移幅度 (px, 0=自动 clamp(ripplesz*1.5,6,16); v0.18.14, 默认 0)
 	extern float                   g_ssrV1RipGain; // ini ssr.ripgain 梯度增益 (0=自动=10; v0.18.14, 默认 0)
+	extern float                   g_ssrV1Det;     // ini ssr.v1det 原版高光回补量 0..1 (0=关; v0.18.15, 默认 0)
 	extern std::atomic<bool>       g_ssrBaseOn;       // ini ssr.base585 底色镜像独立门 (默认 1)
 	extern ID3D11Texture2D*        g_ssrBaseTex;      // 底色 SHARED 镜像 (585 段16 后 = 含水画面)
 	extern HANDLE                  g_ssrBaseH;        // 底色镜像 NT handle (VK 导入源)
