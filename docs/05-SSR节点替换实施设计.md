@@ -892,6 +892,7 @@ descriptor/sampler **推迟到 2d**，理由见 D2a-4）；**2c-β** VK `OPAQUE_
 > ⇒ 换档位治不了必须换算子，波那档也贴 `clamp` 被削顶；**`ssr.debug=6` 实拍（§14.30.5）⇒ 位移场
 > 电平随深度摆 6.7×（far 41.8% 满格 / near 51% 归零）= 深度增益失配、白饱和段 4.3~8px 与原版 λ30
 > 差 4~7 倍 = 用户「小而密集」逐字对应，且 §14.30.4 的 9..41px 带限找周期属自证已作废 ⇒
+> **v0.18.15（`213becc` 代码 + 本批 docs，CI SUCCESS 双 job，**待实跑**）= 命中区高光回补 `ssr.v1det`（0..1，0=关）：只在 `wSsr = strength × 贴边淡出权重 bf` 非零的像素上执行 `outRGB += max(baseRGB − refl, 0) × (v1det × gb)`，其中 `gb = smoothstep(0.35, 0.85, luma(baseRGB))` 是绝对亮度门（防中等亮度整片倒回原版层）；`max` 只补不压 ⇒ 暗处与 SSR 占优处不动。三层零回归：miss ⇒ `wSsr=0` 纯原版逐位不动、`strength=0` ⇒ 逐字节原版、`v1det=0` ⇒ 逐位 v0.18.14。实现只动两处：`bf` 由 `if (hit)` 局部提到函数作用域 + 换掉最后一行 mix；配套 `extern g_ssrV1Det` / PC `p5[3]` / `ssrV1Sig` 进签名 / ini `ssr.v1det` 0..1 钳位 / 横幅 v0.18.15。**push constant 复用 p5 空槽仍 96B（不动 `pcr.size`、不加 p6）**；位移轴（`ripk`/`ripamp`/`ripgain`/`debug=6`）一行未碰 ⇒ §14.30.8 数字仍可比。队列与 B 拆 v0.18.16 的理由见 §14.31。
 > **v0.18.14（`c8d647f` 代码 + `14c1b66` docs，CI SUCCESS 双 job + 实跑 5 档 §14.30.6，定档 `ssr.ripk=0.10 + ssr.ripamp=16`，两条新观察「倒影区缺原版高光 / 扇形区与两侧无倒影」已由 §14.30.7 **单旋钮诊断双坐实**（A = `strength=1` 把原版 585 现算 specular 100% 顶掉、0.7 档 30% 回流即「有亮斑但不如正常亮」；B = `debug=2` 实拍绿带中部厚两侧薄、近场与屏两侧全红 = 射线飞出屏必 miss）；§14.30.8 结项量化：机位闸 PASS 的同机位配对 —— `ripk` 削高补低仅 ±3~4pp、四框落差 4.55× 归 `ripA` 深度响应、`ripamp` 在 `debug=6` 分子分母精确约掉故测不到幅度）= 只加旋钮、三个默认全 = v0.18.13：`ssr.ripk` 软限幅(0=关) / `ssr.ripamp` 幅度(0=自动) /
 > `ssr.ripgain` 增益(0=自动=10)，push constant 80B→96B p5**；同轮「视角拉动」判为机制 a（平滑滑动）、
 > 俯仰 2× 判为镜面物理，两项关闭**；量测工具 `tools/px_ripple.ps1` 入库并加 FINE/WAVE 两列**
