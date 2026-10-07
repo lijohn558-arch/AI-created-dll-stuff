@@ -1325,6 +1325,10 @@ float g_ssrV1Ripple = 1.0f;         // ini ssr.ripple 涟漪回注量 0..1 (v0.1
 int   g_ssrV1RippleSz = 4;          // ini ssr.ripplesz 回注带宽 (px, 1..16) —— v0.18.10: 治"波纹非常细小" (原写死 2px)
 int   g_ssrV1RippleMode = 1;        // ini ssr.ripplemode 0=亮度调制 1=位移扭曲 —— v0.18.10: 原版涟漪本是方向扰动
 int   g_ssrV1Edge = 0;              // ini ssr.edge 0=未命中回原版层(默认) 1=屏幕边缘延展 —— v0.18.11: 治"扇形区内错位倒影"
+// ---- v0.18.14 回注三旋钮 (三个默认 0 = 全部沿用 v0.18.13 行为, 零回归) ----
+float g_ssrV1RipK = 0.0f;    // ini ssr.ripk   输入端软限幅阈值 (线性亮度) 0=关 —— 治位移场被亮斑劫持成 4~8px 细碎饱和块
+float g_ssrV1RipAmp = 0.0f;  // ini ssr.ripamp 位移幅度 (px) 0=自动 clamp(ripplesz*1.5, 6, 16) —— 幅度解耦
+float g_ssrV1RipGain = 0.0f; // ini ssr.ripgain 梯度增益 0=自动 (=10) —— 增益解耦 (原写死 ×10)
 
 // ---- v0.18.7 B 水色保留 (docs/05 D4 补遗): 585 在被出向回写覆盖**之前**抢一份当合成底色 ----
 // 为什么必须有它: 合成底色原先 = 324 快照 = 段16 (水体 pass) **之前**的画面, 里面没画水;
@@ -3057,6 +3061,10 @@ void installProbeOn(ID3D11Device* dev)
 		g_ssrV1RippleMode = static_cast<int>(iniNum("ssr.ripplemode", 1.0));
 		// ---- v0.18.11: 未命中的回退源 (治"扇形范围内是错误的倒影") ----
 		g_ssrV1Edge = static_cast<int>(iniNum("ssr.edge", 0.0));
+		// ---- v0.18.14: 回注三旋钮 (软限幅 / 位移幅度 / 梯度增益), 默认 0 = 关或自动 ----
+		g_ssrV1RipK = static_cast<float>(iniNum("ssr.ripk", 0.0));
+		g_ssrV1RipAmp = static_cast<float>(iniNum("ssr.ripamp", 0.0));
+		g_ssrV1RipGain = static_cast<float>(iniNum("ssr.ripgain", 0.0));
 		// ---- v0.18.8 正解B: 段后水深当法线/原点输入 (只关自己) ----
 		g_ssrWDepOn.store(iniFlag("ssr.wdep", true), std::memory_order_relaxed);
 		if (g_ssrV1Near < 0.01f || g_ssrV1Far <= g_ssrV1Near)
@@ -3114,6 +3122,19 @@ void installProbeOn(ID3D11Device* dev)
 			g_ssrV1RippleMode = 1;
 		if (g_ssrV1Edge != 0)
 			g_ssrV1Edge = 1;
+		// v0.18.14: 三个旋钮 0 = 关/自动, 只夹负值与离谱上限 (ripk 实机扫 0.02~0.4, 上限给 4)
+		if (g_ssrV1RipK < 0.0f)
+			g_ssrV1RipK = 0.0f;
+		if (g_ssrV1RipK > 4.0f)
+			g_ssrV1RipK = 4.0f;
+		if (g_ssrV1RipAmp < 0.0f)
+			g_ssrV1RipAmp = 0.0f;
+		if (g_ssrV1RipAmp > 64.0f)
+			g_ssrV1RipAmp = 64.0f;
+		if (g_ssrV1RipGain < 0.0f)
+			g_ssrV1RipGain = 0.0f;
+		if (g_ssrV1RipGain > 64.0f)
+			g_ssrV1RipGain = 64.0f;
 		if (g_ssrV1On.load(std::memory_order_relaxed) &&
 		    g_ssrVkOutOn.load(std::memory_order_relaxed) &&
 		    g_ssrSharedOn.load(std::memory_order_relaxed) &&
@@ -3136,6 +3157,9 @@ void installProbeOn(ID3D11Device* dev)
 			        " ripplesz=" + std::to_string(g_ssrV1RippleSz) +
 			        " ripplemode=" + std::to_string(g_ssrV1RippleMode) +
 			        " edge=" + std::to_string(g_ssrV1Edge) +
+			        " ripk=" + std::to_string(g_ssrV1RipK) +
+			        " ripamp=" + std::to_string(g_ssrV1RipAmp) +
+			        " ripgain=" + std::to_string(g_ssrV1RipGain) +
 			        "; strength 现在是 SSR 替换比(0=原版); dist 单位 = near; 逃生门 ssr.v1=0 "
 			        "(R4 = 反推 inv(投影), 倒影位置/比例不对先调 fov, 深度反向先试 ssr.rev=1)");
 		else if (g_ssrV1On.load(std::memory_order_relaxed))
@@ -4859,7 +4883,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.13 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) + v0.18.5: 路线1' 导入分支落地(深度改单独SHARED老式handle→VK KMT 直入, [2d-5] 深度跨API三候选比对) + v0.18.6: SSR v1 shader 采样(ssr.vert/ssr.frag 全屏三角, descriptor+2 sampler+push constant 相机, 出向由 2d 原样拷改为 shader 产出, R4=反推inv投影, 门 ssr.v1/ssr.mode/ssr.fov/ssr.near/ssr.far/ssr.steps/ssr.dist/ssr.strength) + v0.18.7: A 平滑批(法线差分邻域 ssr.smooth + 反射 5tap 空间平滑 ssr.blur + 诊断 ssr.debug 0正常/1法线/2命中/3深度, push constant 48B→64B) + B 水色保留(第4张 SHARED 底色镜像 = 段16 后的 585 含水画面, 每帧特征B 在 2d 回写前抢一份, VK 侧 binding2 当合成底色, 门 ssr.base585) + v0.18.8: 正解B 段后水深当法线(第5张 SHARED 镜像 = 特征B 后第一次换绑时拷的 461, 段17 已写入真·水面深度, 520 照旧只当行进层级, 着色器按 zW>zPre 判水面像素, VK binding3 + p2.w, 门 ssr.wdep, debug 4段后水深/5水面像素) + v0.18.9: 585 纯反射层契约(段17 PS17586 反汇编坐实 out=mix(585,588@涟漪扭曲UV, w) 水面像素 585 占 ~90% ⇒ 585 只放一种反射: 去掉自算 fresnel 与 cubemap 掺底 ⇒ 治「倒影多层堆叠」; ssr.strength 语义改 **SSR 替换比 0..1**(0=原版 cubemap)) + 涟漪回注(段16 16 个 draw 按水面涟漪法线采 cubemap 写 585, 换内容等于把涟漪换掉 ⇒ 把 uBase 高频亮度结构乘回 SSR, 门 ssr.ripple, push constant 64B→80B p4) + v0.18.10: 回注调谐与自诊断(ssr.ripplesz 回注带宽 1..16px, 原写死 2px 只抓得住像素级噪点 ⇒ 波纹细小 / ssr.ripplemode 0=亮度调制 1=位移扭曲, 位移式的梯度取「1px 梯度-Rb 梯度」: 阶跃轮廓两支相近相减归 0 不印轮廓, 波纹波长≈2·Rb 才起效 ⇒ 天生只认 ripplesz 那一档 / debug 6=回注可视化 7=uBase 原样(定 ripplesz 的依据) / 段17 权重逐条算死 w≤0.095、段18 首笔绑定不读 585、321→324=ev39225 在段16 之前 ⇒ 排除双读与跨帧递归, 堆叠归因改走只动一个旋钮的隔离试验 strength=0→ripple=0→blur=0) + v0.18.11: 未命中回退源(ssr.edge 0=未命中一律回原版层(默认)/1=屏幕边缘延展; 归因: 扇形下半是射线飞出屏顶后拿 lastUV 做边缘延展, 采到的是岸边/树的原位画面(未镜像) 贴进水里 ⇒ 错位重影, 两侧第一跳就在屏外走的是原版层兜底才是「两边水纹正常」; 附带 hit 但 hitUV 贴屏边 4% 淡回原版层, 让扇形边界不过渡硬) + v0.18.12: 命中收紧与回注调谐(三张实跑图坐实归因后按用户反馈修三处: ①前景遮挡假命中 = 射线从原点往深处走碰不到站在它前面的人/石头, 但高度场在轮廓处突然变浅会被判成命中 ⇒ 身体轮廓糊进水里(人物身体一圈) ⇒ 命中加 sz<=P.z*0.98 守卫 ②二分 3->5 次 治倒影块状 ③位移幅度由写死 6px 改随 ripplesz 缩放 clamp(1.5*ripplesz,6,16) 默认 4px 仍=6px 治倒影区域水波较小) + v0.18.13: 法线差分轮廓守卫(水面法线只由「同样是水面」的邻点差出 ⇒ 单侧越界退成单侧差分 / 两侧越界走原退化兜底 ⇒ 回原版层; 实测三张跑图的「人物一圈」环宽中位数 = 4px = ssr.smooth 差分半径, 根因是邻点踩到前景人物/礁石的 3D 位置 ⇒ 叉出乱法线 ⇒ 反射方向被甩进屏内 ⇒ 平白多一次 hit ⇒ 采到对岸亮岩 = 白亮边) ====");
+	logLine("==== poc-presenter v0.18.14 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) + v0.18.5: 路线1' 导入分支落地(深度改单独SHARED老式handle→VK KMT 直入, [2d-5] 深度跨API三候选比对) + v0.18.6: SSR v1 shader 采样(ssr.vert/ssr.frag 全屏三角, descriptor+2 sampler+push constant 相机, 出向由 2d 原样拷改为 shader 产出, R4=反推inv投影, 门 ssr.v1/ssr.mode/ssr.fov/ssr.near/ssr.far/ssr.steps/ssr.dist/ssr.strength) + v0.18.7: A 平滑批(法线差分邻域 ssr.smooth + 反射 5tap 空间平滑 ssr.blur + 诊断 ssr.debug 0正常/1法线/2命中/3深度, push constant 48B→64B) + B 水色保留(第4张 SHARED 底色镜像 = 段16 后的 585 含水画面, 每帧特征B 在 2d 回写前抢一份, VK 侧 binding2 当合成底色, 门 ssr.base585) + v0.18.8: 正解B 段后水深当法线(第5张 SHARED 镜像 = 特征B 后第一次换绑时拷的 461, 段17 已写入真·水面深度, 520 照旧只当行进层级, 着色器按 zW>zPre 判水面像素, VK binding3 + p2.w, 门 ssr.wdep, debug 4段后水深/5水面像素) + v0.18.9: 585 纯反射层契约(段17 PS17586 反汇编坐实 out=mix(585,588@涟漪扭曲UV, w) 水面像素 585 占 ~90% ⇒ 585 只放一种反射: 去掉自算 fresnel 与 cubemap 掺底 ⇒ 治「倒影多层堆叠」; ssr.strength 语义改 **SSR 替换比 0..1**(0=原版 cubemap)) + 涟漪回注(段16 16 个 draw 按水面涟漪法线采 cubemap 写 585, 换内容等于把涟漪换掉 ⇒ 把 uBase 高频亮度结构乘回 SSR, 门 ssr.ripple, push constant 64B→80B p4) + v0.18.10: 回注调谐与自诊断(ssr.ripplesz 回注带宽 1..16px, 原写死 2px 只抓得住像素级噪点 ⇒ 波纹细小 / ssr.ripplemode 0=亮度调制 1=位移扭曲, 位移式的梯度取「1px 梯度-Rb 梯度」: 阶跃轮廓两支相近相减归 0 不印轮廓, 波纹波长≈2·Rb 才起效 ⇒ 天生只认 ripplesz 那一档 / debug 6=回注可视化 7=uBase 原样(定 ripplesz 的依据) / 段17 权重逐条算死 w≤0.095、段18 首笔绑定不读 585、321→324=ev39225 在段16 之前 ⇒ 排除双读与跨帧递归, 堆叠归因改走只动一个旋钮的隔离试验 strength=0→ripple=0→blur=0) + v0.18.11: 未命中回退源(ssr.edge 0=未命中一律回原版层(默认)/1=屏幕边缘延展; 归因: 扇形下半是射线飞出屏顶后拿 lastUV 做边缘延展, 采到的是岸边/树的原位画面(未镜像) 贴进水里 ⇒ 错位重影, 两侧第一跳就在屏外走的是原版层兜底才是「两边水纹正常」; 附带 hit 但 hitUV 贴屏边 4% 淡回原版层, 让扇形边界不过渡硬) + v0.18.12: 命中收紧与回注调谐(三张实跑图坐实归因后按用户反馈修三处: ①前景遮挡假命中 = 射线从原点往深处走碰不到站在它前面的人/石头, 但高度场在轮廓处突然变浅会被判成命中 ⇒ 身体轮廓糊进水里(人物身体一圈) ⇒ 命中加 sz<=P.z*0.98 守卫 ②二分 3->5 次 治倒影块状 ③位移幅度由写死 6px 改随 ripplesz 缩放 clamp(1.5*ripplesz,6,16) 默认 4px 仍=6px 治倒影区域水波较小) + v0.18.13: 法线差分轮廓守卫(水面法线只由「同样是水面」的邻点差出 ⇒ 单侧越界退成单侧差分 / 两侧越界走原退化兜底 ⇒ 回原版层; 实测三张跑图的「人物一圈」环宽中位数 = 4px = ssr.smooth 差分半径, 根因是邻点踩到前景人物/礁石的 3D 位置 ⇒ 叉出乱法线 ⇒ 反射方向被甩进屏内 ⇒ 平白多一次 hit ⇒ 采到对岸亮岩 = 白亮边) + v0.18.14: 输入端软限幅与幅度/增益解耦(§14.30.5 debug=6 实拍: 位移场电平随深度摆 6.7× —— 远处 41.8% 满格削顶/近处 51% 归零, 白饱和段 4.3~8px 而原版波长 λ≈30 ⇒ 细 4~7 倍 = 用户说的「倒影处波纹小而密集」; 根因 = 高光斑幅度比波大 ~8 倍 且冲激响应在 ±1、±Rb 各打满幅 ⇒ 位移场被亮斑劫持) 新增三旋钮: ssr.ripk 输入端软限幅阈值(取梯度前把每个采样点夹进本环 4 tap 均值 ±K, 0=关, 零额外取样 ⇒ 夹住后 |g1−g2| ≤ 4K 把场硬性封顶 40·K 不再整片削顶, 且阶跃两支同被夹住相减仍归 0 ⇒ 轮廓照旧不泄漏) + ssr.ripamp 位移幅度 px(0=自动 clamp(ripplesz*1.5,6,16)) + ssr.ripgain 梯度增益(0=自动 =10, 原写死 ×10); 三个默认 0 = 逐位等同 v0.18.13 零回归; push constant 80B→96B p5) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

@@ -127,6 +127,8 @@ layout(push_constant) uniform PC
 	vec4 p4; // v0.18.9: x=ripple(涟漪回注量 0..1)  y=ripplesz(回注带宽 px 1..16)
 	         // v0.18.10: z=ripplemode(0=亮度调制 / 1=位移扭曲)
 	         // v0.18.11: w=edge(0=未命中回原版层(默认) / 1=边缘延展) (push constant 64B → 80B)
+	vec4 p5; // v0.18.14: x=ripk(输入端软限幅阈值, 线性亮度, 0=关)  y=ripamp(位移幅度 px, 0=自动)
+	         // v0.18.14: z=ripgain(梯度增益, 0=自动 =10)  w=保留 (push constant 80B → 96B)
 } pc;
 
 layout(location = 0) in vec2 vUV;
@@ -355,7 +357,7 @@ void main()
 	// ---- v0.18.9/v0.18.10 B: 涟漪回注的**场**先算 (位移式要赶在采样之前, 因为它改 ruv) ----
 	float ripA = clamp(pc.p4.x, 0.0, 1.0); // ssr.ripple   回注量 0..1
 	float Rb = clamp(pc.p4.y, 1.0, 16.0);  // ssr.ripplesz 带宽 (px)
-	float kf = 1.0;                        // mode0 亮度回注系数 (debug=6 画它)
+	float kf = 1.0; // mode0 亮度回注系数 (debug=6 只在 ripplemode=0 时画它; mode=1 画下面的 ripd)
 	vec2 ripd = vec2(0.0);                 // mode1 位移量 (uv 单位, 直接加到 ruv)
 	float ripAmp = 6.0;                    // mode1 位移幅度上限 (px) — v0.18.12 起随 ripplesz 缩放
 	if (pc.p3.w > 0.5 && ripA > 0.001)
@@ -376,7 +378,9 @@ void main()
 		{
 			// mode1 = 位移式: 原版涟漪 = 反射方向被水面法线扰动 ⇒ 拖 ruv 才像波纹。
 			// 梯度取「1px 梯度 − Rb 梯度」: 阶跃轮廓两支梯度相近 ⇒ 相减归 0, 不把探针的山/天
-			// 轮廓印上来; 波纹波长 ≈ 2·Rb 时两支差最大 ⇒ 天然只对 ripplesz 这一档波长起效。
+			// 轮廓印上来; 响应在波长 ≈ 4·Rb 处最大 (§14.30.3 实测更正, 旧注释写的 2·Rb 恰是 null)。
+			// 但响应随波长变化剧烈: 3~10px 细结构是 λ30 波的 1.27~2.20 倍 (§14.30.4); 又因为屏幕
+			// 波长随透视从远处 4~6px 变到近处 100px+, 同一算子在不同深度相差 15 倍 (§14.30.5)。
 			vec3 cL = texture(uBase, uv - vec2(px.x, 0.0)).rgb;
 			vec3 cR = texture(uBase, uv + vec2(px.x, 0.0)).rgb;
 			vec3 cU = texture(uBase, uv - vec2(0.0, px.y)).rgb;
@@ -385,6 +389,29 @@ void main()
 			vec3 bR = texture(uBase, uv + kx).rgb;
 			vec3 bU = texture(uBase, uv - ky).rgb;
 			vec3 bD = texture(uBase, uv + ky).rgb;
+			// ---- v0.18.14 输入端软限幅 (ssr.ripk, 0 = 关 ⇒ 逐位 = v0.18.13) ----
+			// 治什么: 高光斑幅度比波大 ~8 倍, 冲激响应让每个斑在 ±1、±Rb 各打满幅 ⇒ 位移场被亮斑
+			// 劫持成 4~8px 的饱和块 = 用户说的「倒影处波纹小而密集」(§14.30.4 / §14.30.5)。
+			// 怎么治: 把每个采样点夹进「本环 4 tap 均值 ± K」, 均值由**已取的**这 4 个 tap 算出 ⇒
+			// 零额外取样。夹住之后 |g1|、|g2| 都 ≤ 2K ⇒ |g1−g2| ≤ 4K ⇒ 场被硬性封顶 40·K, 不再整片
+			// 削顶; 阶跃两侧同被夹住 ⇒ 相减仍归 0, 轮廓照旧不泄漏。
+			// K 是**绝对**阈值, 依赖 uBase 局部亮度 (同一帧暗水与亮反射差 ~1.7 倍) ⇒ 做成旋钮让实机
+			// 扫, 不写死, 见 docs/02 §14.30.5。
+			float ripK = max(pc.p5.x, 0.0);
+			if (ripK > 0.0)
+			{
+				vec3 loC = (cL + cR + cU + cD) * 0.25;
+				vec3 loB = (bL + bR + bU + bD) * 0.25;
+				vec3 kk = vec3(ripK);
+				cL = clamp(cL, loC - kk, loC + kk);
+				cR = clamp(cR, loC - kk, loC + kk);
+				cU = clamp(cU, loC - kk, loC + kk);
+				cD = clamp(cD, loC - kk, loC + kk);
+				bL = clamp(bL, loB - kk, loB + kk);
+				bR = clamp(bR, loB - kk, loB + kk);
+				bU = clamp(bU, loB - kk, loB + kk);
+				bD = clamp(bD, loB - kk, loB + kk);
+			}
 			vec2 g1 = vec2(dot(cR - cL, vec3(0.2126, 0.7152, 0.0722)),
 			               dot(cD - cU, vec3(0.2126, 0.7152, 0.0722))); // 1px 梯度
 			vec2 g2 = vec2(dot(bR - bL, vec3(0.2126, 0.7152, 0.0722)),
@@ -392,8 +419,10 @@ void main()
 			// v0.18.12: 幅度与波长挂钩 (默认 ripplesz=4 ⇒ 6px, 与原来逐位一致), ripplesz 调大时
 			// 波长与幅度一起长大 —— 治「倒影区域水波较小」的"幅度"这一半; "亮度"那一半 (sparkle
 			// 有没有回来) 走 mode0, 见 docs/02 §14.28。
-			ripAmp = clamp(Rb * 1.5, 6.0, 16.0);
-			ripd = clamp((g1 - g2) * 10.0, vec2(-1.0), vec2(1.0)) * (ripAmp * px) * ripA;
+			// v0.18.14: 幅度 / 增益两旋钮解耦 (0 = 沿用自动值 ⇒ 与 v0.18.13 逐位一致), 见 §14.30.5。
+			ripAmp = pc.p5.y > 0.001 ? pc.p5.y : clamp(Rb * 1.5, 6.0, 16.0);
+			float ripGain = pc.p5.z > 0.001 ? pc.p5.z : 10.0;
+			ripd = clamp((g1 - g2) * ripGain, vec2(-1.0), vec2(1.0)) * (ripAmp * px) * ripA;
 			ruv = clamp(ruv + ripd, vec2(0.0), vec2(1.0));
 		}
 	}

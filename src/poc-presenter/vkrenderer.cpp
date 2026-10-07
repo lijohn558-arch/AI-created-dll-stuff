@@ -3240,6 +3240,13 @@ static unsigned long long ssrV1Sig()
 	s = mix(s, (unsigned long long)(unsigned)g_ssrV1RippleMode);
 	// v0.18.11: 未命中回退源 (原版层 / 屏幕边缘延展) 同理
 	s = mix(s, (unsigned long long)(unsigned)g_ssrV1Edge);
+	// v0.18.14: 三个新旋钮也进签名 (push p5 变了 ⇒ 必须重录)
+	cv.f = g_ssrV1RipK;
+	s = mix(s, cv.u);
+	cv.f = g_ssrV1RipAmp;
+	s = mix(s, cv.u);
+	cv.f = g_ssrV1RipGain;
+	s = mix(s, cv.u);
 	return s ? s : 1;
 }
 
@@ -3689,7 +3696,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		VkPushConstantRange pcr{};
 		pcr.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 		pcr.offset = 0;
-		pcr.size = 80; // v0.18.7: 48B → 64B (p3); v0.18.8: 64B; v0.18.9: 64B → 80B (多一格 p4 = 涟漪回注量)
+		pcr.size = 96; // v0.18.7: 48B → 64B (p3); v0.18.9: 64B → 80B (多一格 p4); v0.18.14: 80B → 96B (多一格 p5 = ripk/ripamp/ripgain)
 		VkPipelineLayoutCreateInfo li{};
 		li.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 		li.setLayoutCount = 1;
@@ -3764,7 +3771,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 	}
 
 	g_ssrV1State = 1;
-	logLine("SSR侦察: [v1] SSR v1 就绪: 全屏三角 + 4 binding(色/深/底色/段后水深) + push constant 80B "
+	logLine("SSR侦察: [v1] SSR v1 就绪: 全屏三角 + 4 binding(色/深/底色/段后水深) + push constant 96B "
 	        "mode=" + std::to_string(g_ssrV1Mode) +
 	        " fov=" + std::to_string(g_ssrV1Fov) +
 	        " near=" + std::to_string(g_ssrV1Near) +
@@ -3779,6 +3786,9 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 	        " ripplesz=" + std::to_string(g_ssrV1RippleSz) +
 	        " ripplemode=" + std::to_string(g_ssrV1RippleMode) +
 	        " edge=" + std::to_string(g_ssrV1Edge) +
+	        " ripk=" + std::to_string(g_ssrV1RipK) +
+	        " ripamp=" + std::to_string(g_ssrV1RipAmp) +
+	        " ripgain=" + std::to_string(g_ssrV1RipGain) +
 	        " 底色=" + std::string(g_ssrV1ViewB ? "585段16后(含水)" : "324(ssr.base585 关/没建)") +
 	        " 水深=" +
 	        std::string(g_ssrV1ViewW ? "461段17后(真水面深度)" : "520河床(ssr.wdep 关/没拷)") +
@@ -3902,6 +3912,7 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 	{
 		// 相机参数在这里算好塞进 push constant: 着色器只做反推 (见 ssr.frag viewZ)
 		// v0.18.7: 多一格 p3 = (smooth 邻域 / blur / debug / 底色开关); v0.18.9: 多一格 p4 = 涟漪回注量
+		// v0.18.14: 多一格 p5 = (ripk 软限幅 / ripamp 位移幅度 / ripgain 梯度增益)
 		struct
 		{
 			float p0[4];
@@ -3909,6 +3920,7 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 			float p2[4];
 			float p3[4];
 			float p4[4];
+			float p5[4];
 		} pc;
 		pc.p0[0] = std::tan(g_ssrV1Fov * 3.14159265358979f / 360.0f); // tan(垂直FOV/2)
 		pc.p0[1] = static_cast<float>(w) / static_cast<float>(h ? h : 1);
@@ -3932,6 +3944,11 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		pc.p4[1] = static_cast<float>(g_ssrV1RippleSz);
 		pc.p4[2] = static_cast<float>(g_ssrV1RippleMode);
 		pc.p4[3] = static_cast<float>(g_ssrV1Edge);
+		// v0.18.14 p5 = (输入端软限幅阈值 / 位移幅度 / 梯度增益), 三者 0 = 自动 = v0.18.13 行为
+		pc.p5[0] = g_ssrV1RipK;
+		pc.p5[1] = g_ssrV1RipAmp;
+		pc.p5[2] = g_ssrV1RipGain;
+		pc.p5[3] = 0.0f; // 保留
 		c.fns.vkCmdPushConstants(g_ssrVkCmdOut, g_ssrV1Pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
 		                         sizeof(pc), &pc);
 	}
