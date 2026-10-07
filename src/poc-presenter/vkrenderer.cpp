@@ -3232,6 +3232,9 @@ static unsigned long long ssrV1Sig()
 	s = mix(s, (unsigned long long)(unsigned)g_ssrV1Smooth);
 	s = mix(s, (unsigned long long)(unsigned)g_ssrV1Blur);
 	s = mix(s, (unsigned long long)(unsigned)g_ssrV1Debug);
+	// v0.18.9: 涟漪回注量也进签名 (push p4 变了 ⇒ 必须重录)
+	cv.f = g_ssrV1Ripple;
+	s = mix(s, cv.u);
 	return s ? s : 1;
 }
 
@@ -3681,7 +3684,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		VkPushConstantRange pcr{};
 		pcr.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 		pcr.offset = 0;
-		pcr.size = 64; // v0.18.7: 48B → 64B (多一格 p3 = smooth/blur/debug/底色开关)
+		pcr.size = 80; // v0.18.7: 48B → 64B (p3); v0.18.8: 64B; v0.18.9: 64B → 80B (多一格 p4 = 涟漪回注量)
 		VkPipelineLayoutCreateInfo li{};
 		li.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 		li.setLayoutCount = 1;
@@ -3889,13 +3892,14 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 	c.fns.vkCmdSetScissor(g_ssrVkCmdOut, 0, 1, &sc);
 	{
 		// 相机参数在这里算好塞进 push constant: 着色器只做反推 (见 ssr.frag viewZ)
-		// v0.18.7: 多一格 p3 = (smooth 邻域 / blur / debug / 底色开关)
+		// v0.18.7: 多一格 p3 = (smooth 邻域 / blur / debug / 底色开关); v0.18.9: 多一格 p4 = 涟漪回注量
 		struct
 		{
 			float p0[4];
 			float p1[4];
 			float p2[4];
 			float p3[4];
+			float p4[4];
 		} pc;
 		pc.p0[0] = std::tan(g_ssrV1Fov * 3.14159265358979f / 360.0f); // tan(垂直FOV/2)
 		pc.p0[1] = static_cast<float>(w) / static_cast<float>(h ? h : 1);
@@ -3903,7 +3907,7 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		pc.p0[3] = g_ssrV1Far;
 		pc.p1[0] = static_cast<float>(g_ssrV1Mode);
 		pc.p1[1] = g_ssrV1Steps;
-		pc.p1[2] = g_ssrV1Strength;
+		pc.p1[2] = g_ssrV1Strength; // v0.18.9 起语义 = **SSR 替换比 0..1** (0 = 585 原样 = 原版 cubemap)
 		pc.p1[3] = g_ssrV1Dist * g_ssrV1Near; // 最大行进距离: **以 near 为单位** (尺度自洽: 反推
 		                                       // 只有"近平面尺度"自由度, 乘 near 后与 ssr.near 取值无关)
 		pc.p2[0] = static_cast<float>(w);
@@ -3914,6 +3918,11 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		pc.p3[1] = static_cast<float>(g_ssrV1Blur);   // 反射色 5tap 空间平滑
 		pc.p3[2] = static_cast<float>(g_ssrV1Debug);  // 0 正常/1 法线/2 命中/3 深度/4 段后水深/5 水面像素
 		pc.p3[3] = g_ssrV1ViewB ? 1.0f : 0.0f;        // 底色开关 (没底色 ⇒ 采 uColor 当底色)
+		// v0.18.9 p4 = (涟漪回注量, 预留×3) —— 把 uBase 里段16 的高频涟漪调制乘回 SSR
+		pc.p4[0] = g_ssrV1Ripple;
+		pc.p4[1] = 0.0f;
+		pc.p4[2] = 0.0f;
+		pc.p4[3] = 0.0f;
 		c.fns.vkCmdPushConstants(g_ssrVkCmdOut, g_ssrV1Pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
 		                         sizeof(pc), &pc);
 	}

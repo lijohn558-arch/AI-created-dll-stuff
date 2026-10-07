@@ -53,7 +53,8 @@ $need = @("ssrInFnv", "ssrInMakeShared", "ssrInBuild", "ssrInQueue", "uhex64",
           "g_ssrBaseTex", "g_ssrBaseOn", "ssrBaseVkBuild", "ssrMakeSharedTo",
           "g_ssrV1Smooth", "g_ssrV1Blur", "g_ssrV1Debug", "ssrV1DropViewB",
           "g_ssrWDepOn", "g_ssrWDepTex", "g_ssrWDepQ", "g_ssrWDepArm",
-          "ssrWDepQueue", "ssrWDepVkBuild", "ssrV1DropViewW", "g_ssrV1ViewW", "ssr.wdep")
+          "ssrWDepQueue", "ssrWDepVkBuild", "ssrV1DropViewW", "g_ssrV1ViewW", "ssr.wdep",
+          "g_ssrV1Ripple", "ssr.ripple", "v0.18.9")
 foreach ($k in $need) {
     $n = [regex]::Matches($c, [regex]::Escape($k)).Count
     $flag = ""

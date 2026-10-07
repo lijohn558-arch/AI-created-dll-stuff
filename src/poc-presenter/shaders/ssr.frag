@@ -24,6 +24,22 @@
 //   行为, 天生自愈。**ray march 的层级仍用 uDepth** —— 射线从水面出发, 用水面深度当层级会
 //   一出门就打在自己脚下的水面上, 一个也命中不了。
 //
+// v0.18.9 (v0.18.8 实跑归因: ①倒影"很多层堆叠" ②有倒影处水面变平面/流动波纹消失) ——
+//   **段17 PS 17586 反汇编 + 逐 draw 绑定表把 585 的契约钉死了** (docs/analysis/
+//   S1-pass6-ps-disasm.txt:418 + S4-extract-pass6.json:131390):
+//     t0 = 585(反射层)  t1 = 588(场景色)  t2 = 349(R16G16 偏移)  t3 = 461(深度)  t4 = 339(遮罩)
+//     `discard if 339 < 1e-4` ⇒ 段17 只画有水像素; out = **mix(585, 588@扭曲UV, w)**,
+//     w = (339*-0.85+0.95) * depthW[0.1..0.95] * cb2.w ⇒ 水面像素 w≈0.1 ⇒ **585 占 ~90%**。
+//   ⇒ **585 的契约 = 「一层反射色」, 层叠是段17 的活**。据此修两件事:
+//   A 契约修正 (治①): 585 里只放**一种**反射 —— 不再把 cubemap(uBase) 和 SSR 用 fresnel 掺在
+//     一起 (那样 585 同时躺着两层反射, 段17 一合成 = 多层堆叠), 也不再自算 fresnel (权重归段17)。
+//     `ssr.strength` 语义改为 **SSR 替换比 0..1**: 0 = 585 原样 (游戏 cubemap = 原版, 一号对照),
+//     1 = 纯 SSR; 没命中也没边缘延展时 refl = baseRGB ⇒ 再大也是原版兜底。
+//   B 涟漪回注 (治②): 段16 那 16 个 draw 是按**水面涟漪法线**采 cubemap 写进 585 的 ⇒ uBase 里
+//     除探针内容外还带着逐像素涟漪调制; 换掉 585 内容等于把涟漪一起换掉 ⇒ 反射区成了平面镜。
+//     这里把 uBase 的**高频**亮度结构 (5tap 低频被除掉, 只剩涟漪那一档 ⇒ 不会把探针的山/天
+//     重新印上来) 按比例乘回 SSR, 量由 `ssr.ripple` (p4.x) 控制, 0 = 关。
+//
 // 输入: uColor = 324 场景色镜像 (RGBA16F, 段16 前的快照) —— 反射源
 //       uDepth = 520 深度快照  (D24, 取 depth aspect) —— 行进层级 + 非水面像素的法线源
 //       uBase  = 585 段16 后镜像 (RGBA16F, 含水画面) —— 合成底色 (可缺)
@@ -37,9 +53,10 @@ layout(set = 0, binding = 3) uniform sampler2D uWdep; // v0.18.8: 缺时填色 v
 layout(push_constant) uniform PC
 {
 	vec4 p0; // x=tanHalfY  y=aspect  z=near  w=far
-	vec4 p1; // x=mode(0 透传 / 1 SSR)  y=steps  z=strength  w=march 最大距离 (**单位 = near**)
+	vec4 p1; // x=mode(0 透传 / 1 SSR)  y=steps  z=strength(**SSR 替换比 0..1**)  w=march 最大距离 (**单位 = near**)
 	vec4 p2; // x=width  y=height  z=rev(反向深度开关)  w=用段后水深(1=采 uWdep)
 	vec4 p3; // x=smooth(法线差分邻域 px)  y=blur(0/1)  z=debug(0..5)  w=用底色(1=采 uBase)
+	vec4 p4; // v0.18.9: x=ripple(涟漪回注量 0..1)  y/z/w 预留 (push constant 64B → 80B)
 } pc;
 
 layout(location = 0) in vec2 vUV;
@@ -221,7 +238,7 @@ void main()
 		return;
 	}
 
-	// 合成底色: 有 uBase (585 段16 后 = 含水画面) 就用它, 否则退回 uColor (v0.18.6 行为)
+	// 合成底色: 有 uBase (585 段16 后 = 游戏自己的 cubemap 反射层) 就用它, 否则退回 uColor
 	vec3 baseRGB = pc.p3.w > 0.5 ? texture(uBase, uv).rgb : base.rgb;
 
 	// 命中 => 采那一处的场景色; 未命中 => 屏幕边缘延展 (射线最后一个在屏位置)
@@ -242,15 +259,26 @@ void main()
 	}
 	else
 		refl = texture(uColor, ruv).rgb;
+
+	// ---- v0.18.9 B: 涟漪回注 (把段16 反射里的高频涟漪调制乘回 SSR) ----
+	// 低频用 5tap 除掉 ⇒ 只保留几像素级的结构 (涟漪), 探针自己的山/天是低频不会被印上来。
+	if (pc.p3.w > 0.5 && pc.p4.x > 0.001)
+	{
+		vec2 kx = vec2(px.x * 2.0, 0.0);
+		vec2 ky = vec2(0.0, px.y * 2.0);
+		vec3 cb = baseRGB * 0.4 + texture(uBase, uv + kx).rgb * 0.15 +
+		          texture(uBase, uv - kx).rgb * 0.15 + texture(uBase, uv + ky).rgb * 0.15 +
+		          texture(uBase, uv - ky).rgb * 0.15;
+		float l0 = dot(baseRGB, vec3(0.2126, 0.7152, 0.0722));
+		float lb = dot(cb, vec3(0.2126, 0.7152, 0.0722));
+		float kf = clamp(l0 / max(lb, 1e-3), 0.4, 2.5); // ≈1 的高频比 (探针暗处也不会炸)
+		refl *= mix(1.0, kf, clamp(pc.p4.x, 0.0, 1.0));
+	}
 	if (!hit && lastUV == uv)
-		refl = baseRGB; // 一跳都没进屏 => 保持底色
+		refl = baseRGB; // 一跳都没进屏 => 保持底色 (= 原版 cubemap 兜底, 覆盖掉上面的回注)
 
-	// 合成: Schlick fresnel (F0=0.02) x strength —— 正对相机的面反射弱, 掠射角的水面反射强
-	float ndv = max(dot(N, -V), 0.0);
-	float F = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
-	float wgt = clamp(F * pc.p1.z * 4.0, 0.0, 1.0);
-	if (!hit)
-		wgt *= 0.5; // 未命中只给一半强度, 让"没打中"看得出来 (v1 诊断用)
-
-	oColor = vec4(mix(baseRGB, refl, wgt), base.a);
+	// ---- v0.18.9 A: 585 = **纯反射层** (段17 契约, 见文件头) ----
+	// 层叠归段17: 我方只给"这一层是什么", 不再自算 fresnel 也不再把 cubemap 掺进合成里。
+	float k = clamp(pc.p1.z, 0.0, 1.0); // ssr.strength = SSR 替换比 (0 = 原版 cubemap)
+	oColor = vec4(mix(baseRGB, refl, k), base.a);
 }

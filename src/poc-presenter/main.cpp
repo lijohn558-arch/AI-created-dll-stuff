@@ -1315,12 +1315,13 @@ float g_ssrV1Fov = 65.0f;           // ini ssr.fov   垂直视场角 (度) —�
 float g_ssrV1Near = 10.0f;          // ini ssr.near  视图单位, 与游戏投影不符时反射比例会偏
 float g_ssrV1Far = 100000.0f;       // ini ssr.far
 float g_ssrV1Steps = 32.0f;         // ini ssr.steps ray march 步数 (越大越准也越贵)
-float g_ssrV1Strength = 1.0f;       // ini ssr.strength 反射合成强度 (fresnel 之上再乘)
+float g_ssrV1Strength = 1.0f;       // ini ssr.strength **SSR 替换比 0..1** (v0.18.9 起; 0 = 原版 cubemap 反射)
 float g_ssrV1Dist = 500.0f;         // ini ssr.dist  ray march 最大距离 (**以 near 为单位**)
 float g_ssrV1Rev = 0.0f;            // ini ssr.rev   游戏用反向深度 (近平面->1) 时置 1
 int   g_ssrV1Smooth = 4;            // ini ssr.smooth 法线差分邻域 (px) —— v0.18.7 抗"倒影破碎"
 int   g_ssrV1Blur = 1;              // ini ssr.blur   反射色 5-tap 空间平滑 0/1
 int   g_ssrV1Debug = 0;             // ini ssr.debug  0 正常 / 1 法线 / 2 命中 / 3 深度 / 4 段后水深 / 5 水面像素
+float g_ssrV1Ripple = 1.0f;         // ini ssr.ripple 涟漪回注量 0..1 (v0.18.9: 段16 的高频涟漪调制乘回 SSR)
 
 // ---- v0.18.7 B 水色保留 (docs/05 D4 补遗): 585 在被出向回写覆盖**之前**抢一份当合成底色 ----
 // 为什么必须有它: 合成底色原先 = 324 快照 = 段16 (水体 pass) **之前**的画面, 里面没画水;
@@ -3046,6 +3047,8 @@ void installProbeOn(ID3D11Device* dev)
 		g_ssrV1Smooth = static_cast<int>(iniNum("ssr.smooth", 4.0));
 		g_ssrV1Blur = static_cast<int>(iniNum("ssr.blur", 1.0));
 		g_ssrV1Debug = static_cast<int>(iniNum("ssr.debug", 0.0));
+		// ---- v0.18.9: 涟漪回注量 (治"有倒影处水面变平面/流动波纹消失") ----
+		g_ssrV1Ripple = static_cast<float>(iniNum("ssr.ripple", 1.0));
 		// ---- v0.18.8 正解B: 段后水深当法线/原点输入 (只关自己) ----
 		g_ssrWDepOn.store(iniFlag("ssr.wdep", true), std::memory_order_relaxed);
 		if (g_ssrV1Near < 0.01f || g_ssrV1Far <= g_ssrV1Near)
@@ -3067,10 +3070,16 @@ void installProbeOn(ID3D11Device* dev)
 		}
 		if (g_ssrV1Rev != 0.0f && g_ssrV1Rev != 1.0f)
 			g_ssrV1Rev = g_ssrV1Rev > 0.5f ? 1.0f : 0.0f;
+		// v0.18.9: strength 语义 = SSR 替换比 ⇒ 上限由 4 收到 1 (老 ini 写 >1 的会被夹到 1)
 		if (g_ssrV1Strength < 0.0f)
 			g_ssrV1Strength = 0.0f;
-		if (g_ssrV1Strength > 4.0f)
-			g_ssrV1Strength = 4.0f;
+		if (g_ssrV1Strength > 1.0f)
+			g_ssrV1Strength = 1.0f;
+		// v0.18.9: 涟漪回注量夹 0..1 (0 = 关, 1 = 全量)
+		if (g_ssrV1Ripple < 0.0f)
+			g_ssrV1Ripple = 0.0f;
+		if (g_ssrV1Ripple > 1.0f)
+			g_ssrV1Ripple = 1.0f;
 		if (g_ssrV1Smooth < 1 || g_ssrV1Smooth > 16)
 		{
 			logLine("SSR侦察: ssr.smooth 不合法 (" + std::to_string(g_ssrV1Smooth) +
@@ -3103,8 +3112,9 @@ void installProbeOn(ID3D11Device* dev)
 			        std::to_string(g_ssrBaseOn.load(std::memory_order_relaxed) ? 1 : 0) +
 			        " wdep=" +
 			        std::to_string(g_ssrWDepOn.load(std::memory_order_relaxed) ? 1 : 0) +
-			        "; dist 单位 = near; 逃生门 ssr.v1=0 (R4 = 反推 inv(投影), "
-			        "倒影位置/比例不对先调 fov, 深度反向先试 ssr.rev=1)");
+			        " ripple=" + std::to_string(g_ssrV1Ripple) +
+			        "; strength 现在是 SSR 替换比(0=原版); dist 单位 = near; 逃生门 ssr.v1=0 "
+			        "(R4 = 反推 inv(投影), 倒影位置/比例不对先调 fov, 深度反向先试 ssr.rev=1)");
 		else if (g_ssrV1On.load(std::memory_order_relaxed))
 			logLine("SSR侦察: ini ssr.v1=1 但 ssr/ssr.shared/ssr.vkout 有没开的 → v1 不生效 "
 			        "(需要 ssr=1 + ssr.shared=1 + ssr.vkout=1)");
@@ -4826,7 +4836,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.8 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) + v0.18.5: 路线1' 导入分支落地(深度改单独SHARED老式handle→VK KMT 直入, [2d-5] 深度跨API三候选比对) + v0.18.6: SSR v1 shader 采样(ssr.vert/ssr.frag 全屏三角, descriptor+2 sampler+push constant 相机, 出向由 2d 原样拷改为 shader 产出, R4=反推inv投影, 门 ssr.v1/ssr.mode/ssr.fov/ssr.near/ssr.far/ssr.steps/ssr.dist/ssr.strength) + v0.18.7: A 平滑批(法线差分邻域 ssr.smooth + 反射 5tap 空间平滑 ssr.blur + 诊断 ssr.debug 0正常/1法线/2命中/3深度, push constant 48B→64B) + B 水色保留(第4张 SHARED 底色镜像 = 段16 后的 585 含水画面, 每帧特征B 在 2d 回写前抢一份, VK 侧 binding2 当合成底色, 门 ssr.base585) + v0.18.8: 正解B 段后水深当法线(第5张 SHARED 镜像 = 特征B 后第一次换绑时拷的 461, 段17 已写入真·水面深度, 520 照旧只当行进层级, 着色器按 zW>zPre 判水面像素, VK binding3 + p2.w, 门 ssr.wdep, debug 4段后水深/5水面像素) ====");
+	logLine("==== poc-presenter v0.18.9 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) + v0.18.5: 路线1' 导入分支落地(深度改单独SHARED老式handle→VK KMT 直入, [2d-5] 深度跨API三候选比对) + v0.18.6: SSR v1 shader 采样(ssr.vert/ssr.frag 全屏三角, descriptor+2 sampler+push constant 相机, 出向由 2d 原样拷改为 shader 产出, R4=反推inv投影, 门 ssr.v1/ssr.mode/ssr.fov/ssr.near/ssr.far/ssr.steps/ssr.dist/ssr.strength) + v0.18.7: A 平滑批(法线差分邻域 ssr.smooth + 反射 5tap 空间平滑 ssr.blur + 诊断 ssr.debug 0正常/1法线/2命中/3深度, push constant 48B→64B) + B 水色保留(第4张 SHARED 底色镜像 = 段16 后的 585 含水画面, 每帧特征B 在 2d 回写前抢一份, VK 侧 binding2 当合成底色, 门 ssr.base585) + v0.18.8: 正解B 段后水深当法线(第5张 SHARED 镜像 = 特征B 后第一次换绑时拷的 461, 段17 已写入真·水面深度, 520 照旧只当行进层级, 着色器按 zW>zPre 判水面像素, VK binding3 + p2.w, 门 ssr.wdep, debug 4段后水深/5水面像素) + v0.18.9: 585 纯反射层契约(段17 PS17586 反汇编坐实 out=mix(585,588@涟漪扭曲UV, w) 水面像素 585 占 ~90% ⇒ 585 只放一种反射: 去掉自算 fresnel 与 cubemap 掺底 ⇒ 治"倒影多层堆叠"; ssr.strength 语义改 **SSR 替换比 0..1**(0=原版 cubemap)) + 涟漪回注(段16 16 个 draw 按水面涟漪法线采 cubemap 写 585, 换内容等于把涟漪换掉 ⇒ 把 uBase 高频亮度结构乘回 SSR, 门 ssr.ripple, push constant 64B→80B p4) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
