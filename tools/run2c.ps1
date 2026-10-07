@@ -78,7 +78,7 @@ if ($bn -eq "") { $out.Add("  [FAIL] 没有 banner 行") }
 else {
     $m2 = [regex]::Match($bn, "poc-presenter (v[0-9.]+)")
     if ($m2.Success) { $ver = $m2.Groups[1].Value }
-    $out.Add("  expect v0.18.10: " + $(if ($ver -eq "v0.18.10") { "OK" } else { "MISMATCH -> " + $ver }))
+    $out.Add("  expect v0.18.11: " + $(if ($ver -eq "v0.18.11") { "OK" } else { "MISMATCH -> " + $ver }))
     $out.Add("  banner 含 ssr.shared: " + $(if ($bn.Contains("ssr.shared")) { "OK" } else { "FAIL (banner 没升)" }))
     $out.Add("  banner 含 Step2c-β: " + $(if ($bn.Contains("Step2c-β")) { "OK" } else { "FAIL (banner 没含 2c-β)" }))
     $out.Add("  banner 含 ssr.sentinel: " + $(if ($bn.Contains("ssr.sentinel")) { "OK" } else { "FAIL" }))
@@ -326,7 +326,7 @@ $out.Add("      [节奏跟随 D3D11 侧 [2c读回 深=] (前3次+每600次); 建
 foreach ($x in (Pick "[2d-5] 深度KMT读回#" 6)) { $out.Add("      " + $x) }
 $out.Add("")
 
-$out.Add("==== #16 SSR v1 shader 采样 (v0.18.10: 平滑批 + 底色 + 段后水深法线 + 585纯反射层契约/涟漪回注(带宽+位移式) + 自诊断 debug6/7) ====")
+$out.Add("==== #16 SSR v1 shader 采样 (v0.18.11: 平滑批 + 底色 + 段后水深法线 + 585纯反射层契约/涟漪回注(带宽+位移式) + 未命中回原版层 + 自诊断 debug6/7) ====")
 $nV1Ini = Cnt "ini ssr.v1=1 →"
 $out.Add("  ini ssr.v1=1 读到 = $nV1Ini   [开了=1; 0 = 本轮只回归 (v1 关着, 也是合法一轮)]")
 $nV1Rdy = Cnt "[v1] SSR v1 就绪"
@@ -386,7 +386,7 @@ if ($hookN -ne 1) {
     $out.Add("  [根因] " + $root)
     $out.Add("         -> 本页其余 FAIL 均为该根因的下游; 换 DLL、重跑图之前先确认 ini 五个开关")
 }
-if ($ver -ne "v0.18.10") { $fail.Add("#0 banner 不是 v0.18.10 -> DLL 没换") }
+if ($ver -ne "v0.18.11") { $fail.Add("#0 banner 不是 v0.18.11 -> DLL 没换") }
 if ($n_shr -ne 1) { $fail.Add("#1 ini ssr.shared=1 未读到 -> ini 没写或 ssr=0") }
 if ($n_sen -gt 0) { $fail.Add("#1 ssr.sentinel 还开着 -> 应为0, 否则水会消失干扰判读") }
 if ($n_c -ne 1) { $fail.Add("#2 色镜像 OK 行 != 1") }
@@ -474,8 +474,12 @@ if ($nKmtRoute -ge 1) {
     $warn.Add("#3 深度镜像 OK 却没标路线1' -> 走的是 NTHANDLE 老路 (D24 家族实测不该通, 换源格式了?)")
 }
 # --- #16 SSR v1 shader 采样 (v0.18.7: 平滑批 + 底色) ---
-if ($nV1Rdr -gt 0 -and $nV1Rdy -eq 0) { $fail.Add("#16 有 [v1] 渲染# 行却没有 [v1] SSR v1 就绪 行 -> 状态不一致 (就绪行漏打或 DLL 不是 v0.18.10)") }
+if ($nV1Rdr -gt 0 -and $nV1Rdy -eq 0) { $fail.Add("#16 有 [v1] 渲染# 行却没有 [v1] SSR v1 就绪 行 -> 状态不一致 (就绪行漏打或 DLL 不是 v0.18.11)") }
 if ($nV1Rdy -gt 1) { $warn.Add("#16 [v1] 就绪行 = $nV1Rdy > 1 -> v1 资源被反复重建 (依赖签名抖动? 看有无换设备/换分辨率行)") }
+# v0.18.11: 就绪行必须回显 edge= (未命中回退源) —— 回显缺失 = 就绪行文案还停在老版本
+$nV1Edge = 0
+foreach ($l in $lines) { if ($l.Contains("[v1] SSR v1 就绪") -and $l.Contains(" edge=")) { $nV1Edge++ } }
+if ($nV1Rdy -gt 0 -and $nV1Edge -eq 0) { $warn.Add("#16 就绪行没回显 edge= -> v0.18.11 的回显没落上去 (banner 对得上就查字符串漏改)") }
 if ($nV1Ini -gt 0 -and $nV1Rdy -eq 0 -and $nV1Off -eq 0 -and $nV1Dep -eq 0) { $warn.Add("#16 ini ssr.v1=1 但既没就绪也没降级行 -> v1 压根没走到建图 (出向/入向图没建, 或 ssr/ssr.shared/ssr.vkout 有没开的)") }
 if (($nV1Off + $nV1Att + $nV1Sam) -gt 0) { $warn.Add("#16 v1 关自己 / usage 退回 -> 按行文归因; 出向已退回 2d 原样拷 (只关自己)") }
 if ($nV1Dep -gt 0) { $warn.Add("#16 深度 KMT 图没就绪, v1 没起来 -> 看 #15 (路线1' 分支), 深度是 v1 的输入之一") }
@@ -522,7 +526,7 @@ if ($fail.Count -eq 0) {
     if ($nVkoIni -gt 0) {
         $out.Add("  2d-1 出向回写落地: 回写 $nOutWr 行 desc一致 $nOutDescOk, 出向读回 一致 $nOutOk / 不一致 $nOutBad; 入向EVENT闸等了 $nGate 次 (超时 $nGateTo)")
         if ($nV1Rdy -gt 0) {
-            $out.Add("  SSR v1 落地 (v0.18.10): 全屏三角渲染 $nV1Rdr 次 (就绪 $nV1Rdy; 降级: 关自己 $nV1Off / 深度没就绪 $nV1Dep)")
+            $out.Add("  SSR v1 落地 (v0.18.11): 全屏三角渲染 $nV1Rdr 次 (就绪 $nV1Rdy; 降级: 关自己 $nV1Off / 深度没就绪 $nV1Dep)")
             $out.Add("  底色通路: 镜像 $nBaseMk / VK导入 $nBaseRdy / 每帧拷贝行 $nBaseWr (desc不一致 $nBaseBad; 降级 $nBaseOff)")
             $out.Add("  段后水深通路 (正解B): 镜像 $nWDepMk / VK导入 $nWDepRdy / 每帧拷贝行 $nWDepWr (desc不一致 $nWDepBad; 降级 $nWDepOff; 闸 $nWDepGate)")
             $out.Add("  下一步: 目视①水面倒影是否呈屏幕空间内容 ②水色是否回来 ③倒影是否连成片 (不再多边形拼图) (人眼判据) -> 判读入档 docs/02 §14.23.1;")

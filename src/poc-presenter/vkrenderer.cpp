@@ -3238,6 +3238,8 @@ static unsigned long long ssrV1Sig()
 	// v0.18.10: 带宽与回注方式 (亮度/位移) 也是 push constant 的内容, 同样要重录
 	s = mix(s, (unsigned long long)(unsigned)g_ssrV1RippleSz);
 	s = mix(s, (unsigned long long)(unsigned)g_ssrV1RippleMode);
+	// v0.18.11: 未命中回退源 (原版层 / 屏幕边缘延展) 同理
+	s = mix(s, (unsigned long long)(unsigned)g_ssrV1Edge);
 	return s ? s : 1;
 }
 
@@ -3776,6 +3778,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 	        " ripple=" + std::to_string(g_ssrV1Ripple) +
 	        " ripplesz=" + std::to_string(g_ssrV1RippleSz) +
 	        " ripplemode=" + std::to_string(g_ssrV1RippleMode) +
+	        " edge=" + std::to_string(g_ssrV1Edge) +
 	        " 底色=" + std::string(g_ssrV1ViewB ? "585段16后(含水)" : "324(ssr.base585 关/没建)") +
 	        " 水深=" +
 	        std::string(g_ssrV1ViewW ? "461段17后(真水面深度)" : "520河床(ssr.wdep 关/没拷)") +
@@ -3928,7 +3931,7 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		pc.p4[0] = g_ssrV1Ripple;
 		pc.p4[1] = static_cast<float>(g_ssrV1RippleSz);
 		pc.p4[2] = static_cast<float>(g_ssrV1RippleMode);
-		pc.p4[3] = 0.0f;
+		pc.p4[3] = static_cast<float>(g_ssrV1Edge);
 		c.fns.vkCmdPushConstants(g_ssrVkCmdOut, g_ssrV1Pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
 		                         sizeof(pc), &pc);
 	}

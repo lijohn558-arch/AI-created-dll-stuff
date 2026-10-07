@@ -218,6 +218,7 @@ namespace pocmain
 	extern float                   g_ssrV1Ripple;     // ini ssr.ripple 涟漪回注量 0..1 (v0.18.9, 默认 1)
 	extern int                     g_ssrV1RippleSz;   // ini ssr.ripplesz 回注带宽 (px, 1..16; v0.18.10, 默认 4)
 	extern int                     g_ssrV1RippleMode; // ini ssr.ripplemode 0=亮度调制 1=位移扭曲 (v0.18.10, 默认 1)
+	extern int                     g_ssrV1Edge;       // ini ssr.edge 0=未命中回原版层(默认) 1=屏幕边缘延展 (v0.18.11)
 	extern std::atomic<bool>       g_ssrBaseOn;       // ini ssr.base585 底色镜像独立门 (默认 1)
 	extern ID3D11Texture2D*        g_ssrBaseTex;      // 底色 SHARED 镜像 (585 段16 后 = 含水画面)
 	extern HANDLE                  g_ssrBaseH;        // 底色镜像 NT handle (VK 导入源)
