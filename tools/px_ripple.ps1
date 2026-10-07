@@ -127,10 +127,12 @@ function Peak-Lag($r, $lmax) {
 }
 
 $def = Get-ChildItem $Dir -Filter "Screenshot_v0.18.12 *.png" | Where-Object { $_.Name -notmatch "ssr" } | Select-Object -First 1
+$z8 = Get-ChildItem $Dir -Filter "Screenshot_ssr.ripplesz=8*.png" | Select-Object -First 1
 $files = @(
     @{ tag = "ORIG debug=7"; path = (Join-Path $Dir "Screenshot_ssr.debug=7.png") },
     @{ tag = "SSR  default"; path = $def.FullName }
 )
+if ($z8) { $files += @{ tag = "SSR  ripplesz=8"; path = $z8.FullName } }
 # two COMMON boxes (same screen rect in both shots): right water / left water
 $boxes = @(
     @{ tag = "boxR x1050-1850 y430-700"; b = @(1050, 1850, 430, 700) },
@@ -159,14 +161,17 @@ foreach ($f in $files) {
 
         # 3. sparkle + HF contrast (hp9)
         $px = 0; $tot = 0; $runs = New-Object System.Collections.Generic.List[int]
-        $ssq = 0.0; $sm = 0.0; $n = 0; $bsq = 0.0
+        $ssq = 0.0; $sm = 0.0; $n = 0; $bsq = 0.0; $fsq = 0.0; $wsq = 0.0
         for ($y = $bx.b[2]; $y -le $bx.b[3]; $y += 4) {
             $a = [Rp]::LumaXY($p.b, $p.stride, $bx.b[0], $bx.b[1], $y, $y, $true, 0)
             $hp = [Rp]::HP($a, 9)
             $bd = [Rp]::BAND($a, 41, 9)
+            $fn = [Rp]::BAND($a, 21, 3)    # fine   3..21px  (glint scale)
+            $wv = [Rp]::BAND($a, 61, 21)   # wave  21..61px  (lambda ~30)
             $run = 0
             for ($i = 0; $i -lt $hp.Length; $i++) {
                 $tot++; $n++; $sm += $a[$i]; $ssq += $hp[$i] * $hp[$i]; $bsq += $bd[$i] * $bd[$i]
+                $fsq += $fn[$i] * $fn[$i]; $wsq += $wv[$i] * $wv[$i]
                 if ($hp[$i] -gt 45) { $px++; $run++ } else { if ($run -gt 0) { $runs.Add($run); $run = 0 } }
             }
             if ($run -gt 0) { $runs.Add($run) }
@@ -174,10 +179,13 @@ foreach ($f in $files) {
         $mean = $sm / $n
         $hfr = [math]::Sqrt($ssq / $n)
         $brms = [math]::Sqrt($bsq / $n)
+        $frms = [math]::Sqrt($fsq / $n)
+        $wrms = [math]::Sqrt($wsq / $n)
         $runStr = "-"; $mlen = 0
         if ($runs.Count -gt 0) { $mlen = $px / $runs.Count; $runStr = ("{0:N1}" -f $mlen) }
-        Write-Output ("    HF    mean={0:N1} rmsHP9={1:N2} ({2:P1} of mean)  bandRMS(9-41px)={3:N2} luma = {4:N4} norm  sparkle={5} ({6:P2}) runs={7} meanLen={8}px" -f `
-            $mean, $hfr, ($hfr / $mean), $brms, ($brms / 255.0), $px, ($px / $tot), $runs.Count, $runStr)
+        Write-Output ("    HF    mean={0:N1} rmsHP9={1:N2}  band(9-41)={2:N2}  FINE(3-21)={3:N2}  WAVE(21-61)={4:N2}  fine/wave={5:N2}" -f `
+            $mean, $hfr, $brms, $frms, $wrms, $(if ($wrms -gt 0.001) { $frms / $wrms } else { 0 }))
+        Write-Output ("          sparkle={0} ({1:P2}) runs={2} meanLen={3}px" -f $px, ($px / $tot), $runs.Count, $runStr)
     }
 }
 Write-Output "done"

@@ -886,9 +886,12 @@ descriptor/sampler **推迟到 2d**，理由见 D2a-4）；**2c-β** VK `OPAQUE_
 > 生效、邻点全是水面时与 v0.18.12 逐位一致；**无新键、无新全局、push constant 仍 80B、
 > 通路时序不动**）CI SUCCESS + 实跑（2026-10-07，用户原话「人物周身确实没有一圈白亮边了，
 > 其他没变化」⇒ **归因坐实**，判读 §14.30.1；遗留「倒影质量差 / 波纹偏小」两项见 §14.30.2；
-> **`ssr.debug=7` 实测（§14.30.3）λ≈30px ⇒ `ripplesz` 该取 λ/4 = 8、不是 λ/2（λ/2 落 null），
-> 现值 4 的 6px 天花板在咬、命中区 sparkle −32% ⇒ 下一轮两个旋钮 `ssr.ripplesz=8` / `ssr.ripplemode=0`，
-> 量测工具 `tools/px_ripple.ps1` 入库**）** ⇒ 判读模板 `docs/02` §14.30（关键验证 = `ssr.debug=2`
+> **`ssr.debug=7` 实测（§14.30.3）λ≈30px ⇒ `ripplesz` 该取 λ/4 = 8、不是 λ/2（λ/2 落 null）、
+> 命中区 sparkle −32%；**`ssr.ripplesz=8` 实跑（§14.30.4）⇒ 带通没带通：`g1−g2` 对 3~10px 细结构
+> 响应是 λ30 波的 1.27~2.20×、位移场被高光斑劫持且对 `ripplesz` 不敏感（Rb=4/8 冲激响应相同）
+> ⇒ 换档位治不了必须换算子，波那档也贴 `clamp` 被削顶 ⇒ 下一旋钮 `ssr.debug=6` 拍基线 →
+> v0.18.14 走「输入端鲁棒化 + `ripAmp`/增益解耦」；量测工具 `tools/px_ripple.ps1` 入库并加 FINE/WAVE 两列**
+> ）** ⇒ 判读模板 `docs/02` §14.30（关键验证 = `ssr.debug=2`
 > 下人物/礁石外圈那道 **4px 绿边**、默认画面下那圈**白亮边**都应消失）；`tools/` 版本串同步
 > （`check1` `$need`、`run2c` 8 处，字节级**等长**替换 ⇒ BOM 与行尾逐项未变）；三闸已过：
 > `make_shaders` OK（`ssr.frag.spv = 27708 B`，原 24560）、`check1` RESULT OK、引号扫描 odd=0。
