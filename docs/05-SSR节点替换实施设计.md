@@ -875,10 +875,19 @@ descriptor/sampler **推迟到 2d**，理由见 D2a-4）；**2c-β** VK `OPAQUE_
 > push constant 仍 80B）CI SUCCESS + 实跑三张图（`debug=2` 坐实 hit/miss 归因、`edge=1` 复现错位、
 > `edge=0` 正常 ⇒ 用户判「只有 `ssr.edge=0` 效果较好」，归因与实测见 `docs/02` §14.27.1）** ⇒
 > **第十三批 `v0.18.12`（前景遮挡守卫 `sz<=P.z*0.98` + 二分 3→5 + 位移幅度随 `ripplesz`，
-> 无新键、push constant 仍 80B）已落地，待 CI + 待实跑**
+> 无新键、push constant 仍 80B）CI SUCCESS + 实跑四张图 ⇒ 结果：**「人物一圈」守卫没治好**，
+> 早先归因错；像素测量把成因改判为「法线差分邻点跨剪影」（三张图环宽中位数一律 4px =
+> `ssr.smooth`），归因与实测见 `docs/02` §14.28.1**
 > ⇒ 判读模板改用 `docs/02` §14.28，ini 在 `ssr.v1=1` 之外再追加 `ssr.smooth=4` / `ssr.blur=1` /
 > `ssr.debug=0` / `ssr.base585=1` / `ssr.wdep=1` / `ssr.ripple=1` / `ssr.ripplesz=4` / `ssr.ripplemode=1` /
 > `ssr.edge=0`。
+> ⇒ **第十四批 `v0.18.13`（法线差分轮廓守卫：新增 `nbWater` 逐邻点过 `useW` 同款三条件，
+> 单侧越界退**单侧差分**、两侧越界落回原退化兜底 `N=视图+Z ⇒ miss ⇒ 回原版层`；只对 `useW`
+> 生效、邻点全是水面时与 v0.18.12 逐位一致；**无新键、无新全局、push constant 仍 80B、
+> 通路时序不动**）已落地，待 CI + 待实跑** ⇒ 判读模板 `docs/02` §14.30（关键验证 = `ssr.debug=2`
+> 下人物/礁石外圈那道 **4px 绿边**、默认画面下那圈**白亮边**都应消失）；`tools/` 版本串同步
+> （`check1` `$need`、`run2c` 8 处，字节级**等长**替换 ⇒ BOM 与行尾逐项未变）；三闸已过：
+> `make_shaders` OK（`ssr.frag.spv = 27708 B`，原 24560）、`check1` RESULT OK、引号扫描 odd=0。
 | **4 过闸** | 套 `docs/02` §14.6 模板：抓 S5/S4 双帧 → declared-diff 闸（A 全绿 + F 必现 + B 归因）→ 帧时不劣于基线 5%（`docs/00:93`，1660Ti 1080p，S4/S5 各测；**基线数取 `v0.16.2` 的 `帧时基线` 行，采法见 `docs/02` §14.14**） | compare JSON + 帧时数据 + 判读入档 | R3 帧时 |
 | **5 收口** | 默认 `ssr=1`、docs/00 §1.1 与 docs/03 §7.1 回填、诚实边界新增 | commit + CI | — |
 
