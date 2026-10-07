@@ -641,7 +641,7 @@ layout×2 + pool×2 + allocate/update/**bind**×3）—— SSR v1 真要采样�
 - **反推的尺度关系（R4 的一个副产品）**：`ssr.dist` **以 near 为单位**（`p1.w = dist × near`），
   于是行进距离与 `ssr.near` 的取值无关，观感主要只剩 `ssr.fov` 要对齐；`ssr.rev=1` 备反向深度。
 
-**✅ A/B 补遗落地（`v0.18.7`，2026-10-07，代码批已落地 ⇒ 待 CI + 待实跑 → `docs/02` §14.23）**
+**✅ A/B 补遗落地（`v0.18.7` = `5b3fcfb` + `d8b6e80`，CI SUCCESS；**2026-10-07 已实跑 → `docs/02` §14.23.1**：B 水色 PASS、A 只半修 ⇒ 正解 B 见下块）**
 —— 上面那块是 v0.18.6 的形态；**实机回报两个画面问题**（归因 `docs/02` §14.22.1）后补了两件事：
 
 - **A 平滑批（修「倒影完全破碎」）**：水面像素的**深度其实是水底/河床**（水体不写深度）⇒
@@ -665,6 +665,42 @@ layout×2 + pool×2 + allocate/update/**bind**×3）—— SSR v1 真要采样�
   `tools/check1.ps1` → **RESULT OK**、`run2c.ps1` §#16 增 `[base] 底色镜像 OK / 底色图就绪 /
   底色# / desc不一致` 四组判据 + 6 条 fail/warn。
 
+**✅ 正解 B 补遗落地（`v0.18.8`，2026-10-07，代码批已落地 ⇒ 待 CI + 待实跑 → `docs/02` §14.24）**
+—— `v0.18.7` 实跑归因（`docs/02` §14.23.1）：**A 只压住面内噪声，倒影仍呈「不规则多边形拼图」**，
+因为**法线源拿错了**（水面像素在 520 段前快照里读到的是**河床三角面**，一整块三角形一个法线，
+邻域再大也抹不平面间跳变）。对策 = **换数据源**，不加参数：
+
+- **源 = 段17 之后的 461**：段16/17/18 的 `dsv` 全 = **461**（同一缓冲），段17 = `ev39530` 单 draw
+  **depth 测关写开** ⇒ 该 draw 之后 461 里就是**真·水面深度**；而 `520 = ev21505` 是对 461 的**段前**
+  拷贝 ⇒ `dW vs dPre` 是**同一缓冲的段后 vs 段前**比较。
+- **拷贝时机 = 特征B（段16→段17 换绑）之后的第一次换绑**（= 段18 的 `ev39585`）：此刻段17 draw 已
+  排完、段18/242 透明未画、**尚未走到 UI 中途 ClearDS**（放到 Present 拷会被清成全 1.0 ⇒ 特征静默
+  失效）。实现 = `ssrReconOm` **顶部** arm→fire（早于一切 early return）+ feature-B 处
+  `pDSV->GetResource` 存活引用 + `arm=true`（并清 fire），hook 在 `real()` 后消费 → `ssrWDepQueue`；
+  `notePresent` 帧末清 arm/fire 兜特殊帧。
+- **不拆不绑**：`CopyResource` 源可 bound、目标（我方镜像）不 bound 即可（游戏自身 `ev21505` 即同类
+  先例）⇒ 不污染 hook 的 OMSet 计数与身份学习。
+- **VK 侧**：`ssrWDepVkBuild`（KMT/NT 双分支、`usage=SAMPLED`、`VK_FORMAT_D24_UNORM_S8_UINT`、
+  desc 门 = D24 家族/1 mip/1 array/无 MSAA、换设备与 handle 变更**只丢不毁**、初转复用 `g_ssrVkCmdB`），
+  `ssrOutVkFrame` 顶部 `ssrBaseVkBuild` 旁幂等调用；`ssrV1Sig` 吸收 `g_ssrWDepImg` ⇒ 自动重录；
+  `ssrV1Build` **4 binding**（`binding 3` = `uWdep`，**没水深时填 viewC**、由 push `p2.w` 告诉 shader
+  采不采）+ `g_ssrV1ViewW`（depth aspect）；`ssrV1RecordRender` 水深进/出成对 barrier
+  （`GENERAL ↔ SHADER_READ`、`DEPTH|STENCIL` 同带）；`ssrInGateWait` **第二道 EVENT 闸**
+  `[wdep] 段后水深EVENT闸#`（2c 的 `g_ssrInQ` 在拷贝前就 End，等不到它 ⇒ 单列、**独立计数**不与
+  12e 闸串味）；`ssrV1DropViewW` / `ssrV1Free` / 拆干净块清理。
+- **shader 判据（必须 viewZ 比较）**：`useW = p2.w>0.5 && dWr>0 && dWr<1 && viewZ(dWr) > viewZ(dPreR)`
+  —— `linD` 在 `rev=0/1` 下单调性不同，直接比线性深度无效；**命中才换源**（origin + 法线用段后水深），
+  **ray march 层级仍固定用 520**（否则射线一出门就打在自己脚下的水面上，一个也命中不了）；
+  `dAt/PAt(uv, bool)` 让法线邻域 4 个点与中心用**同一个源**，免得水面/河床两种几何混进一个叉积。
+- **`ssr.debug` 扩到 0..5**：新增 **4 = 段后水深灰度**（验镜像内容是平滑水面）、
+  **5 = 水面像素 mask**（绿 = 用水深、灰 = 退回 520，验判据命中范围）。
+- **降级链仍是「任一步只关自己」**：水深建不出/导入失败/view 失败 ⇒ `p2.w=0` **退回 `v0.18.7`**
+  （法线仍取 520 河床 = 多边形拼图，但**不产生更坏的画面**）；461 被 ClearDS 清掉 ⇒ viewZ 判据不成立
+  ⇒ 整帧退回 520（**天生自愈**）；ini `ssr.wdep`（默认 1）= 这版的总逃生门。
+- **闸**：`make_shaders.ps1` 已跑（`ssr.frag.spv` 14732 → **17536 B**）、`check1.ps1` → **RESULT OK**、
+  `run2c.ps1` §#16 增 `[wdep] 镜像就绪 / 水深图就绪 / 水深拷贝# / desc不一致 / EVENT闸#` 五组判据
+  + 6 条 fail/warn + banner `expect v0.18.8`。
+
 ### D5 配置与逃生门
 
 - `ssr=0/1`（`iniFlag` 模板），**默认 0（未过闸前）**，过闸后改默认 1 —— 总门：管挂不挂槽33/47/50；
@@ -675,6 +711,10 @@ layout×2 + pool×2 + allocate/update/**bind**×3）—— SSR v1 真要采样�
   现象 = 水几乎消失，见 `docs/02` §14.11.1）—— **验收后已改回 0 供日常游玩**，
   下次要复现破坏画面再置 1。
 - `ssr.debug=N`：每 N 帧打触发/耗时（节流口径抄 `n%256`）；
+- **`ssr.wdep=0/1`，默认 1**（`v0.18.8` 正解 B 新增）—— 第 5 张 SHARED 镜像（段17 后的 461）的
+  独立开关：1 = 水面像素的法线/反射原点取段后水深，0 = `v0.18.7` 行为（法线仍取 520 河床 ⇒
+  倒影多边形拼图）。**只关自己**：任一环失败（镜像建不出 / VK 导入失败 / view 失败 / 拷贝 desc
+  不一致）也自动退回 `v0.18.7` 行为，不产生更坏的画面。`ssr=0` / `ssr.v1=0` 时一并失效。
 - 挂载受 `vulkan` 总闸 + `probe`（探针 fallback 依赖）联立把关，`ssr=0` 时零新增拦截。
 - **ini 只读一次**（`installProbeOn` 首次调用），改完必须重启游戏。
 
@@ -698,8 +738,11 @@ descriptor/sampler **推迟到 2d**，理由见 D2a-4）；**2c-β** VK `OPAQUE_
 > render pass + 2 binding + push constant 48B、R4 = 反推 inv(投影)）；run2c 新增 §#16；
 > **验收（人工目视）已跑、通路全绿但画面两个问题**（倒影完全破碎 / 水色仍透明，归因见
 > `docs/02` §14.22.1）⇒ **第八批 `v0.18.7`（A 平滑批 + B 底色镜像，push constant 48B→64B、
-> 描述符 3 binding）已落地，待 CI + 待实跑** ⇒ 判读模板改用 `docs/02` §14.23，ini 在 `ssr.v1=1`
-> 之外再追加 `ssr.smooth=4` / `ssr.blur=1` / `ssr.debug=0` / `ssr.base585=1`。
+> 描述符 3 binding）CI SUCCESS 并实跑：B 水色 PASS、A 只半修（碎渣 → 不规则多边形拼图，归因见
+> `docs/02` §14.23.1）** ⇒ **第九批 `v0.18.8`（正解 B：段后水深做算法线，描述符 4 binding、
+> 第 5 张 SHARED 镜像 + 第二道 EVENT 闸、`ssr.debug` 扩 0..5）已落地，待 CI + 待实跑**
+> ⇒ 判读模板改用 `docs/02` §14.24，ini 在 `ssr.v1=1` 之外再追加 `ssr.smooth=4` / `ssr.blur=1` /
+> `ssr.debug=0` / `ssr.base585=1` / `ssr.wdep=1`。
 | **4 过闸** | 套 `docs/02` §14.6 模板：抓 S5/S4 双帧 → declared-diff 闸（A 全绿 + F 必现 + B 归因）→ 帧时不劣于基线 5%（`docs/00:93`，1660Ti 1080p，S4/S5 各测；**基线数取 `v0.16.2` 的 `帧时基线` 行，采法见 `docs/02` §14.14**） | compare JSON + 帧时数据 + 判读入档 | R3 帧时 |
 | **5 收口** | 默认 `ssr=1`、docs/00 §1.1 与 docs/03 §7.1 回填、诚实边界新增 | commit + CI | — |
 
