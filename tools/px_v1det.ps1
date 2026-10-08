@@ -1,0 +1,172 @@
+param([string]$Path, [int]$TopN = 0)
+# px_v1det.ps1  -- reader for ssr.debug=8 screenshots (v0.18.15 diagnostic).
+#
+# debug=8 renders the UNIT addend:  add = max(baseRGB-refl,0) * (gb * wSsr)
+#   (the same terms as the composite formula, but WITHOUT multiplying ssr.v1det)
+# through a Reinhard tone map:   y = l/(1+l)   =>   l = y/(1-y)
+# where l is the HDR luminance that det=1 would put back.
+#
+# So one screenshot answers "where can ssr.v1det add, and how much" with zero
+# cross-image noise (no pose / lighting / water-animation dependence).
+#
+# Outputs: per-box histogram stats (already inverted to l), plus an ASCII heat
+# map of the max-addend field so the bright-spot regions are visible at a glance.
+#
+# ASCII-only; CRLF no BOM (see px_ripple.ps1 convention).
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+
+function Load32([string]$p) {
+    $src = [System.Drawing.Bitmap]::FromFile($p)
+    $bm = New-Object System.Drawing.Bitmap($src.Width, $src.Height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($bm)
+    $g.DrawImage($src, 0, 0, $src.Width, $src.Height)
+    $g.Dispose(); $src.Dispose()
+    $rect = New-Object System.Drawing.Rectangle 0, 0, $bm.Width, $bm.Height
+    $bd = $bm.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $len = $bd.Stride * $bm.Height
+    $buf = New-Object byte[] $len
+    [System.Runtime.InteropServices.Marshal]::Copy($bd.Scan0, $buf, 0, $len)
+    $bm.UnlockBits($bd); $bm.Dispose()
+    return ,$buf
+}
+
+if (-not (Test-Path -LiteralPath $Path)) { Write-Output ("MISSING " + $Path); exit 2 }
+$fi = Get-Item -LiteralPath $Path
+Write-Output ("file " + $fi.LastWriteTime.ToString('MM-dd HH:mm:ss') + "  " + $fi.Length + " B  " + $fi.Name)
+
+$px = Load32 $Path
+$W = 1920; $H = 1080
+if ($px.Length -ne $W * $H * 4) { Write-Output ("UNEXPECTED bytes " + $px.Length); exit 2 }
+
+# invert the Reinhard map: l = y/(1-y).  8bit max 255 saturates => cap it
+function Inv([double]$y) {
+    if ($y -le 0.0) { return 0.0 }
+    if ($y -ge 0.998) { return 999.0 }
+    return $y / (1.0 - $y)
+}
+
+# boxes: flat stride-5 (name,x1,y1,x2,y2).  PowerShell flattens nested @() literals.
+$bx = @(
+    'far',    200,  210, 1700,  380,
+    'midR',  1050,  430, 1850,  700,
+    'nearL',   60,  760,  420, 1070,
+    'nearR', 1450,  760, 1900, 1070,
+    'ALL',       0,    0, 1920, 1080
+)
+$nb = [int]($bx.Count / 5)
+
+$cnt  = New-Object long[] $nb
+$nz   = New-Object long[] $nb
+$sumY = New-Object double[] $nb
+$maxY = New-Object double[] $nb
+$maxX = New-Object long[] $nb
+$maxYy = New-Object long[] $nb
+$hist = New-Object 'long[,]' $nb, 256
+
+$GW = 64; $GH = 24
+$grid = New-Object 'double[,]' $GH, $GW
+for ($gy = 0; $gy -lt $GH; $gy++) { for ($gx = 0; $gx -lt $GW; $gx++) { $grid[$gy,$gx] = 0.0 } }
+
+for ($y = 0; $y -lt $H; $y++) {
+    $row = $y * $W * 4
+    $gy = [int][Math]::Floor($y * $GH / $H)    # NOTE: [int]() would ROUND (63.97 -> 64) and blow the array
+    for ($x = 0; $x -lt $W; $x++) {
+        $i = $row + $x * 4
+        $v = $px[$i]          # B channel (image is grey anyway)
+        $yy = $v / 255.0
+        $gxc = [int][Math]::Floor($x * $GW / $W)
+        if ($yy -gt $grid[$gy, $gxc]) { $grid[$gy, $gxc] = $yy }
+        for ($bi = 0; $bi -lt $nb; $bi++) {
+            $o = $bi * 5
+            if ($x -ge $bx[$o+1] -and $x -lt $bx[$o+3] -and $y -ge $bx[$o+2] -and $y -lt $bx[$o+4]) {
+                $cnt[$bi]++
+                $hist[$bi, $v]++
+                $sumY[$bi] += $yy
+                if ($yy -gt 0.0) { $nz[$bi]++ }
+                if ($yy -gt $maxY[$bi]) { $maxY[$bi] = $yy; $maxX[$bi] = $x; $maxYy[$bi] = $y }
+                break
+            }
+        }
+    }
+}
+
+Write-Output ""
+Write-Output "NOTE: values are the UNIT addend (det=1 full scale).  Actual added luma at det=D is l*D."
+Write-Output ""
+$hdr = 'box     ' + 'n'.PadLeft(9) + 'nonzero'.PadLeft(10) + 'nz%'.PadLeft(9) + 'meanL'.PadLeft(10) + 'p99L'.PadLeft(10) + 'p99.9L'.PadLeft(10) + 'maxL'.PadLeft(11)
+Write-Output $hdr
+for ($bi = 0; $bi -lt $nb; $bi++) {
+    $n = $cnt[$bi]
+    $meanY = $sumY[$bi] / $n
+    $p99 = -1.0; $p999 = -1.0
+    $t99 = 0.99 * $n; $t999 = 0.999 * $n; $acc = 0.0
+    for ($v = 0; $v -lt 256; $v++) {
+        $c = $hist[$bi, $v]
+        if ($c -eq 0) { continue }
+        if ($p99 -lt 0.0 -and ($acc + $c) -ge $t99) { $p99 = $v / 255.0 }
+        if ($p999 -lt 0.0 -and ($acc + $c) -ge $t999) { $p999 = $v / 255.0; break }
+        $acc += $c
+    }
+    if ($p99 -lt 0.0) { $p99 = 255.0 / 255.0 }
+    if ($p999 -lt 0.0) { $p999 = 255.0 / 255.0 }
+    $row = ([string]$bx[$bi*5]).PadRight(7) + $n.ToString().PadLeft(9)
+    $row += $nz[$bi].ToString().PadLeft(10)
+    $row += ("{0,8:N3}%" -f (100.0 * $nz[$bi] / $n)).PadLeft(9)
+    $row += ("{0,10:N4}" -f (Inv $meanY)).PadLeft(10)
+    $row += ("{0,10:N4}" -f (Inv $p99)).PadLeft(10)
+    $row += ("{0,10:N4}" -f (Inv $p999)).PadLeft(10)
+    $row += ("{0,11:N3}" -f (Inv $maxY[$bi])).PadLeft(11)
+    Write-Output $row
+}
+
+Write-Output ""
+Write-Output "det=0.3 would add meanL*0.3 to the whole box; maxL locates the hottest pixel:"
+for ($bi = 0; $bi -lt $nb; $bi++) {
+    $m = Inv ($sumY[$bi] / $cnt[$bi])
+    $nm = [string]$bx[$bi*5]
+    Write-Output ("  " + $nm.PadRight(7) + " meanL=" + ("{0,9:N5}" -f $m) +
+        "   det=0.3 => " + ("{0,9:N5}" -f ($m * 0.3)) +
+        "   max at x" + $maxX[$bi] + " y" + $maxYy[$bi])
+}
+
+if ($TopN -gt 0) {
+    Write-Output ""
+    Write-Output ("top " + $TopN + " cells (cell = " + [int](1920/$GW) + "x" + [int](1080/$GH) + " px):")
+    $al = New-Object System.Collections.ArrayList
+    for ($gy = 0; $gy -lt $GH; $gy++) {
+        for ($gx = 0; $gx -lt $GW; $gx++) {
+            [void]$al.Add(@($grid[$gy,$gx], $gx, $gy))
+        }
+    }
+    $sorted = @($al | Sort-Object -Property @{Expression = { $_[0] }; Descending = $true} | Select-Object -First $TopN)
+    foreach ($c in $sorted) {
+        $yy = [double]$c[0]; $gx = [int]$c[1]; $gy = [int]$c[2]
+        $x0 = [int](($gx * 1920) / $GW); $y0 = [int]($gy * 1080 / $GH)
+        $cw = [int](1920 / $GW); $chh = [int](1080 / $GH)
+        Write-Output ("  cell(" + $gx.ToString().PadLeft(2) + "," + $gy.ToString().PadLeft(2) + ")" +
+            "  px x" + $x0.ToString().PadLeft(4) + "-" + ($x0 + $cw).ToString().PadLeft(4) +
+            " y" + $y0.ToString().PadLeft(4) + "-" + ($y0 + $chh).ToString().PadLeft(4) +
+            "   y=" + ("{0,7:N4}" -f $yy) + "   l=" + ("{0,9:N3}" -f (Inv $yy)))
+    }
+}
+
+Write-Output ""
+Write-Output "max-addend heat map (rows=top->bottom).  ' '=none  .=tiny  -=small  +=mid  *=high  #=sat"
+for ($gy = 0; $gy -lt $GH; $gy++) {
+    $line = ''
+    for ($gx = 0; $gx -lt $GW; $gx++) {
+        $yy = $grid[$gy, $gx]
+        $ch = '#'
+        if ($yy -le 0.001) { $ch = ' ' }
+        elseif ($yy -lt 0.02) { $ch = '.' }
+        elseif ($yy -lt 0.06) { $ch = '-' }
+        elseif ($yy -lt 0.15) { $ch = '+' }
+        elseif ($yy -lt 0.40) { $ch = '*' }
+        $line += $ch
+    }
+    Write-Output $line
+}
+Write-Output ""
+Write-Output "VERDICT: blank map => gb gate or baseRGB<=refl is killing the addend everywhere."
+Write-Output ("         '*'/'#' clustered on the water => det restores highlights there; read p99L to size it.")

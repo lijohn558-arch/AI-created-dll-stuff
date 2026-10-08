@@ -3941,7 +3941,7 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		pc.p2[3] = g_ssrV1ViewW ? 1.0f : 0.0f; // v0.18.8: 段后水深开关 (没水深 ⇒ 法线用 520)
 		pc.p3[0] = static_cast<float>(g_ssrV1Smooth); // 法线差分邻域 (px) —— 抗"倒影破碎"主力
 		pc.p3[1] = static_cast<float>(g_ssrV1Blur);   // 反射色 5tap 空间平滑
-		pc.p3[2] = static_cast<float>(g_ssrV1Debug);  // 0..7 (v0.18.10: +6 回注可视化 / +7 uBase 原样)
+		pc.p3[2] = static_cast<float>(g_ssrV1Debug);  // 0..8 (v0.18.10: +6 回注可视化 / +7 uBase 原样; v0.18.15: +8 单位回补量)
 		pc.p3[3] = g_ssrV1ViewB ? 1.0f : 0.0f;        // 底色开关 (没底色 ⇒ 采 uColor 当底色)
 		// v0.18.9 p4 = (涟漪回注量); v0.18.10 填 y=带宽(px) z=回注方式 0亮度/1位移
 		pc.p4[0] = g_ssrV1Ripple;

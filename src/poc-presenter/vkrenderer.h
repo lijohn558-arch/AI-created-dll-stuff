@@ -214,7 +214,7 @@ namespace pocmain
 	// ---- v0.18.7: A 平滑批 (倒影破碎) + B 水色保留 (第4张底色镜像) ----
 	extern int                     g_ssrV1Smooth;     // ini ssr.smooth 法线差分邻域 (px, 1..16)
 	extern int                     g_ssrV1Blur;       // ini ssr.blur   反射 5tap 空间平滑 0/1
-	extern int                     g_ssrV1Debug;      // ini ssr.debug  0 正常/1 法线/2 命中/3 深度/4 段后水深/5 水面像素/6 回注可视化/7 uBase 原样
+	extern int                     g_ssrV1Debug;      // ini ssr.debug  0 正常/1 法线/2 命中/3 深度/4 段后水深/5 水面像素/6 回注可视化/7 uBase 原样/8 v0.18.15 单位回补量
 	extern float                   g_ssrV1Ripple;     // ini ssr.ripple 涟漪回注量 0..1 (v0.18.9, 默认 1)
 	extern int                     g_ssrV1RippleSz;   // ini ssr.ripplesz 回注带宽 (px, 1..16; v0.18.10, 默认 4)
 	extern int                     g_ssrV1RippleMode; // ini ssr.ripplemode 0=亮度调制 1=位移扭曲 (v0.18.10, 默认 1)
