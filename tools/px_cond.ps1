@@ -175,6 +175,15 @@ if ($Normal) {
     Write-Output "  empty 585 fallback is flat).  HIT group = the SSR-reflecting band, MISS"
     Write-Output "  group = the near field + screen sides that have no reflection today."
     Write-Output ""
+    Write-Output "  (The y>=.06 / y>=.10 columns are the BLEED bound of the debug=8 addend"
+    Write-Output "   readout - on a normal debug=0 frame both groups are near 100% and the"
+    Write-Output "   columns carry no information.  Judge -Normal on p50 / structure only.)"
+    Write-Output ""
+    Write-Output "CAVEAT: the two groups are DIFFERENT WATER reflecting DIFFERENT but"
+    Write-Output "  LEGITIMATE surroundings - near water is supposed to reflect the dark near"
+    Write-Output "  bank.  So miss/hit OVERSTATES how much of the gap is missing reflection:"
+    Write-Output "  it is an UPPER BOUND and a BASELINE, never a target."
+    Write-Output ""
     if ($rP50 -ge 0.90 -and $rStr -ge 0.60) {
         Write-Output ("VERDICT: B is SMALL (p50 ratio " + ("{0:N3}" -f $rP50) + ", structure ratio " + ("{0:N3}" -f $rStr) + ").")
         Write-Output "         The miss region already looks close to the hit region in the NORMAL"
@@ -185,8 +194,13 @@ if ($Normal) {
         Write-Output ("VERDICT: B CONFIRMED (p50 ratio " + ("{0:N3}" -f $rP50) + ", structure ratio " + ("{0:N3}" -f $rStr) + ").")
         Write-Output "         The miss region is darker AND flatter than the hit region in the"
         Write-Output "         NORMAL frame = issue B is real and still visible after A."
-        Write-Output "         ACCEPTANCE for ssr.edge=2: rerun this same pair; the p50 ratio must"
-        Write-Output "         rise toward 1.0 and structure must rise, while the HIT group stays put."
+        Write-Output "         ACCEPTANCE for ssr.edge=2 is PAIRED, same pose, edge=0 vs edge=2:"
+        Write-Output "           1. HIT row must stay PUT - regression guard for issue A."
+        Write-Output "           2. MISS row must MOVE - run this command once per shot against the"
+        Write-Output "              SAME debug=2 mask and diff the two MISS rows (p50, structure)."
+        Write-Output "           3. Do NOT require miss/hit to reach 1.0: a correct cubemap may"
+        Write-Output "              legitimately stay dark where the scene is dark.  The complaint is"
+        Write-Output "              an artificial EDGE, so judge the fan boundary visually too."
     }
     Write-Output ""
     Write-Output "NOTE: the hit/miss SPLIT itself is pure geometry (ssr.edge/mode/camera) and"
