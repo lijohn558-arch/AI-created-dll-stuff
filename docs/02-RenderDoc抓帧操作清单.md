@@ -4032,3 +4032,48 @@ push constant 仍 96B、位移轴未碰 ⇒ §14.30.8 的四框数字照旧可�
 
 **任一档失败只关自己，WARN 不连坐**；本节改的是 `v1det>0` 才进的块，
 `ssr.v1det=0` 默认档与 `ssr.debug=0` 默认档均逐位未动。
+
+#### 7. 第三层失败：DLL 根本没换（2026-10-08 13:47）—— `knobchk` 过了也不算数
+
+**现象**：`Screenshot_v0.18.15 ssr.debug=8 gb010 .png` 那一轮，`knobchk -Key ssr.debug -Value 8`
+**PASS**（启动 13:46:53 → 截图 13:47:30，`echoed ssr.debug = 8` line 4009），
+ini 第 56 行 `ssr.debug=8`、`ripk=0 / ripamp=0 / v1det=0.3` 全对 —— 三条旋钮闸全绿，
+**但 `tools/dllchk` 查出 `D:\...\SKSE\Plugins\poc-presenter.dll` 的 mtime = `2026-10-08 05:36:52`**，
+而 `a497d10`（`gb` 重标定）**13:10:05** 才提交、CI 出包更晚。
+
+> ⇒ **跑的是旧 `gb = 0.35/0.85`**，等于换个机位把上一张重拍了一遍。
+> 这一轮对「改动是否成立」**既不能证明、也不能证伪**，作废。
+
+**两条旁证**（都不足以单独定案，合起来才稳）：
+
+- `check_frame` 判 `FRAMING MISMATCH`（`best dy=+28 dx=+60`，超出 `|dy|<=6 |dx|<=30`）
+  ⇒ 连与 12:42 那张对比的资格都没有，四框数字跨图不可比；
+- 三个水框数字几乎没动（`midR 0.0523 → 0.0633`、`nearL 0.0134 → 0.0121`、`nearR 0.0143 → 0.0141`）
+  —— 机位不同本该有差异，**纹丝不动反而印证是同一个 build**（仅供参考，不作判据）。
+
+**教训（与 §5 第一层同构，是同一个坑的第二面）**：
+`knobchk` 证明的是「**旋钮被读到了**」，**证明不了「哪个二进制读的它」**。
+「改了 ini」不算数，**「下载过 artifact」同样不算数** —— 只有文件 mtime 与日志回显能证明。
+
+**新闸 `tools/dllchk.ps1`**（拍图前第一道）：
+
+| 用法 | 作用 |
+|---|---|
+| `dllchk.ps1` | 打印 DLL 路径 / mtime / 大小，并从日志反查 `vtbl[22] … poc-presenter.dll ==` 那行**进程实际映射的文件**，核对与预期路径一致 |
+| `dllchk.ps1 -After "2026-10-08 13:10:05"` | 传提交/出包时间；DLL 更旧 ⇒ **exit 1 + `STALE BUILD`** |
+
+本轮正反例实测：`-After "2026-10-08 13:20:00"` ⇒
+`VERDICT: FAIL - DLL is 463 min OLDER than 2026-10-08 13:20:00 => STALE BUILD, do not trust any shot`（exit 1）。
+
+**拍图前的完整闸序（三条缺一不可）**：
+
+```
+1. tools\dllchk.ps1 -After "<出包/提交时间>"     ← 新增: 证明是新二进制
+2. 改 ini → 重启
+3. tools\knobchk.ps1 -Key <键> -Value <值>       ← 证明旋钮真跑起来了
+   → 截图
+4. tools\check_frame.ps1 -A <上张> -B <本张>     ← 跨图比较前, 证明机位可比
+   → tools\px_v1det.ps1 -Path <本张> -Mark       ← 先看框位, 再看数字
+```
+
+本轮 `gb010` 两张图**不入档**（无效运行），待换上 `a497d10` 的 DLL 后重拍同名文件。
