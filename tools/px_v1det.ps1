@@ -1,4 +1,4 @@
-param([string]$Path, [int]$TopN = 0)
+param([string]$Path, [int]$TopN = 0, [switch]$Mark)
 # px_v1det.ps1  -- reader for ssr.debug=8 screenshots (v0.18.15 diagnostic).
 #
 # debug=8 renders the UNIT addend:  add = max(baseRGB-refl,0) * (gb * wSsr)
@@ -11,6 +11,12 @@ param([string]$Path, [int]$TopN = 0)
 #
 # Outputs: per-box histogram stats (already inverted to l), plus an ASCII heat
 # map of the max-addend field so the bright-spot regions are visible at a glance.
+#
+# -Mark : also write "<name>.boxes.png" with the four measurement boxes drawn on
+#         the shot.  The boxes are pose-FIXED (framed for the v0.18.14 pose), so
+#         whenever the camera moves they silently start measuring land / HUD
+#         instead of water.  One glance at the marked image settles it; never
+#         trust the numbers without it (see docs/02 sec14.31 sec6).
 #
 # ASCII-only; CRLF no BOM (see px_ripple.ps1 convention).
 $ErrorActionPreference = 'Stop'
@@ -121,6 +127,11 @@ for ($bi = 0; $bi -lt $nb; $bi++) {
 }
 
 Write-Output ""
+Write-Output "CAVEAT: the four boxes are pose-FIXED (framed for the v0.18.14 shot).  Once the camera"
+Write-Output "        moves they measure land / HUD instead of water and the numbers above are garbage."
+Write-Output "        Re-run with -Mark to draw them on the shot and confirm before believing anything."
+
+Write-Output ""
 Write-Output "det=0.3 would add meanL*0.3 to the whole box; maxL locates the hottest pixel:"
 for ($bi = 0; $bi -lt $nb; $bi++) {
     $m = Inv ($sumY[$bi] / $cnt[$bi])
@@ -170,3 +181,33 @@ for ($gy = 0; $gy -lt $GH; $gy++) {
 Write-Output ""
 Write-Output "VERDICT: blank map => gb gate or baseRGB<=refl is killing the addend everywhere."
 Write-Output ("         '*'/'#' clustered on the water => det restores highlights there; read p99L to size it.")
+
+if ($Mark) {
+    $src = [System.Drawing.Bitmap]::FromFile($Path)
+    $g = [System.Drawing.Graphics]::FromImage($src)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255, 40, 40, 255), 4)
+    $penB = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255, 40, 255, 40), 4)
+    $font = New-Object System.Drawing.Font('Consolas', 18, [System.Drawing.FontStyle]::Bold)
+    $brB = [System.Drawing.Brushes]::Blue
+    $brG = [System.Drawing.Brushes]::Lime
+    for ($bi = 0; $bi -lt $nb; $bi++) {
+        $o = $bi * 5
+        $nm = [string]$bx[$o]
+        if ($nm -eq 'ALL') { continue }
+        $rx = [int]$bx[$o+1]; $ry = [int]$bx[$o+2]
+        $rw = [int]($bx[$o+3] - $bx[$o+1]); $rh = [int]($bx[$o+4] - $bx[$o+2])
+        # alternate colours so adjacent boxes stay tellable apart
+        $useB = (($bi % 2) -eq 0)
+        $p = if ($useB) { $pen } else { $penB }
+        $b = if ($useB) { $brB } else { $brG }
+        $g.DrawRectangle($p, $rx, $ry, $rw, $rh)
+        $g.DrawString($nm + ' ' + $rw + 'x' + $rh, $font, $b, ($rx + 6), ($ry + 6))
+    }
+    $g.Dispose()
+    $out = [System.IO.Path]::ChangeExtension($Path, '.boxes.png')
+    $src.Save($out, [System.Drawing.Imaging.ImageFormat]::Png)
+    $src.Dispose()
+    Write-Output ""
+    Write-Output ("MARKED -> " + $out)
+}
