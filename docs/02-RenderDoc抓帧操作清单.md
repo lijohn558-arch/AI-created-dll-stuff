@@ -4459,3 +4459,53 @@ structure (p90-p50)  hit 0.2000  miss 0.1490   miss/hit = 0.745
 > 无需登录、浏览器打开 job 页，`document.querySelectorAll('[class*="annotation"]')` 取
 > `innerText`，每条 `error C####` 是一个独立节点（本轮 2 条注解 = `exit code 2` + 唯一那条
 > `error C2065`）。所以**一次就能看全全部报错**，不用猜。
+
+##### 12 v0.18.16 实跑：P1 两问当场答完（C1 成立），同一发在加载存档时 CTD = 必填参数传空
+
+**① P1 实测结果**（2026-10-08 20:06:51 启动，`ssr.edge=0` 正常进图，日志逐字）：
+
+```
+[20:06:59] P1探针: desc W=1024 H=1024 fmt=10(RGBA16F=1) mips=1 array=6 sample=1 bind=40 misc=4 cpuAccess=0
+[20:06:59] P1探针: STAGING CreateTexture2D ok (MiscFlags=4)
+[20:06:59] P1探针: 第1次读回 ok sig=13856201724594908557 (Map 全 6 面/全 mip ⇒ STAGING 可读)
+[20:06:59] P1探针: 已发布 CPU 镜像 1024² × 6 面, 第 1 代
+[20:07:04] P1探针: 第2次读回 ok sig=13856201724594908557 与第1次相隔 5s ⇒ 内容静态 (一次上传即可, C1 成立)
+```
+
+⇒ **两问都答了**：① 可读（`TEXTURECUBE` 的 STAGING 一次成功，`MiscFlags=4` 没用到退路）；
+② 静态（两次全量 FNV-1a 逐位相同，一次上传即可）。且 `desc` 正好落在 C1 的 1:1 前提上
+（RGBA16F / array=6 / mips=1 / 1024² 方形）⇒ **C1 路线技术上通了**，剩下的只有 P3 朝向校准。
+
+**② 但这一发在加载存档时 CTD**（`crash-2026-10-08-20-07-11.log`），根因是 C1 通路里
+`vkCreateFence` 的 **`pCreateInfo` 传了 `nullptr`** —— 这是**必填参数**，非法 Vulkan：
+
+```cpp
+// 错 (v0.18.16 首版): pCreateInfo 必填, 传 nullptr ⇒ 下游解引用空指针
+if (!g_ssrV1CubeFence && c.fns.vkCreateFence(c.vdev, nullptr, nullptr, &g_ssrV1CubeFence) != VK_SUCCESS)
+// 对 (与同文件 :998 既有写法一致)
+VkFenceCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO; fci.flags = 0;
+if (!g_ssrV1CubeFence && c.fns.vkCreateFence(c.vdev, &fci, nullptr, &g_ssrV1CubeFence) != VK_SUCCESS)
+```
+
+三条证据互相咬合，指向唯一调用点：
+
+| 证据 | 内容 |
+|---|---|
+| 栈顶 | `renderdoc.dll+1290F77  movups xmm2, [r8]`，`r8 = 0` ⇒ 读 0 地址的 16 字节 = `VkFenceCreateInfo` 的 `{sType, pNext}` |
+| 调用方向 | 帧 2..9 全是 `poc-presenter.dll`、帧 10 才是 `SkyrimSE.exe` ⇒ **我们**调进去的；栈扫描里 `nvoglv64 ↔ vulkan-1 ↔ renderdoc` ⇒ 走的是 renderdoc 的 **Vulkan 层**（不是 D3D11 钩） |
+| 帧数 | `Present → notePresent → pocbFrame → ssrV1Build → ssrV1CubeSync → ssrV1CubeMake → vkCreateFence` 正好 8 层 |
+| 日志断点 | 死在 `[2d-5] 深度KMT 导入OK` 之后、**`[v1-cube] 1×1 占位 cube 建好` 之前**；且 `ssr.edge=0` ⇒ 真 cube 分支根本不进，占位 cube 这条路**必经** fence |
+
+> **为什么以前没炸**：全文件 `vkCreate*(..., nullptr, ...)` 只有这一处（`:998` 既有那处传的是正经
+> `VkFenceCreateInfo`）。已加一道静态扫描：`vk(Create|Allocate)\w*\(\s*[^,]+,\s*nullptr\s*,`，
+> 提交前跑一次，把「必填参数传空」一类一次找干净（本轮 `badNullCreateInfo=0`）。
+
+**③ 顺手修的第二处：占位 cube 建不出不该连带关掉既有 SSR**
+`ssrV1CubeSync` 原来是 `bool`，占位图建不出就 `return fail("…")` ⇒ 把整个 v1 关掉。
+占位图是 P2 **新加**的东西，拿新特性的失败去关旧功能，等于**违反「任一失败只关自己」**。
+已改 `void`：建不出就 `di[4].imageView = VK_NULL_HANDLE`（设备 Vulkan 1.4，空描述符合法）并记日志 ——
+`edge=0/1` 分支根本不读 `binding4`，`edge=2` 由 `ssrV1EffEdge()` 退回 0（它只看**真** cube）⇒
+既有行为逐位不变，只是 P2 档不可用。
+
+**本地闸**：`check1` **RESULT OK**、`quotescan3` **oddQuoteLines=0**、
+`badNullCreateInfo=0`、源文件 BOM=False / 纯 LF 未动。

@@ -3587,11 +3587,21 @@ static bool ssrV1CubeMake(PocbCtx& c, int w, int h, const void* data, const char
 			return false;
 		}
 	}
-	if (!g_ssrV1CubeFence && c.fns.vkCreateFence(c.vdev, nullptr, nullptr, &g_ssrV1CubeFence) != VK_SUCCESS)
+	if (!g_ssrV1CubeFence)
 	{
-		g_ssrV1CubeFence = VK_NULL_HANDLE;
-		note("vkCreateFence(上传) 失败");
-		return false;
+		// pCreateInfo 是**必填**参数 —— 传 nullptr 是非法 Vulkan, 这里第一版就传了空,
+		// renderdoc 的 Vulkan 层直接解引用 ⇒ movups xmm2,[r8] 读 0 地址 ⇒ 加载存档时 CTD
+		// (栈: Present -> notePresent -> pocbFrame -> ssrV1Build -> ssrV1CubeSync -> 本函数 -> 层内崩溃;
+		//  日志恰好停在 [v1-cube] 占位图那行之前 = 死在占位 cube 创建中)。与 :998 同写法。
+		VkFenceCreateInfo fci{};
+		fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+		fci.flags = 0; // 不带 SIGNALED: 每次提交前都 vkResetFences, 无信号起步即可
+		if (c.fns.vkCreateFence(c.vdev, &fci, nullptr, &g_ssrV1CubeFence) != VK_SUCCESS)
+		{
+			g_ssrV1CubeFence = VK_NULL_HANDLE;
+			note("vkCreateFence(上传) 失败");
+			return false;
+		}
 	}
 	if (c.fns.vkResetCommandPool(c.vdev, g_ssrV1CubePool, 0) != VK_SUCCESS)
 	{
@@ -3677,14 +3687,19 @@ static bool ssrV1CubeMake(PocbCtx& c, int w, int h, const void* data, const char
 	return true;
 }
 
-// 同步描述符 binding4 该指的那张图: 占位图必须有 (无论 edge 几), 真 cube 只在 edge>=2 且有数据时建。
-static bool ssrV1CubeSync(PocbCtx& c)
+// 同步描述符 binding4 该指的那张图: 占位图尽量有 (无论 edge 几), 真 cube 只在 edge>=2 且有数据时建。
+// v0.18.16a: 返回值改成 void —— 占位图是 P2 **新加**的东西, 让它失败去 fail() 关掉整个 v1, 等于用新
+// 特性的失败连带关掉既有 SSR = 违反「任一失败只关自己」。占位建不出时 binding4 写 VK_NULL_HANDLE
+// (设备 Vulkan 1.4, 空描述符合法), 而 edge=0/1 分支根本不读 binding4、edge=2 由 ssrV1EffEdge() 退回 0
+// (它只看**真** cube) ⇒ 既有行为逐位不变, 只是 P2 档不可用。
+static void ssrV1CubeSync(PocbCtx& c)
 {
 	if (!g_ssrV1DummyView)
 	{
-		if (!ssrV1CubeMake(c, 1, 1, nullptr, "占位", g_ssrV1DummyImg, g_ssrV1DummyMem, g_ssrV1DummyView))
-			return false;
-		logLine("SSR侦察: [v1-cube] 1×1 占位 cube 建好 (binding4 描述符恒有效)");
+		if (ssrV1CubeMake(c, 1, 1, nullptr, "占位", g_ssrV1DummyImg, g_ssrV1DummyMem, g_ssrV1DummyView))
+			logLine("SSR侦察: [v1-cube] 1×1 占位 cube 建好 (binding4 描述符恒有效)");
+		else
+			logLine("SSR侦察: [v1-cube] 占位 cube 建不出 → binding4 写空描述符, 既有 SSR 不受影响 (edge=2 自动不可用)");
 	}
 	if (g_ssrV1Edge >= 2 && g_probeCpu && g_probeCpuTick != 0 &&
 	    (g_probeCpuTick != g_ssrV1CubeTick || !g_ssrV1CubeView ||
@@ -3715,8 +3730,7 @@ static bool ssrV1CubeSync(PocbCtx& c)
 			        " 代) → 本代放弃, 绑定退回占位图");
 		}
 	}
-	g_ssrV1CubeSrc = g_ssrV1CubeView ? g_ssrV1CubeImg : g_ssrV1DummyImg;
-	return g_ssrV1CubeSrc != VK_NULL_HANDLE;
+	g_ssrV1CubeSrc = g_ssrV1CubeView ? g_ssrV1CubeImg : g_ssrV1DummyImg; // 两者都可能空 ⇒ 描述符写空
 }
 
 // 换设备: 旧 device 上的句柄**不能**拿来 destroy, 也不该在新 device 上引用 —— 只丢不毁
@@ -3981,10 +3995,11 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 			return fail("vkCreateSampler(探针cube) 建不出");
 	}
 
-	// v0.18.16: binding4 要指的那张 cube (占位必须有, 真 cube 看 P1 有没有读回数据)。
-	// 放在描述符填充**之前**, 因为那一步就要拿 view; 失败 = 连占位都建不出 ⇒ 关自己, 不留空 view。
-	if (!ssrV1CubeSync(c))
-		return fail("探针 cube 占位图建不出 → binding4 没有有效 view");
+	// v0.18.16: binding4 要指的那张 cube (占位尽量有, 真 cube 看 P1 有没有读回数据)。
+	// 放在描述符填充**之前**, 因为那一步就要拿 view。
+	// v0.18.16a: 这里原来写的是 `if (!sync) return fail(...)` ⇒ 占位建不出就把既有 SSR 一起关了,
+	// 属于「拿新特性的失败关旧功能」。现在只同步不判失败 (内部已记日志), 见 ssrV1CubeSync 注释。
+	ssrV1CubeSync(c);
 
 	// --- 5) 描述符: 五个 COMBINED_IMAGE_SAMPLER (0 色 / 1 深 / 2 底色 / 3 段后水深 / 4 探针cube) ---
 	// v0.18.7: binding2 没底色时指向**色 view** (描述符必须始终有效), 由 push constant p3.w
