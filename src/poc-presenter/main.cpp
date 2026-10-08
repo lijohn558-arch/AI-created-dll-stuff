@@ -862,7 +862,9 @@ struct CtxEntry
 static CtxEntry g_ctx[4];
 static int      g_ctxN = 0;
 static std::atomic<ID3D11Texture2D*> g_probeCube{nullptr}; // cube 升质成功后记住对象 (绑定判据)
-static unsigned long long g_probeCubeT = 0; // v0.18.16 P1: 上面那张出现的时刻 (等它被渲染过再读)
+static unsigned long long g_probeCubeT = 0; // v0.18.16 P1: 上面那张出现的时刻 (兜底计时, 见 probeDumpTick)
+static unsigned long long g_probeCubeRenderT = 0; // v0.18.16c: 游戏第一次往探针里画的时刻 —— 读回真正的起算点
+static bool g_probeRenderWaitLg = false; // v0.18.16c: 60s 等首渲兜底日志只打一次
 static std::atomic<long> g_vpRewriteN{0};
 static std::atomic<long> g_scRewriteN{0};
 
@@ -973,7 +975,10 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* dev, const D3D11_T
 				if (out && *out)
 				{
 					g_probeCube.store(*out, std::memory_order_release);
-					g_probeCubeT = GetTickCount64(); // v0.18.16 P1: 探针出现时刻 (读回前先等它被渲染过)
+					g_probeCubeT = GetTickCount64(); // v0.18.16 P1: 探针出现时刻 (只作 60s 兜底计时)
+					// v0.18.16c: 首渲信号跟着新 cube 一起清零 —— 读回要等**这张**被画过
+					g_probeCubeRenderT = 0;
+					g_probeRenderWaitLg = false;
 				}
 			}
 			if (n <= 16 || (n % 64) == 0)
@@ -1063,6 +1068,10 @@ static void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* ctx, UIN
 		v2.Width = 1024.0f;
 		v2.Height = 1024.0f;
 		const long c = g_vpRewriteN.fetch_add(1, std::memory_order_relaxed) + 1;
+		// v0.18.16c: 这里 = 游戏**正在往探针里画** ⇒ 记首渲时刻, probeDumpTick 的读回闸挂它
+		// (挂 g_probeCubeT 建纹理时刻的老闸 12/12 会话都落在首渲之前 4~24s, 读回全是裸 0)
+		if (g_probeCubeRenderT == 0)
+			g_probeCubeRenderT = GetTickCount64();
 		if (c == 1 || (c % 256) == 0)
 			logLine("探针升质: RSSetViewports 512²→1024² (probe cube 绑定中) 第 " +
 			        std::to_string(c) + " 次");
@@ -3647,8 +3656,18 @@ static ID3D11DeviceContext* ftPocbCtx(); // 定义在 PocbCtx/g_pocb 之后 (本
 // 只跑两次, 由 notePresent 每帧喂, 两次之后每帧只落一次早退比较 = 零开销。
 // **不碰画面**: 只 CopyResource + Map + Unmap, 与 slot5/44/45 的 viewport 重写无关,
 // 也不改变 hit/miss 分裂 ⇒ §14.31 §9/§10 的判据不受影响。
-static int                  g_probeDumpN = 0; // 已成功读回次数 (0..2)
-static unsigned long long   g_probeDumpT = 0; // 第一次读回的时刻 (第二次要 >= +5s)
+//
+// v0.18.16c 第二层根因 (12/12 会话时间线坐实, 见 docs/02 §14): 读回闸原来挂 g_probeCubeT
+//   (建纹理时刻), 但建纹理发生在过加载屏时, 游戏第一次往探针里画要晚 4~24s ⇒ 两次读回
+//   全落在「一次都没画过」的窗口里, 读到的是刚建出来的裸 0 (sig 恒 = 全 0 反算值
+//   13856201724594908557), 之前的 P1「内容静态/C1 成立」是假阳性 (FNV 对全 0 也给常数)。
+//   修法两件套: ① 闸改挂 g_probeCubeRenderT (hookedRSSetViewports 首次命中 = 正在往探针里画)
+//              ② 全 0 不算数: 不发布不计数, 1s 节流重试 (上限 15 次), 每次打每面非0像素数
+//                 与量级最大值 —— 首渲信号有无直接分诊 (a) 时机 / (b) 拷贝没落地。
+static int                  g_probeDumpN = 0; // 已成功(非0)读回次数 (0..2)
+static int                  g_probeDumpZeroN = 0; // v0.18.16c: 读到全 0 的次数 (重试闸)
+static unsigned long long   g_probeDumpT = 0; // 第一次成功读回的时刻 (第二次要 >= +5s)
+static unsigned long long   g_probeDumpTryT = 0; // v0.18.16c: 上次全 0 读回时刻 (1s 节流)
 static ID3D11Texture2D*     g_probeDumpCube = nullptr;
 static ID3D11Texture2D*     g_probeDumpStg = nullptr; // STAGING 镜像 (复用, 换探针才重建)
 static bool                 g_probeDumpDescLg = false;
@@ -3676,19 +3695,36 @@ static void probeDumpTick()
 	{ // 探针换过 (换区/换分辨率) ⇒ 上一对作废, 重新配对
 		g_probeDumpCube = cube;
 		g_probeDumpN = 0;
+		g_probeDumpZeroN = 0;
 		g_probeDumpT = 0;
+		g_probeDumpTryT = 0;
 		g_probeDumpDescLg = false;
 		if (g_probeDumpStg) { g_probeDumpStg->Release(); g_probeDumpStg = nullptr; }
 		if (g_probeCpu) { free(g_probeCpu); g_probeCpu = nullptr; }
 		g_probeW = g_probeH = g_probeLayers = 0;
 	}
 	const unsigned long long now = GetTickCount64();
+	if (g_probeDumpZeroN && now - g_probeDumpTryT < 1000)
+		return; // 上一次读回六面全 0 ⇒ 1s 节流后重试 (两种读都盖住, 免得每帧白拷 48MB)
 	if (g_probeDumpN == 0)
 	{
-		// 刚出现就读, 读到的多半是**还没被渲染过**的初始内容; 那样第二次必然不同,
-		// 会把「静态」误判成「在动」⇒ 先等 2s 让游戏至少画过一帧。
-		if (g_probeCubeT && now - g_probeCubeT < 2000)
-			return;
+		// v0.18.16c: 读回闸挂「首渲」而非「建纹理」—— 12/12 会话实测建纹理比游戏第一次往
+		// 探针里画早 4~24s (建在过加载屏时), 老闸 (+2s/+7s) 两次读回全落在一次都没画过的
+		// 窗口里 ⇒ 读到刚建出来的裸 0, sig 恒 = 全 0 反算值 13856201724594908557,
+		// 之前的「内容静态/C1 成立」是假阳性 (FNV 对全 0 也给常数)。
+		if (g_probeCubeRenderT == 0)
+		{
+			// 还没见首渲信号 (hookedRSSetViewports 未命中) ⇒ 最多等 60s
+			if (g_probeCubeT && now - g_probeCubeT < 60000)
+				return;
+			if (!g_probeRenderWaitLg)
+			{
+				g_probeRenderWaitLg = true;
+				logLine("P1探针: 建好 60s 仍未见首渲信号 (RSSetViewports 钩没命中?) ⇒ 兜底按建纹理时刻直读");
+			}
+		}
+		else if (now - g_probeCubeRenderT < 2000)
+			return; // 首渲之后再等 2s, 让这一帧的内容落定
 	}
 	else if (now - g_probeDumpT < 5000)
 		return;
@@ -3765,6 +3801,87 @@ static void probeDumpTick()
 
 	ctx->CopyResource(g_probeDumpStg, cube);
 
+	// ---- v0.18.16c 阶段1: 逐面扫描 (诊断件) ----
+	// 每面给 (非0像素数 / 最大量级位型)。整行先做 uint64 OR 快路径, 全 0 行免逐像素;
+	// 六面全 0 ⇒ 不进阶段2 (免白跑 48MB FNV) 也不发布, 1s 节流重试。
+	// 量级取 raw & 0x7FFF: 半浮点符号-阶码-尾数的该位段对 |值| 单调 ⇒ 免转 float 就能看大小。
+	unsigned long long faceNz[6] = {0, 0, 0, 0, 0, 0};
+	unsigned int       faceMax[6] = {0, 0, 0, 0, 0, 0};
+	bool anyData = false;
+	if (bpp8)
+	{
+		const UINT m = 0; // 只扫 mip0 (mips=1 时即全分辨率)
+		for (UINT L = 0; L < layers && L < 6; ++L)
+		{
+			const UINT sub = m + mips * L;
+			D3D11_MAPPED_SUBRESOURCE mr{};
+			if (FAILED(ctx->Map(g_probeDumpStg, sub, D3D11_MAP_READ, 0, &mr)))
+				continue; // 阶段2 再 Map 会报同一个错, 不在这里重复喊
+			UINT w = d.Width >> m;
+			UINT h = d.Height >> m;
+			if (!w) w = 1;
+			if (!h) h = 1;
+			for (UINT y = 0; y < h; ++y)
+			{
+				const unsigned char* row =
+				    static_cast<const unsigned char*>(mr.pData) + (size_t)y * mr.RowPitch;
+				const size_t rowBytes = (size_t)w * 8;
+				// 快路径: 整行 8 字节步进 OR, 全 0 直接下一行 (零内容的重试只花这一档钱)
+				unsigned long long rowOr = 0;
+				const unsigned long long* q64 = reinterpret_cast<const unsigned long long*>(row);
+				for (size_t i = 0; i < rowBytes / 8; ++i)
+					rowOr |= q64[i];
+				if (!rowOr)
+					continue;
+				anyData = true;
+				const unsigned short* u = reinterpret_cast<const unsigned short*>(row);
+				const size_t n16 = rowBytes / 2;
+				for (size_t i = 0; i + 4 <= n16; i += 4)
+				{
+					if (u[i] | u[i + 1] | u[i + 2] | u[i + 3])
+						++faceNz[L];
+					for (int k = 0; k < 4; ++k)
+					{
+						const unsigned int mag = (unsigned int)u[i + k] & 0x7FFFu;
+						if (mag > faceMax[L])
+							faceMax[L] = mag;
+					}
+				}
+			}
+			ctx->Unmap(g_probeDumpStg, sub);
+		}
+	}
+	std::string fstat;
+	for (UINT L = 0; L < layers && L < 6; ++L)
+	{
+		if (L)
+			fstat += " ";
+		fstat += "f" + std::to_string(L) + "=" + std::to_string(faceNz[L]) + "/" +
+		         std::to_string(faceMax[L]);
+	}
+	if (bpp8 && !anyData)
+	{
+		// 全 0: 首渲信号是 (a)/(b) 的分水岭 —— 有信号仍全 0 ⇒ CopyResource 静默丢 (b);
+		// 无信号 (60s 兜底直读) ⇒ 游戏压根没画过 (a)。
+		++g_probeDumpZeroN;
+		g_probeDumpTryT = now;
+		logLine("P1探针: 第 " + std::to_string(g_probeDumpZeroN) +
+		        " 次读回六面全 0 (首渲信号=" + (g_probeCubeRenderT ? std::string("有") : std::string("无")) +
+		        ") ⇒ " + (g_probeCubeRenderT ? "有信号仍全0, 指向拷贝没落地" : "没画过, 指向时机") +
+		        ", 1s 后重试; 面统计 nz/量级max " + fstat);
+		if (g_probeDumpZeroN >= 15)
+		{
+			logLine("P1探针: 连续 15 次读回全 0 ⇒ 放弃 (C1 判失败, 转 Plan B (C5 假环境)); 面统计 " + fstat);
+			g_probeDumpN = 2; // 停止重试
+		}
+		ctx->Release();
+		if (dev)
+			dev->Release();
+		return;
+	}
+	logLine("P1探针: 面统计 nz/量级max " + fstat);
+
+	// ---- 阶段2: 全 6 面 FNV 签名 + 收进 CPU 缓冲 (原有逻辑, 只在有内容时才跑) ----
 	unsigned long long acc = 14695981039346656037ULL;
 	bool allOk = true;
 	for (UINT L = 0; L < layers && allOk; ++L)
@@ -3824,6 +3941,7 @@ static void probeDumpTick()
 	{
 		g_probeDumpT = now;
 		g_probeDumpH0 = acc;
+		g_probeDumpZeroN = 0; // 零内容连败清零 —— 这次有内容了, 1s 节流随之解除
 		logLine("P1探针: 第1次读回 ok  sig=" + std::to_string(acc) +
 		        " (Map 全 6 面/全 mip 通过 ⇒ STAGING 可读)");
 		if (g_probeCpu)
