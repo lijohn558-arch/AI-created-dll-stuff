@@ -57,7 +57,7 @@ $need = @("ssrInFnv", "ssrInMakeShared", "ssrInBuild", "ssrInQueue", "uhex64",
           "g_ssrV1Ripple", "ssr.ripple", "v0.18.9", "g_ssrV1RippleSz", "ssr.ripplesz",
           "g_ssrV1RippleMode", "ssr.ripplemode", "g_ssrV1Edge", "ssr.edge",
           "g_ssrV1RipK", "ssr.ripk", "g_ssrV1RipAmp", "ssr.ripamp",
-          "g_ssrV1RipGain", "ssr.ripgain", "v0.18.14")
+          "g_ssrV1RipGain", "ssr.ripgain", "v0.18.14",           "v0.18.16", "g_probeCpu", "g_probeCpuTick", "probeDumpTick",           "ssrV1CubeSync", "ssrV1CubeMake", "g_ssrV1CubeView", "vkCmdCopyBufferToImage",           "g_probeDumpStg", "g_ssrV1SmpQ", "ssr.edge = 2")
 foreach ($k in $need) {
     $n = [regex]::Matches($c, [regex]::Escape($k)).Count
     $flag = ""

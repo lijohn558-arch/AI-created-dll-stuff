@@ -862,6 +862,7 @@ struct CtxEntry
 static CtxEntry g_ctx[4];
 static int      g_ctxN = 0;
 static std::atomic<ID3D11Texture2D*> g_probeCube{nullptr}; // cube 升质成功后记住对象 (绑定判据)
+static unsigned long long g_probeCubeT = 0; // v0.18.16 P1: 上面那张出现的时刻 (等它被渲染过再读)
 static std::atomic<long> g_vpRewriteN{0};
 static std::atomic<long> g_scRewriteN{0};
 
@@ -970,7 +971,10 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* dev, const D3D11_T
 				g_probeDepthArmed.store(true, std::memory_order_release);
 				// v0.12 plan-B: 记住升质后的 cube 对象 —— viewport/scissor 拦截的绑定判据
 				if (out && *out)
+				{
 					g_probeCube.store(*out, std::memory_order_release);
+					g_probeCubeT = GetTickCount64(); // v0.18.16 P1: 探针出现时刻 (读回前先等它被渲染过)
+				}
 			}
 			if (n <= 16 || (n % 64) == 0)
 				logLine("探针升质: 512² RGBA16F cube(6面) → " + std::to_string(d.Width) + "² 第 " +
@@ -1325,12 +1329,23 @@ float g_ssrV1Ripple = 1.0f;         // ini ssr.ripple 涟漪回注量 0..1 (v0.1
 int   g_ssrV1RippleSz = 4;          // ini ssr.ripplesz 回注带宽 (px, 1..16) —— v0.18.10: 治"波纹非常细小" (原写死 2px)
 int   g_ssrV1RippleMode = 1;        // ini ssr.ripplemode 0=亮度调制 1=位移扭曲 —— v0.18.10: 原版涟漪本是方向扰动
 int   g_ssrV1Edge = 0;              // ini ssr.edge 0=未命中回原版层(默认) 1=屏幕边缘延展 —— v0.18.11: 治"扇形区内错位倒影"
+                                    //            2=未命中采真 cubemap —— v0.18.16 (issue B), 读入时钳到 0..2
 // ---- v0.18.14 回注三旋钮 (三个默认 0 = 全部沿用 v0.18.13 行为, 零回归) ----
 float g_ssrV1RipK = 0.0f;    // ini ssr.ripk   输入端软限幅阈值 (线性亮度) 0=关 —— 治位移场被亮斑劫持成 4~8px 细碎饱和块
 float g_ssrV1RipAmp = 0.0f;  // ini ssr.ripamp 位移幅度 (px) 0=自动 clamp(ripplesz*1.5, 6, 16) —— 幅度解耦
 float g_ssrV1RipGain = 0.0f; // ini ssr.ripgain 梯度增益 0=自动 (=10) —— 增益解耦 (原写死 ×10)
 // ---- v0.18.15 高光回补 (§14.30.7 A 的正解): SSR 命中区把 585 层被顶掉的亮斑按比例加回 ----
 float g_ssrV1Det = 0.0f; // ini ssr.v1det 回补量 0..1, 0 = 关 = v0.18.14 行为 (零回归)
+
+// ---- v0.18.16 (issue B / P1 探测): 水体探针 cube 的 CPU 侧镜像, 交给 VK 上传 ----
+// D3D11 这半边 (probeDumpTick) 用 STAGING 把 g_probeCube 读回来, 紧凑排成 6 面;
+// VK 那半边 (ssrV1CubeSync) 看到 tick 变就 vkCmdCopyBufferToImage 灌进自建 VkImage。
+// 只读方: vkrenderer.cpp (声明见 vkrenderer.h)。非 edge=2 时 VK 侧根本不建真图, 不花这笔显存。
+unsigned char*          g_probeCpu       = nullptr; // 6 面紧密排列 (每面 w*h*8B), 没数据 = nullptr; 非 const: D3D11 侧 malloc/free/memcpy
+int                  g_probeW         = 0;
+int                  g_probeH         = 0;
+int                  g_probeLayers    = 0;
+unsigned long long   g_probeCpuTick   = 0;       // 内容代数, 变了才重传
 
 // ---- v0.18.7 B 水色保留 (docs/05 D4 补遗): 585 在被出向回写覆盖**之前**抢一份当合成底色 ----
 // 为什么必须有它: 合成底色原先 = 324 快照 = 段16 (水体 pass) **之前**的画面, 里面没画水;
@@ -3062,7 +3077,18 @@ void installProbeOn(ID3D11Device* dev)
 		g_ssrV1RippleSz = static_cast<int>(iniNum("ssr.ripplesz", 4.0));
 		g_ssrV1RippleMode = static_cast<int>(iniNum("ssr.ripplemode", 1.0));
 		// ---- v0.18.11: 未命中的回退源 (治"扇形范围内是错误的倒影") ----
-		g_ssrV1Edge = static_cast<int>(iniNum("ssr.edge", 0.0));
+		// v0.18.16 (issue B): 扩到 2 = 未命中采真 cubemap。钳位必须在**入口**做, 因为
+		// ssrV1Sig() / push constant p4.w / 着色器分支三方都只读 g_ssrV1Edge 这一个变量 ——
+		// 越界值 (手滑写 7) 会走进着色器里"既不是 0/1 也不是 2"的分支, 结果不可复现。
+		{
+			const int ev = static_cast<int>(iniNum("ssr.edge", 0.0));
+			g_ssrV1Edge = (ev < 0) ? 0 : ((ev > 2) ? 2 : ev);
+			if (g_ssrV1Edge != ev)
+				logLine("ssr.edge = " + std::to_string(ev) + " 越界 -> 钳到 " +
+				        std::to_string(g_ssrV1Edge) + " (合法值 0/1/2)");
+			else if (g_ssrV1Edge == 2)
+				logLine("ssr.edge = 2 (v0.18.16 未命中采真 cubemap) — 探针数据就绪前会先绑 1×1 占位图");
+		}
 		// ---- v0.18.14: 回注三旋钮 (软限幅 / 位移幅度 / 梯度增益), 默认 0 = 关或自动 ----
 		g_ssrV1RipK = static_cast<float>(iniNum("ssr.ripk", 0.0));
 		g_ssrV1RipAmp = static_cast<float>(iniNum("ssr.ripamp", 0.0));
@@ -3598,6 +3624,217 @@ static void ftNoteCtx(ID3D11DeviceContext* ctx)
 
 static ID3D11DeviceContext* ftPocbCtx(); // 定义在 PocbCtx/g_pocb 之后 (本块在它们之前)
 
+// ==== v0.18.16 P1 (issue B / 队列 #2): 水体探针 cube 的 CPU 可读性 + 静态性探测 ====
+// 回答 C1 路线 (D3D11 STAGING 读回 -> CPU -> 灌自建 VkImage) 的两个前提:
+//   ① STAGING 能不能 Map —— 不能 ⇒ 整条 CPU 中转路线作废, 直接转 Plan B (C5 假环境);
+//   ② 相隔 >=5s 的两次读回 FNV 是否一致 —— 一致 ⇒ 内容静态, 一次上传就够; 不一致 ⇒ 要按代重传
+//      (ssrV1Sig() 已把 g_probeCpuTick 算进签名, 换代会自动重录 + 重填描述符)。
+// 只跑两次, 由 notePresent 每帧喂, 两次之后每帧只落一次早退比较 = 零开销。
+// **不碰画面**: 只 CopyResource + Map + Unmap, 与 slot5/44/45 的 viewport 重写无关,
+// 也不改变 hit/miss 分裂 ⇒ §14.31 §9/§10 的判据不受影响。
+static int                  g_probeDumpN = 0; // 已成功读回次数 (0..2)
+static unsigned long long   g_probeDumpT = 0; // 第一次读回的时刻 (第二次要 >= +5s)
+static ID3D11Texture2D*     g_probeDumpCube = nullptr;
+static ID3D11Texture2D*     g_probeDumpStg = nullptr; // STAGING 镜像 (复用, 换探针才重建)
+static bool                 g_probeDumpDescLg = false;
+static unsigned long long   g_probeDumpH0 = 0; // 第一次读回的总签名
+
+static unsigned long long fnv1a64(const void* p, size_t n, unsigned long long h)
+{
+	const unsigned char* b = static_cast<const unsigned char*>(p);
+	for (size_t i = 0; i < n; ++i)
+	{
+		h ^= static_cast<unsigned long long>(b[i]);
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+
+static void probeDumpTick()
+{
+	if (g_probeDumpN >= 2)
+		return;
+	ID3D11Texture2D* cube = g_probeCube.load(std::memory_order_acquire);
+	if (!cube)
+		return;
+	if (cube != g_probeDumpCube)
+	{ // 探针换过 (换区/换分辨率) ⇒ 上一对作废, 重新配对
+		g_probeDumpCube = cube;
+		g_probeDumpN = 0;
+		g_probeDumpT = 0;
+		g_probeDumpDescLg = false;
+		if (g_probeDumpStg) { g_probeDumpStg->Release(); g_probeDumpStg = nullptr; }
+		if (g_probeCpu) { free(g_probeCpu); g_probeCpu = nullptr; }
+		g_probeW = g_probeH = g_probeLayers = 0;
+	}
+	const unsigned long long now = GetTickCount64();
+	if (g_probeDumpN == 0)
+	{
+		// 刚出现就读, 读到的多半是**还没被渲染过**的初始内容; 那样第二次必然不同,
+		// 会把「静态」误判成「在动」⇒ 先等 2s 让游戏至少画过一帧。
+		if (g_probeCubeT && now - g_probeCubeT < 2000)
+			return;
+	}
+	else if (now - g_probeDumpT < 5000)
+		return;
+
+	D3D11_TEXTURE2D_DESC d{};
+	cube->GetDesc(&d);
+	ID3D11Device* dev = nullptr;
+	cube->GetDevice(&dev);
+	ID3D11DeviceContext* ctx = nullptr;
+	if (dev)
+		dev->GetImmediateContext(&ctx);
+	if (!ctx)
+	{
+		logLine("P1探针: 拿不到 immediate context, 放弃第 " + std::to_string(g_probeDumpN + 1) + " 次读回");
+		if (dev)
+			dev->Release();
+		return;
+	}
+
+	if (!g_probeDumpDescLg)
+	{
+		g_probeDumpDescLg = true;
+		const bool fmtOk = (d.Format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+		logLine("P1探针: desc W=" + std::to_string(d.Width) + " H=" + std::to_string(d.Height) +
+		        " fmt=" + std::to_string(static_cast<int>(d.Format)) + "(RGBA16F=" + std::to_string(fmtOk ? 1 : 0) +
+		        ") mips=" + std::to_string(d.MipLevels) + " array=" + std::to_string(d.ArraySize) +
+		        " sample=" + std::to_string(d.SampleDesc.Count) + " bind=" + std::to_string(d.BindFlags) +
+		        " misc=" + std::to_string(d.MiscFlags) + " cpuAccess=" + std::to_string(d.CPUAccessFlags));
+		// C1 的 VkImage 必须与它 1:1 (R16G16B16A16_SFLOAT / 6 面 / 非 mips), 不合就提前说清楚
+		if (!(fmtOk && d.ArraySize == 6 && d.MipLevels == 1 && d.Width == d.Height))
+			logLine("P1探针: desc 不满足 C1 的 1:1 前提 (需 RGBA16F + array=6 + mips=1 + 方形) ⇒ 读回照做, 但不发布给 VK");
+	}
+
+	// --- STAGING 镜像 (一次性) ---
+	if (!g_probeDumpStg)
+	{
+		D3D11_TEXTURE2D_DESC sd = d;
+		sd.Usage = D3D11_USAGE_STAGING;
+		sd.BindFlags = 0;
+		sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		sd.MiscFlags = d.MiscFlags; // 先按原样带 TEXTURECUBE
+		HRESULT hr = dev ? dev->CreateTexture2D(&sd, nullptr, &g_probeDumpStg) : E_FAIL;
+		if (FAILED(hr))
+		{
+			sd.MiscFlags = 0; // 部分实现的 staging 不认 TEXTURECUBE ⇒ 退回普通数组
+			hr = dev ? dev->CreateTexture2D(&sd, nullptr, &g_probeDumpStg) : E_FAIL;
+			logLine("P1探针: staging 带 TEXTURECUBE 失败(hr=" + std::to_string(static_cast<long>(hr)) +
+			        "), 退回 MiscFlags=0 再试");
+		}
+		if (FAILED(hr) || !g_probeDumpStg)
+		{
+			logLine("P1探针: STAGING CreateTexture2D 失败(hr=" +
+			        std::to_string(static_cast<long>(hr)) + ") ⇒ C1 不可行, 转 Plan B (C5 假环境)");
+			g_probeDumpN = 2; // 停止重试
+			if (dev)
+				dev->Release();
+			ctx->Release();
+			return;
+		}
+		logLine("P1探针: STAGING CreateTexture2D ok (MiscFlags=" + std::to_string(sd.MiscFlags) + ")");
+	}
+
+	const UINT layers = d.ArraySize;
+	const UINT mips = d.MipLevels;
+	const bool bpp8 = (d.Format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+	const bool pubOk = (bpp8 && layers == 6 && mips == 1 && d.Width == d.Height);
+	if (g_probeDumpN == 0 && pubOk && !g_probeCpu)
+	{
+		const size_t sz = (size_t)6 * (size_t)d.Width * (size_t)d.Height * 8;
+		g_probeCpu = static_cast<unsigned char*>(malloc(sz));
+		if (!g_probeCpu)
+			logLine("P1探针: 48MiB CPU 缓冲申请失败 ⇒ 只读不发布 (C1 判失败)");
+	}
+
+	ctx->CopyResource(g_probeDumpStg, cube);
+
+	unsigned long long acc = 14695981039346656037ULL;
+	bool allOk = true;
+	for (UINT L = 0; L < layers && allOk; ++L)
+	{
+		unsigned long long lh = 14695981039346656037ULL;
+		for (UINT m = 0; m < mips; ++m)
+		{
+			const UINT sub = m + mips * L; // D3D11CalcSubresource
+			D3D11_MAPPED_SUBRESOURCE mr{};
+			const HRESULT hr = ctx->Map(g_probeDumpStg, sub, D3D11_MAP_READ, 0, &mr);
+			if (FAILED(hr))
+			{
+				allOk = false;
+				logLine("P1探针: Map(sub=" + std::to_string(sub) + ") hr=" +
+				        std::to_string(static_cast<long>(hr)) + " ⇒ 读回失败");
+				break;
+			}
+			UINT w = d.Width >> m;
+			UINT h = d.Height >> m;
+			if (!w) w = 1;
+			if (!h) h = 1;
+			if (bpp8)
+			{
+				const size_t rowBytes = (size_t)w * 8;
+				for (UINT y = 0; y < h; ++y)
+				{
+					const unsigned char* row =
+					    static_cast<const unsigned char*>(mr.pData) + (size_t)y * mr.RowPitch;
+					lh = fnv1a64(row, rowBytes, lh); // 逐行取 rowBytes, 跳过 RowPitch 填充 (填充内容不保证稳定)
+					// 只把 mip0 收进 CPU 缓冲 —— 自建 VkImage 本来就是 mips=1, mip0 即全分辨率
+					if (m == 0 && g_probeCpu)
+						memcpy(g_probeCpu + (size_t)L * d.Width * d.Height * 8 + (size_t)y * rowBytes,
+						       row, rowBytes);
+				}
+			}
+			else
+				lh = fnv1a64(mr.pData, (size_t)mr.RowPitch * h, lh);
+			ctx->Unmap(g_probeDumpStg, sub);
+		}
+		acc = fnv1a64(&lh, sizeof lh, acc);
+	}
+
+	if (!allOk)
+	{
+		logLine("P1探针: 读回失败 ⇒ C1 不可行, 转 Plan B (C5 假环境)");
+		g_probeDumpN = 2;
+		if (g_probeCpu) { free(g_probeCpu); g_probeCpu = nullptr; }
+		g_probeW = g_probeH = g_probeLayers = 0;
+		ctx->Release();
+		if (dev)
+			dev->Release();
+		return;
+	}
+
+	++g_probeDumpN;
+	if (g_probeDumpN == 1)
+	{
+		g_probeDumpT = now;
+		g_probeDumpH0 = acc;
+		logLine("P1探针: 第1次读回 ok  sig=" + std::to_string(acc) +
+		        " (Map 全 6 面/全 mip 通过 ⇒ STAGING 可读)");
+		if (g_probeCpu)
+		{
+			g_probeW = static_cast<int>(d.Width);
+			g_probeH = static_cast<int>(d.Height);
+			g_probeLayers = 6;
+			++g_probeCpuTick; // 发布: VK 侧看到 tick 变就上传 (ssrV1Sig 会跟着换)
+			logLine("P1探针: 已发布 CPU 镜像 " + std::to_string(g_probeW) + "² × 6 面, 第 " +
+			        std::to_string(g_probeCpuTick) + " 代");
+		}
+	}
+	else
+	{
+		const bool same = (acc == g_probeDumpH0);
+		logLine("P1探针: 第2次读回 ok  sig=" + std::to_string(acc) + " 与第1次相隔 " +
+		        std::to_string((unsigned long long)((now - g_probeDumpT) / 1000)) + "s ⇒ " +
+		        (same ? "内容静态 (一次上传即可, C1 成立)" : "内容有变 (需按代重传, ssrV1Sig 已兜住)"));
+		if (!same && g_probeCpu)
+			++g_probeCpuTick; // 用新内容覆盖 CPU 缓冲 (循环里已经 memcpy 过了)
+	}
+	ctx->Release();
+	if (dev)
+		dev->Release();
+}
+
 void notePresent(const char* via, IDXGISwapChain* sc)
 {
 	const uint64_t n = g_presentCount.fetch_add(1) + 1;
@@ -3608,6 +3845,9 @@ void notePresent(const char* via, IDXGISwapChain* sc)
 	// zW>zPre 判据拒掉, 不会算错, 但白拷一次还误导日志)。
 	g_ssrWDepArm = false;
 	g_ssrWDepFire = false;
+	// ---- v0.18.16 P1: 探针 cube 的 CPU 可读性/静态性探测 (跑满 2 次后每帧只落一个早退) ----
+	// 放在帧末 = 不插进游戏的记录流中间, Map 也不会卡在某个 draw 之间。
+	probeDumpTick();
 	// ---- 帧时基线 (v0.16.2): 每帧一次, 采样点就放在 Present 这里 ----
 	if (!g_ftIniRead)
 	{
@@ -4892,7 +5132,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.15 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) + v0.18.5: 路线1' 导入分支落地(深度改单独SHARED老式handle→VK KMT 直入, [2d-5] 深度跨API三候选比对) + v0.18.6: SSR v1 shader 采样(ssr.vert/ssr.frag 全屏三角, descriptor+2 sampler+push constant 相机, 出向由 2d 原样拷改为 shader 产出, R4=反推inv投影, 门 ssr.v1/ssr.mode/ssr.fov/ssr.near/ssr.far/ssr.steps/ssr.dist/ssr.strength) + v0.18.7: A 平滑批(法线差分邻域 ssr.smooth + 反射 5tap 空间平滑 ssr.blur + 诊断 ssr.debug 0正常/1法线/2命中/3深度, push constant 48B→64B) + B 水色保留(第4张 SHARED 底色镜像 = 段16 后的 585 含水画面, 每帧特征B 在 2d 回写前抢一份, VK 侧 binding2 当合成底色, 门 ssr.base585) + v0.18.8: 正解B 段后水深当法线(第5张 SHARED 镜像 = 特征B 后第一次换绑时拷的 461, 段17 已写入真·水面深度, 520 照旧只当行进层级, 着色器按 zW>zPre 判水面像素, VK binding3 + p2.w, 门 ssr.wdep, debug 4段后水深/5水面像素) + v0.18.9: 585 纯反射层契约(段17 PS17586 反汇编坐实 out=mix(585,588@涟漪扭曲UV, w) 水面像素 585 占 ~90% ⇒ 585 只放一种反射: 去掉自算 fresnel 与 cubemap 掺底 ⇒ 治「倒影多层堆叠」; ssr.strength 语义改 **SSR 替换比 0..1**(0=原版 cubemap)) + 涟漪回注(段16 16 个 draw 按水面涟漪法线采 cubemap 写 585, 换内容等于把涟漪换掉 ⇒ 把 uBase 高频亮度结构乘回 SSR, 门 ssr.ripple, push constant 64B→80B p4) + v0.18.10: 回注调谐与自诊断(ssr.ripplesz 回注带宽 1..16px, 原写死 2px 只抓得住像素级噪点 ⇒ 波纹细小 / ssr.ripplemode 0=亮度调制 1=位移扭曲, 位移式的梯度取「1px 梯度-Rb 梯度」: 阶跃轮廓两支相近相减归 0 不印轮廓, 波纹波长≈2·Rb 才起效 ⇒ 天生只认 ripplesz 那一档 / debug 6=回注可视化 7=uBase 原样(定 ripplesz 的依据) / 段17 权重逐条算死 w≤0.095、段18 首笔绑定不读 585、321→324=ev39225 在段16 之前 ⇒ 排除双读与跨帧递归, 堆叠归因改走只动一个旋钮的隔离试验 strength=0→ripple=0→blur=0) + v0.18.11: 未命中回退源(ssr.edge 0=未命中一律回原版层(默认)/1=屏幕边缘延展; 归因: 扇形下半是射线飞出屏顶后拿 lastUV 做边缘延展, 采到的是岸边/树的原位画面(未镜像) 贴进水里 ⇒ 错位重影, 两侧第一跳就在屏外走的是原版层兜底才是「两边水纹正常」; 附带 hit 但 hitUV 贴屏边 4% 淡回原版层, 让扇形边界不过渡硬) + v0.18.12: 命中收紧与回注调谐(三张实跑图坐实归因后按用户反馈修三处: ①前景遮挡假命中 = 射线从原点往深处走碰不到站在它前面的人/石头, 但高度场在轮廓处突然变浅会被判成命中 ⇒ 身体轮廓糊进水里(人物身体一圈) ⇒ 命中加 sz<=P.z*0.98 守卫 ②二分 3->5 次 治倒影块状 ③位移幅度由写死 6px 改随 ripplesz 缩放 clamp(1.5*ripplesz,6,16) 默认 4px 仍=6px 治倒影区域水波较小) + v0.18.13: 法线差分轮廓守卫(水面法线只由「同样是水面」的邻点差出 ⇒ 单侧越界退成单侧差分 / 两侧越界走原退化兜底 ⇒ 回原版层; 实测三张跑图的「人物一圈」环宽中位数 = 4px = ssr.smooth 差分半径, 根因是邻点踩到前景人物/礁石的 3D 位置 ⇒ 叉出乱法线 ⇒ 反射方向被甩进屏内 ⇒ 平白多一次 hit ⇒ 采到对岸亮岩 = 白亮边) + v0.18.14: 输入端软限幅与幅度/增益解耦(§14.30.5 debug=6 实拍: 位移场电平随深度摆 6.7× —— 远处 41.8% 满格削顶/近处 51% 归零, 白饱和段 4.3~8px 而原版波长 λ≈30 ⇒ 细 4~7 倍 = 用户说的「倒影处波纹小而密集」; 根因 = 高光斑幅度比波大 ~8 倍 且冲激响应在 ±1、±Rb 各打满幅 ⇒ 位移场被亮斑劫持) 新增三旋钮: ssr.ripk 输入端软限幅阈值(取梯度前把每个采样点夹进本环 4 tap 均值 ±K, 0=关, 零额外取样 ⇒ 夹住后 |g1−g2| ≤ 4K 把场硬性封顶 40·K 不再整片削顶, 且阶跃两支同被夹住相减仍归 0 ⇒ 轮廓照旧不泄漏) + ssr.ripamp 位移幅度 px(0=自动 clamp(ripplesz*1.5,6,16)) + ssr.ripgain 梯度增益(0=自动 =10, 原写死 ×10); 三个默认 0 = 逐位等同 v0.18.13 零回归; push constant 80B→96B p5) + v0.18.15: 命中区高光回补(A 的正解, §14.30.7 坐实: strength=1 时 mix 100% 用 refl 顶掉 baseRGB ⇒ 585 层里游戏自算的白亮斑跟着一起没, 0.7 档 30% 回流 = 「有亮斑但不如正常亮」; §14.30.8 机位闸配对后再坐实 ripk 只削高补低 ±3~4pp、四框落差 4.55× 归 ripA 深度响应与 ripk 无关、ripamp 在 debug=6 分子分母精确约掉故测不到) 新增 ssr.v1det 回补量 0..1: 只在 SSR 真正接管的像素上 (wSsr = strength × 贴边淡出权重 bf) 把 baseRGB 比 refl 亮出来的那部分按 det 加回, 附绝对亮度门 smoothstep(0.35,0.85,luma) 防中等亮度整片倒回原版层削弱 SSR; miss ⇒ wSsr=0 ⇒ 纯原版逐位不动, det=0 ⇒ 逐位 = v0.18.14 零回归; 复用 p5 空槽, push constant 仍 96B; 附诊断 ssr.debug=8 单位回补量可视化 (Reinhard 灰度 y=l/(1+l), 公式与合成式逐项同式但**不乘 det** ⇒ v1det=0 也能拍, 一张图直接读出「哪里能加、能加多少」, 免去跨图差分 —— 实测 10 分钟光照漂移把水面外亮斑推 +16.6% 已盖过回补量本身); miss 像素真 cubemap 兜底 (B 的正解) 因 probe cube 是 D3D11 非共享对象、要另开跨 API 导入通路 ⇒ 拆 v0.18.16) ====");
+	logLine("==== poc-presenter v0.18.16 (PoC-A v1.7 + PoC-B 共享纹理通路 NT handle+fence / 水体探针升质 512²→1024² 含配对depth+回写desc + plan-B 绑定感知拦RSSetViewports + SSR Step1/2a 侦察拦 ctx槽33/47/50 只记日志 + Step2b 通路哨兵 ssr.sentinel + Step2c 共享入向 ssr.shared + R2 归因重试 + Step2c-β VK 交叉校验 + 导入归因矩阵/2x2探针 + 帧时基线 frametime + β3归因三件套 + 单图常驻 定案D3D11_TEXTURE_BIT + 拆出renderer模块vkrenderer.h/cpp + Step2d-1 出向回写 ssr.vkout 1帧延迟零跨API栅栏 + POCB_DEV_FNS扩descriptor/sampler + v0.18.1 代码批: desc预检收敛copyResDescChecked(含ArraySize) / logLine常驻FILE / 挂载门日志 / 2d回写一次性门(28.7次每帧->1) / vkFreeDescriptorSets + v0.18.2: 2d-3 深度格式探测(格式列 R32F/R16F/R32TL × SHARED|NTHANDLE) / C-7 出向读回节流进门先++ + v0.18.3: 2d-4 路线1' KMT 探测(老式SHARED→KMT handle→VK导入实测) / C-8 格式探测结论行按第1格实测分支 / O-1 2c拷贝后 Flush 补每帧可见 + v0.18.4: O-1 正式修法 EVENT 闸(提交VK前等入向拷贝跑完, 12e 应全一致) + v0.18.5: 路线1' 导入分支落地(深度改单独SHARED老式handle→VK KMT 直入, [2d-5] 深度跨API三候选比对) + v0.18.6: SSR v1 shader 采样(ssr.vert/ssr.frag 全屏三角, descriptor+2 sampler+push constant 相机, 出向由 2d 原样拷改为 shader 产出, R4=反推inv投影, 门 ssr.v1/ssr.mode/ssr.fov/ssr.near/ssr.far/ssr.steps/ssr.dist/ssr.strength) + v0.18.7: A 平滑批(法线差分邻域 ssr.smooth + 反射 5tap 空间平滑 ssr.blur + 诊断 ssr.debug 0正常/1法线/2命中/3深度, push constant 48B→64B) + B 水色保留(第4张 SHARED 底色镜像 = 段16 后的 585 含水画面, 每帧特征B 在 2d 回写前抢一份, VK 侧 binding2 当合成底色, 门 ssr.base585) + v0.18.8: 正解B 段后水深当法线(第5张 SHARED 镜像 = 特征B 后第一次换绑时拷的 461, 段17 已写入真·水面深度, 520 照旧只当行进层级, 着色器按 zW>zPre 判水面像素, VK binding3 + p2.w, 门 ssr.wdep, debug 4段后水深/5水面像素) + v0.18.9: 585 纯反射层契约(段17 PS17586 反汇编坐实 out=mix(585,588@涟漪扭曲UV, w) 水面像素 585 占 ~90% ⇒ 585 只放一种反射: 去掉自算 fresnel 与 cubemap 掺底 ⇒ 治「倒影多层堆叠」; ssr.strength 语义改 **SSR 替换比 0..1**(0=原版 cubemap)) + 涟漪回注(段16 16 个 draw 按水面涟漪法线采 cubemap 写 585, 换内容等于把涟漪换掉 ⇒ 把 uBase 高频亮度结构乘回 SSR, 门 ssr.ripple, push constant 64B→80B p4) + v0.18.10: 回注调谐与自诊断(ssr.ripplesz 回注带宽 1..16px, 原写死 2px 只抓得住像素级噪点 ⇒ 波纹细小 / ssr.ripplemode 0=亮度调制 1=位移扭曲, 位移式的梯度取「1px 梯度-Rb 梯度」: 阶跃轮廓两支相近相减归 0 不印轮廓, 波纹波长≈2·Rb 才起效 ⇒ 天生只认 ripplesz 那一档 / debug 6=回注可视化 7=uBase 原样(定 ripplesz 的依据) / 段17 权重逐条算死 w≤0.095、段18 首笔绑定不读 585、321→324=ev39225 在段16 之前 ⇒ 排除双读与跨帧递归, 堆叠归因改走只动一个旋钮的隔离试验 strength=0→ripple=0→blur=0) + v0.18.11: 未命中回退源(ssr.edge 0=未命中一律回原版层(默认)/1=屏幕边缘延展; 归因: 扇形下半是射线飞出屏顶后拿 lastUV 做边缘延展, 采到的是岸边/树的原位画面(未镜像) 贴进水里 ⇒ 错位重影, 两侧第一跳就在屏外走的是原版层兜底才是「两边水纹正常」; 附带 hit 但 hitUV 贴屏边 4% 淡回原版层, 让扇形边界不过渡硬) + v0.18.12: 命中收紧与回注调谐(三张实跑图坐实归因后按用户反馈修三处: ①前景遮挡假命中 = 射线从原点往深处走碰不到站在它前面的人/石头, 但高度场在轮廓处突然变浅会被判成命中 ⇒ 身体轮廓糊进水里(人物身体一圈) ⇒ 命中加 sz<=P.z*0.98 守卫 ②二分 3->5 次 治倒影块状 ③位移幅度由写死 6px 改随 ripplesz 缩放 clamp(1.5*ripplesz,6,16) 默认 4px 仍=6px 治倒影区域水波较小) + v0.18.13: 法线差分轮廓守卫(水面法线只由「同样是水面」的邻点差出 ⇒ 单侧越界退成单侧差分 / 两侧越界走原退化兜底 ⇒ 回原版层; 实测三张跑图的「人物一圈」环宽中位数 = 4px = ssr.smooth 差分半径, 根因是邻点踩到前景人物/礁石的 3D 位置 ⇒ 叉出乱法线 ⇒ 反射方向被甩进屏内 ⇒ 平白多一次 hit ⇒ 采到对岸亮岩 = 白亮边) + v0.18.14: 输入端软限幅与幅度/增益解耦(§14.30.5 debug=6 实拍: 位移场电平随深度摆 6.7× —— 远处 41.8% 满格削顶/近处 51% 归零, 白饱和段 4.3~8px 而原版波长 λ≈30 ⇒ 细 4~7 倍 = 用户说的「倒影处波纹小而密集」; 根因 = 高光斑幅度比波大 ~8 倍 且冲激响应在 ±1、±Rb 各打满幅 ⇒ 位移场被亮斑劫持) 新增三旋钮: ssr.ripk 输入端软限幅阈值(取梯度前把每个采样点夹进本环 4 tap 均值 ±K, 0=关, 零额外取样 ⇒ 夹住后 |g1−g2| ≤ 4K 把场硬性封顶 40·K 不再整片削顶, 且阶跃两支同被夹住相减仍归 0 ⇒ 轮廓照旧不泄漏) + ssr.ripamp 位移幅度 px(0=自动 clamp(ripplesz*1.5,6,16)) + ssr.ripgain 梯度增益(0=自动 =10, 原写死 ×10); 三个默认 0 = 逐位等同 v0.18.13 零回归; push constant 80B→96B p5) + v0.18.15: 命中区高光回补(A 的正解, §14.30.7 坐实: strength=1 时 mix 100% 用 refl 顶掉 baseRGB ⇒ 585 层里游戏自算的白亮斑跟着一起没, 0.7 档 30% 回流 = 「有亮斑但不如正常亮」; §14.30.8 机位闸配对后再坐实 ripk 只削高补低 ±3~4pp、四框落差 4.55× 归 ripA 深度响应与 ripk 无关、ripamp 在 debug=6 分子分母精确约掉故测不到) 新增 ssr.v1det 回补量 0..1: 只在 SSR 真正接管的像素上 (wSsr = strength × 贴边淡出权重 bf) 把 baseRGB 比 refl 亮出来的那部分按 det 加回, 附绝对亮度门 smoothstep(0.35,0.85,luma) 防中等亮度整片倒回原版层削弱 SSR; miss ⇒ wSsr=0 ⇒ 纯原版逐位不动, det=0 ⇒ 逐位 = v0.18.14 零回归; 复用 p5 空槽, push constant 仍 96B; 附诊断 ssr.debug=8 单位回补量可视化 (Reinhard 灰度 y=l/(1+l), 公式与合成式逐项同式但**不乘 det** ⇒ v1det=0 也能拍, 一张图直接读出「哪里能加、能加多少」, 免去跨图差分 —— 实测 10 分钟光照漂移把水面外亮斑推 +16.6% 已盖过回补量本身); miss 像素真 cubemap 兜底 (B 的正解) 因 probe cube 是 D3D11 非共享对象、要另开跨 API 导入通路 ⇒ 拆 v0.18.16) + v0.18.16 (issue B / 队列 #2 落地, P1+P2 合并一发, 零渲染改动的部分只有 P1): **P1** = 探针 cube CPU 可读性与静态性探测 (probeDumpTick, 每帧喂入但只跑两次: STAGING CreateTexture2D + 逐 subresource CopyResource/Map/FNV1a, 第二次要隔 >=5s, 日志前缀 P1探针:, 两次签名一致 ⇒ 内容静态一次上传即可, 不一致 ⇒ 按代重传, 读回失败 ⇒ C1 不可行转 Plan B); **P2** = ssr.edge 扩第三档 2 = 未命中采真 cubemap 兜底 (ssr.frag miss 分支按 Rf=reflect(V,N) 采 binding4 samplerCube, 先判长度防 NaN; **只动 refl, 不碰 hit** ⇒ hit/miss 仍是纯几何, **不碰 wSsr** ⇒ v1det 回补在 miss 区照旧不进 = A 逐位不动; mode0 与无深度在前面就 oColor=base 提前返回, 到不了这个分支 ⇒ 透传契约不破; push constant 体积/语义位不变, **零新 ini 键**, 读入时把 ssr.edge 钳到 0..2) + **C1 上传通路** (main.cpp 把 STAGING 读回的 6 面紧凑缓冲交 vkrenderer, 看到 g_probeCpuTick 变就灌自建 R16G16B16A16_SFLOAT 6 面 CUBE_COMPATIBLE VkImage: HOST_VISIBLE|COHERENT 源 buffer -> vkCmdCopyBufferToImage (POCB_DEV_FNS 补这一条, core 1.0), 自带 command pool/fence **不借共用 pool** (借会把别人在录的命令一起 reset), 布局 UNDEFINED->TRANSFER_DST->SHADER_READ_ONLY, 描述符扩到 5 binding 且**常驻 1×1 占位 cube** 保证 samplerCube 描述符恒有效 —— 着色器静态引用它, 空 view = 未定义行为; g_ssrV1CubeSrc 与 g_probeCpuTick 都进 ssrV1Sig ⇒ 占位->真 cube 换档与内容换代都会自动重录+重填) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

@@ -4383,3 +4383,69 @@ structure (p90-p50)  hit 0.2000  miss 0.1490   miss/hit = 0.745
 
 **任一档失败只关自己，WARN 不连坐**；本节全程只动 `ssr.debug` 一个旋钮，
 `v1det` / `ripk` / `ripamp` / `ssr.edge` 均逐位未动，§9 的加成判据不受影响。
+
+##### 11 v0.18.16 代码批：P1 探针探测 + P2 `ssr.edge=2` 真 cubemap（合并一发）
+
+**为什么合并**：P1（只加日志）与 P2（shader + 上传通路）**各自都要出 DLL、都要手动换包重启**，
+两件事合成一次下载换 DLL 省一整轮体力活（用户拍板）。分工不混、互不干扰：
+
+- **P1 答「技术上通不通」** —— 探针能否被 CPU 读回、内容是否静态；
+- **P2 答「值不值」** —— 翻 `ssr.edge=2` 拍图看画面；
+- `ssr.edge` 默认仍 0 ⇒ **渲染逐位等于 v0.18.15**，P2 的风险对默认档零暴露。
+
+**改动面**
+
+| 文件 | 改动 |
+|---|---|
+| `shaders/ssr.frag` | `binding = 4 uniform samplerCube uProbe`；miss 分支加第三档；文件头补 v0.18.16 段。**只动 `refl`** |
+| `pocb_shaders.h` | `make_shaders.ps1` 重编，`ssr.frag.spv` 32588 → **33228 B** |
+| `vkrenderer.h` | `POCB_DEV_FNS` 补 `X(vkCmdCopyBufferToImage)`（core 1.0，原表漏了）；交接 `g_probeCpu / W / H / Layers / CpuTick` |
+| `vkrenderer.cpp` | cube 资源一套 + `ssrV1CubeMake` / `ssrV1CubeSync` / `ssrV1EffEdge`；描述符 **4 → 5 binding**；签名加 `g_ssrV1CubeSrc` + `g_probeCpuTick` |
+| `main.cpp` | `ssr.edge` 读入口钳 0..2；`probeDumpTick`（P1）；交接变量定义；横幅 → v0.18.16 |
+| `tools/check1.ps1` | `$need` 补 11 个新符号（字节级替换，BOM / 纯 LF 逐项未变） |
+
+**三个必须点名的决定**
+
+**① 签名与 push 必须用「有效 edge」，不能用 ini 原值。**
+`edge=2` 但探针数据还没到时，描述符只能绑 **1×1 全零占位 cube**，而
+`outRGB = mix(baseRGB, refl, k)` 在 `strength=1` 下就是 `mix(baseRGB, 0, 1)` =
+**miss 区整片黑水** —— 这是 P2 最危险的失败模式。
+⇒ 新增 `ssrV1EffEdge()`：没真 cube 时把 2 退回 0（回原版层 = v0.18.15 行为），cube 一到自动升 2。
+⇒ **`ssrV1Sig()` 与 `pc.p4[3]` 必须同源**，否则换档那次既不重录、推给着色器的还是旧值 ⇒ 画面看着没反应。
+触发点是 `g_probeCpuTick` 进签名：数据到位 → 签名变 → 重录 → 上传发生在
+`ssrV1CubeSync` → 其后才填描述符 ⇒ 正好指真 cube。
+
+**② `samplerCube` 的描述符不能像 binding2/3 那样拿 2D view 兜底。**
+着色器**静态引用** binding4：空 view = 未定义行为，指向 2D view = 类型不匹配。
+⇒ 常驻一张 1×1 占位 cube（6 面 RGBA16F，48 B），`edge` 是几都建。
+代价是 `ssrV1CubeSync` 失败会 `fail()` 关掉 v1 —— 属「关自己」；且格式与游戏自用的
+512² RGBA16F 探针同款，实际不会失败。
+
+**③ 上传用自己开的 command pool，不借共用 pool。**
+`vkResetCommandPool` 把它名下**所有**命令 buffer 拉回 initial，借共用 pool 会把当帧
+正在录的命令一起 reset 掉（`g_ssrVkCmd*` 全废）。⇒ 单开 pool + fence + `ONE_TIME_SUBMIT`，
+布局 `UNDEFINED → TRANSFER_DST → SHADER_READ_ONLY`，源 buffer 取
+`HOST_VISIBLE|COHERENT`（表里没有 `vkInvalidateMappedMemoryRanges`，不 COHERENT 没法保证 CPU 写可见）。
+
+**P1 日志怎么读**（`notePresent` 每帧喂，只跑两次）：
+
+| 日志行 | 含义 |
+|---|---|
+| `P1探针: desc W=… fmt=… mips=… array=…` | C1 的 `VkImage` 必须与它 1:1；`array≠6 / mips≠1 / 非 RGBA16F / 非方形` ⇒ **不发布给 VK**（但读回照做） |
+| `P1探针: STAGING CreateTexture2D ok (MiscFlags=…)` | **① 可读性**：带 `TEXTURECUBE` 失败会自动退 `MiscFlags=0` 再试一次并都记日志；两次全失败 ⇒ **C1 不可行，转 Plan B（C5 假环境）** |
+| `P1探针: Map(sub=…) hr=… ⇒ 读回失败` | 同判 C1 死活（逐 subresource 读，6 面 × 全 mip） |
+| `P1探针: 第1次读回 ok sig=…` / `第2次读回 ok sig=… 相隔 Ns ⇒ 内容静态 / 内容有变` | **② 静态性**：相隔 ≥5s 的两次 FNV-1a 全量签名。一致 ⇒ 一次上传即可；不一致 ⇒ 按代重传（`g_probeCpuTick` 进签名已兜住） |
+| `P1探针: 已发布 CPU 镜像 1024² × 6 面, 第 1 代` | 48 MiB 交接完成，VK 侧随即可上传 |
+| `ssr.edge=2 但探针 cube 还没就绪 -> 暂按 edge=0 走…` | ① 里的黑水护栏，只打一次 |
+
+> **时序护栏**：第一次读回要等探针出现后 **≥2s**（否则读到还没被渲染过的初始内容，
+> 第二次必然不同 ⇒ 会把「静态」误判成「在动」）；第二次再隔 **≥5s**；探针换对象则配对作废重来。
+
+**P2 验收**（沿用 §10 的口径，**不是**「比值涨向 1.0」）：
+同一张 `debug=2` 掩码下 `edge=0` 与 `edge=2` 各跑一次 `px_cond -Normal` ——
+**HIT 行必须一动不动**（A 的回归闸）、**MISS 行比它自己的 `p50` / `structure` 位移**、
+外加**人眼看扇形边界**。朝向（D3D11 与 Vulkan 的 cube 手性/面序差异）归 P3，
+本版只保证「采得到、不是花屏」。
+
+**本地闸**：`make_shaders.ps1` OK（`ssr.frag.spv` **33228 B**）、`check1.ps1` **RESULT OK**、
+`quotescan3` **oddQuoteLines=0**。CI 结果以 push 后 `ci_once` 为准，本节不预写。

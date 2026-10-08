@@ -65,7 +65,7 @@
 	X(vkCreateCommandPool) X(vkDestroyCommandPool) X(vkAllocateCommandBuffers) X(vkResetCommandPool) \
 	X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) \
 	X(vkCmdBindPipeline) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw) X(vkCmdCopyImageToBuffer) \
-	X(vkCmdCopyImage) X(vkCmdPipelineBarrier) \
+	X(vkCmdCopyImage) X(vkCmdCopyBufferToImage) X(vkCmdPipelineBarrier) \
 	X(vkCreateFence) X(vkDestroyFence) X(vkResetFences) X(vkWaitForFences) X(vkQueueSubmit) \
 	X(vkCreateSampler) X(vkDestroySampler) \
 	X(vkCreateDescriptorSetLayout) X(vkDestroyDescriptorSetLayout) \
@@ -218,11 +218,19 @@ namespace pocmain
 	extern float                   g_ssrV1Ripple;     // ini ssr.ripple 涟漪回注量 0..1 (v0.18.9, 默认 1)
 	extern int                     g_ssrV1RippleSz;   // ini ssr.ripplesz 回注带宽 (px, 1..16; v0.18.10, 默认 4)
 	extern int                     g_ssrV1RippleMode; // ini ssr.ripplemode 0=亮度调制 1=位移扭曲 (v0.18.10, 默认 1)
-	extern int                     g_ssrV1Edge;       // ini ssr.edge 0=未命中回原版层(默认) 1=屏幕边缘延展 (v0.18.11)
+	extern int                     g_ssrV1Edge;       // ini ssr.edge 0=未命中回原版层(默认) 1=屏幕边缘延展 (v0.18.11) 2=真 cubemap 兜底 (v0.18.16)
 	extern float                   g_ssrV1RipK;    // ini ssr.ripk 输入端软限幅阈值 (线性亮度, 0=关; v0.18.14, 默认 0)
 	extern float                   g_ssrV1RipAmp;  // ini ssr.ripamp 位移幅度 (px, 0=自动 clamp(ripplesz*1.5,6,16); v0.18.14, 默认 0)
 	extern float                   g_ssrV1RipGain; // ini ssr.ripgain 梯度增益 (0=自动=10; v0.18.14, 默认 0)
 	extern float                   g_ssrV1Det;     // ini ssr.v1det 原版高光回补量 0..1 (0=关; v0.18.15, 默认 0)
+	// ---- v0.18.16 (issue B): 探针 cube 从 D3D11 读回后交给 VK 上传 ----
+	// D3D11 侧 (main.cpp 的 P1 探测) 负责写这四个, VK 侧 (vkrenderer.cpp) 只读;
+	// tick 变 = 内容换过一次 ⇒ ssrV1Sig 变 ⇒ 重录 + 重填描述符 (与其它入向图同一口径)。
+	extern unsigned char*          g_probeCpu;        // 6 面紧凑排列 (layer = w*h*8B), 无数据 = nullptr
+	extern int                     g_probeW;          // 面宽 (= 升质后的 1024)
+	extern int                     g_probeH;          // 面高
+	extern int                     g_probeLayers;     // 面数 (cube 恒 6)
+	extern unsigned long long      g_probeCpuTick;    // 内容代数 (变了才重传)
 	extern std::atomic<bool>       g_ssrBaseOn;       // ini ssr.base585 底色镜像独立门 (默认 1)
 	extern ID3D11Texture2D*        g_ssrBaseTex;      // 底色 SHARED 镜像 (585 段16 后 = 含水画面)
 	extern HANDLE                  g_ssrBaseH;        // 底色镜像 NT handle (VK 导入源)

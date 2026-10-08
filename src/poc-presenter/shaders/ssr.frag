@@ -111,15 +111,38 @@
 //     深度差根本抓不住它, 而「461 与 520 同源 ⇒ 不是水」在人/石头/岸上一律成立 —— 那就是
 //     useW 自己已经在跑的判据, 零参数零调优。判读模板 docs/02 §14.30, 归因实测 §14.28.1。
 //
+// v0.18.16 (issue B / 队列 #2; 量化见 docs/02 §14.31 §10): **miss 像素真 cubemap 兜底**
+//   §14.31 §9 已证 v0.18.15 的 A 只在 hit 区生效、缺口 100% 在 miss 区; §10 又在**正常档**
+//   把缺口量出来: 同一张 debug=2 掩码下 miss 区只有 hit 区 **43.7%** 的亮度、**74.5%** 的结构量
+//   ⇒ B 判 CONFIRMED。修法 = 把 `ssr.edge` 扩到第三档:
+//     0 = 未命中回原版层 (默认, 与 v0.18.15 逐位一致) / 1 = v0.18.10 边缘延展 / **2 = 采探针 cubemap**。
+//   为什么是**复用 edge 而不是新键**: push constant p4.w 还有语义位可扩, **p5 已满**
+//   (v0.18.14 三旋钮 + v0.18.15 的 v1det 占满), 新增键会推 96B → 112B 并让 `ssrV1Sig()` 重录
+//   整条命令通路 ⇒ 复用 edge = **零新 ini 键、零 push 体积变化、默认档逐位 v0.18.15**。
+//   为什么 miss 能采而 lastUV 不能: lastUV 是射线最后一个**在屏**位置, 那里是未镜像的原位画面
+//   (没有物理意义); 而 Rf 是**离开表面的反射方向**, 出屏的部分本来就该由 cubemap 接手 —— 这是
+//   屏幕空间 SSR 的标准做法, 与 v0.18.11 的归因 (「屏幕里根本看不到的内容本来就该交给 cubemap」)
+//   是同一句话, 当时只差一个真的 cubemap 可交。
+//   朝向风险: D3D11 cube 与 Vulkan cube 的**手性与面序不同** (D3D 左手系 + 面序 +X,-X,+Y,-Y,+Z,-Z,
+//   Vulkan 手性/UV 翻转与之不一致) ⇒ 可能需要水平翻转/面重排, 归 P3 朝向校准 (靠 585 对齐校),
+//   本版先保证「采得到、不是花屏」。
+//   验收口径 **不是**「miss/hit 比值涨向 1.0」: hit 与 miss 是不同水域、反射不同的合法环境
+//   (§14.31 §10 保留意见), 正确口径是**同机位配对** —— 同一张 debug=2 掩码下 edge=0 vs edge=2
+//   各跑一次 `-Normal`, 比 MISS 行自身 p50/structure 位移, 同时 HIT 行必须一动不动, 外加人眼看扇形边界。
+//
 // 输入: uColor = 324 场景色镜像 (RGBA16F, 段16 前的快照) —— 反射源
 //       uDepth = 520 深度快照  (D24, 取 depth aspect) —— 行进层级 + 非水面像素的法线源
 //       uBase  = 585 段16 后镜像 (RGBA16F, 含水画面) —— 合成底色 (可缺)
 //       uWdep  = 461 段17 后镜像 (D24, 真·水面深度) —— 水面像素的法线/原点 (可缺)
+//       uProbe = 水体探针 cubemap (RGBA16F 6 面, 由 D3D11 STAGING 读回后 CPU 上传) —— edge=2 的兜底源
+//                (没有数据时绑 1×1 占位图, 描述符恒有效, 采到 0 = 与原版层叠加前的黑)
 // 输出: 覆盖式写进出向镜像 (下帧特征B 整幅拷进 585)
 layout(set = 0, binding = 0) uniform sampler2D uColor;
 layout(set = 0, binding = 1) uniform sampler2D uDepth;
 layout(set = 0, binding = 2) uniform sampler2D uBase;
 layout(set = 0, binding = 3) uniform sampler2D uWdep; // v0.18.8: 缺时填色 view + p2.w=0
+layout(set = 0, binding = 4) uniform samplerCube uProbe; // v0.18.16: 探针 cube, 只有 edge=2 采
+                                                         // (1×1 占位图保证描述符恒有效)
 
 layout(push_constant) uniform PC
 {
@@ -129,7 +152,8 @@ layout(push_constant) uniform PC
 	vec4 p3; // x=smooth(法线差分邻域 px)  y=blur(0/1)  z=debug(0..8)  w=用底色(1=采 uBase)
 	vec4 p4; // v0.18.9: x=ripple(涟漪回注量 0..1)  y=ripplesz(回注带宽 px 1..16)
 	         // v0.18.10: z=ripplemode(0=亮度调制 / 1=位移扭曲)
-	         // v0.18.11: w=edge(0=未命中回原版层(默认) / 1=边缘延展) (push constant 64B → 80B)
+	         // v0.18.11: w=edge(0=未命中回原版层(默认) / 1=边缘延展)
+	         // v0.18.16: w=edge 加 2=未命中采真 cubemap 兜底 (push constant 仍 80B, 只扩语义)
 	vec4 p5; // v0.18.14: x=ripk(输入端软限幅阈值, 线性亮度, 0=关)  y=ripamp(位移幅度 px, 0=自动)
 	         // v0.18.14: z=ripgain(梯度增益, 0=自动 =10)  w=保留 (push constant 80B → 96B)
 } pc;
@@ -458,8 +482,22 @@ void main()
 	// edge=0 (默认): 未命中**一律**回 baseRGB (原版层) —— 不再拿 lastUV 去采 uColor, 因为那个位置
 	//                拿到的是**未镜像**的原图 (岸边/树的原位画面), 贴进水里就是截图里那块错位重影;
 	// edge=1: 退回 v0.18.10 的边缘延展 (只有"一跳都没进屏"才回底色), 当 A/B 对照。
-	if (!hit && (pc.p4.w < 0.5 || lastUV == uv))
-		refl = baseRGB;
+	// edge=2 (v0.18.16): 未命中改**采真 cubemap** —— 射线飞出屏的那部分本来就该交给 cubemap,
+	//                那正是 §14.31 §10 在正常档量到的缺口 (miss 区只有 hit 区 43.7% 亮度 / 74.5% 结构量)。
+	//                采样方向用 Rf = reflect(V,N), 与行进用的是同一个反射方向, 不重推; 先判长度防 NaN。
+	//                只动 refl, **不碰 hit** ⇒ hit/miss 分裂仍是纯几何 (mask 图逐位不变), 也**不碰 wSsr**
+	//                (miss 恒 0) ⇒ v1det 回补块在 miss 区照旧不进 = A 的读数逐位不动。
+	//                mode0 / 无深度在上面那个提前返回里就 oColor=base 走掉了, 根本到不了这里 ⇒ 透传契约不破。
+	if (!hit)
+	{
+		if (pc.p4.w > 1.5)
+		{
+			float rl = length(Rf);
+			refl = rl > 1e-4 ? texture(uProbe, Rf / rl).rgb : baseRGB;
+		}
+		else if (pc.p4.w < 0.5 || lastUV == uv)
+			refl = baseRGB;
+	}
 	// hit 但 hitUV 贴着屏幕边 (4%) => 淡回原版层: 扇形边界上的像素正是"再走一跳出屏就变 miss"那批,
 	// 它们的 hitUV 就落在屏幕边附近; 淡出后边界两边都是反射 (锐 SSR <-> 原版层), 不再是硬接缝。
 	// v0.18.15: bf (贴边淡出权重) 提到 if 外面 —— 下面合成处要拿它算"SSR 到底接管了多少原版层"。

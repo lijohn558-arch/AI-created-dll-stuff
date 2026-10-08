@@ -3196,6 +3196,45 @@ static VkImage         g_ssrV1RecDep = VK_NULL_HANDLE; // 录命令时用的深�
 static unsigned long long g_ssrV1RecSig = 0;           // 录命令时的依赖签名 (见 ssrV1Sig)
 static bool            g_ssrV1DepLog = false;          // "深度没就绪先跑 2d" 只打一次
 
+// ---- v0.18.16 (issue B): 探针 cube —— ssr.edge=2 的兜底源, 内容由 main.cpp 从 D3D11 读回后交进来 ----
+static VkImage         g_ssrV1CubeImg = VK_NULL_HANDLE;  // 真 cube (有数据才建, 48 MiB 级)
+static VkDeviceMemory  g_ssrV1CubeMem = VK_NULL_HANDLE;
+static VkImageView     g_ssrV1CubeView = VK_NULL_HANDLE;
+static VkImage         g_ssrV1DummyImg = VK_NULL_HANDLE; // 1×1 占位 cube —— 描述符恒需要一个**有效**的 cube view
+static VkDeviceMemory  g_ssrV1DummyMem = VK_NULL_HANDLE; // (着色器静态引用 binding4, 空 view = 未定义行为)
+static VkImageView     g_ssrV1DummyView = VK_NULL_HANDLE;
+static VkBuffer        g_ssrV1CubeBuf = VK_NULL_HANDLE;  // 上传源 buffer (HOST_VISIBLE|COHERENT, 常驻可重传)
+static VkDeviceMemory  g_ssrV1CubeBufMem = VK_NULL_HANDLE;
+static void*           g_ssrV1CubeBufPtr = nullptr;
+static VkCommandPool   g_ssrV1CubePool = VK_NULL_HANDLE; // 自己的 pool: 上传要反复 begin/reset, 借共用 pool
+static VkCommandBuffer g_ssrV1CubeCmd = VK_NULL_HANDLE;  // 会把别人在录的命令一起 reset 掉
+static VkFence         g_ssrV1CubeFence = VK_NULL_HANDLE;
+static VkImage         g_ssrV1CubeSrc = VK_NULL_HANDLE;  // 描述符当前指的哪张 (真 cube 或占位)
+static VkSampler       g_ssrV1SmpQ = VK_NULL_HANDLE;     // cube 专用线性采样器 (立方体贴图只允许 CLAMP_TO_EDGE)
+static unsigned long long g_ssrV1CubeTick = 0;           // 已传到第几代
+static unsigned long long g_ssrV1CubeBad = 0;            // 传失败的那一代 (别每帧重试同一代)
+static bool            g_ssrV1WaitLg = false;          // edge=2 等数据那条日志只打一次
+
+// v0.18.16: **有效** edge —— edge=2 需要"真的探针 cube 已上传", 否则着色器会拿
+// mix(baseRGB, 占位全0, strength=1) ⇒ miss 区**整片黑水** (P2 最危险的失败模式)。
+// 数据没到就先按 0 走 = 回原版层 = v0.18.15 行为, cube 一到自动升到 2。
+// **签名与 push constant 必须都用这个有效值**: 只有两边同源, "占位 -> 真 cube" 换档
+// 才会既触发重录、又恰好把 2 推给着色器; 否则会停在旧的有效 edge 上 (画面看着没反应)。
+static int ssrV1EffEdge()
+{
+	if (g_ssrV1Edge >= 2)
+	{
+		const bool ready = (g_ssrV1CubeView != VK_NULL_HANDLE);
+		if (!ready && !g_ssrV1WaitLg)
+		{
+			g_ssrV1WaitLg = true;
+			logLine("ssr.edge=2 但探针 cube 还没就绪 -> 暂按 edge=0 走 (回原版层, 等价 v0.18.15), 就绪后自动升到 2");
+		}
+		return ready ? 2 : 0;
+	}
+	return g_ssrV1Edge;
+}
+
 // 依赖签名: 只要影响"命令内容"的任何东西变了, 签名就变 ⇒ 需要重录 (不重建资源)。
 // 返回 0 = 本帧应当录成**纯拷贝** (v1 关着 / mode=0 / 前置能力缺 / 深度没就绪)。
 static unsigned long long ssrV1Sig()
@@ -3239,7 +3278,7 @@ static unsigned long long ssrV1Sig()
 	s = mix(s, (unsigned long long)(unsigned)g_ssrV1RippleSz);
 	s = mix(s, (unsigned long long)(unsigned)g_ssrV1RippleMode);
 	// v0.18.11: 未命中回退源 (原版层 / 屏幕边缘延展) 同理
-	s = mix(s, (unsigned long long)(unsigned)g_ssrV1Edge);
+	s = mix(s, (unsigned long long)(unsigned)ssrV1EffEdge()); // v0.18.16: 进签名的必须是**有效** edge (见 ssrV1EffEdge)
 	// v0.18.14: 三个新旋钮也进签名 (push p5 变了 ⇒ 必须重录)
 	cv.f = g_ssrV1RipK;
 	s = mix(s, cv.u);
@@ -3250,6 +3289,10 @@ static unsigned long long ssrV1Sig()
 	// v0.18.15: 高光回补量也进签名 (push p5.w 变了 ⇒ 必须重录)
 	cv.f = g_ssrV1Det;
 	s = mix(s, cv.u);
+	// v0.18.16: 探针 cube 进签名 —— 描述符 binding4 指向哪张 (占位 -> 真 cube, 或内容换代)
+	// 都必须重录 + 重填描述符, 口径与 g_ssrVkImgBase/g_ssrWDepImg 那两条一致
+	s = mix(s, (unsigned long long)(uintptr_t)g_ssrV1CubeSrc);
+	s = mix(s, g_probeCpuTick);
 	return s ? s : 1;
 }
 
@@ -3280,6 +3323,24 @@ static void ssrV1Free(PocbCtx& c)
 	if (g_ssrV1Dsl) { c.fns.vkDestroyDescriptorSetLayout(c.vdev, g_ssrV1Dsl, nullptr); g_ssrV1Dsl = VK_NULL_HANDLE; }
 	if (g_ssrV1SmpC) { c.fns.vkDestroySampler(c.vdev, g_ssrV1SmpC, nullptr); g_ssrV1SmpC = VK_NULL_HANDLE; }
 	if (g_ssrV1SmpD) { c.fns.vkDestroySampler(c.vdev, g_ssrV1SmpD, nullptr); g_ssrV1SmpD = VK_NULL_HANDLE; }
+	if (g_ssrV1SmpQ) { c.fns.vkDestroySampler(c.vdev, g_ssrV1SmpQ, nullptr); g_ssrV1SmpQ = VK_NULL_HANDLE; }
+	// v0.18.16: 探针 cube 全套 (先 view 再 image; buffer/pool/fence 是上传通路自己的)
+	if (g_ssrV1CubeView) { c.fns.vkDestroyImageView(c.vdev, g_ssrV1CubeView, nullptr); g_ssrV1CubeView = VK_NULL_HANDLE; }
+	if (g_ssrV1DummyView) { c.fns.vkDestroyImageView(c.vdev, g_ssrV1DummyView, nullptr); g_ssrV1DummyView = VK_NULL_HANDLE; }
+	if (g_ssrV1CubeImg) { c.fns.vkDestroyImage(c.vdev, g_ssrV1CubeImg, nullptr); g_ssrV1CubeImg = VK_NULL_HANDLE; }
+	if (g_ssrV1CubeMem) { c.fns.vkFreeMemory(c.vdev, g_ssrV1CubeMem, nullptr); g_ssrV1CubeMem = VK_NULL_HANDLE; }
+	if (g_ssrV1DummyImg) { c.fns.vkDestroyImage(c.vdev, g_ssrV1DummyImg, nullptr); g_ssrV1DummyImg = VK_NULL_HANDLE; }
+	if (g_ssrV1DummyMem) { c.fns.vkFreeMemory(c.vdev, g_ssrV1DummyMem, nullptr); g_ssrV1DummyMem = VK_NULL_HANDLE; }
+	if (g_ssrV1CubeBuf) { c.fns.vkDestroyBuffer(c.vdev, g_ssrV1CubeBuf, nullptr); g_ssrV1CubeBuf = VK_NULL_HANDLE; }
+	if (g_ssrV1CubeBufMem) { c.fns.vkFreeMemory(c.vdev, g_ssrV1CubeBufMem, nullptr); g_ssrV1CubeBufMem = VK_NULL_HANDLE; }
+	g_ssrV1CubeBufPtr = nullptr;
+	if (g_ssrV1CubeFence) { c.fns.vkDestroyFence(c.vdev, g_ssrV1CubeFence, nullptr); g_ssrV1CubeFence = VK_NULL_HANDLE; }
+	// pool 销毁会顺带回收它名下的命令 buffer, 所以 cmd 一起置空
+	if (g_ssrV1CubePool) { c.fns.vkDestroyCommandPool(c.vdev, g_ssrV1CubePool, nullptr); g_ssrV1CubePool = VK_NULL_HANDLE; }
+	g_ssrV1CubeCmd = VK_NULL_HANDLE;
+	g_ssrV1CubeSrc = VK_NULL_HANDLE;
+	g_ssrV1CubeTick = 0;
+	g_ssrV1CubeBad = 0;
 	g_ssrV1OutImg = VK_NULL_HANDLE;
 	g_ssrV1CSrc = VK_NULL_HANDLE;
 	g_ssrV1DSrc = VK_NULL_HANDLE;
@@ -3336,6 +3397,328 @@ static void ssrV1DropViewW(PocbCtx& c)
 	g_ssrV1WSrc = VK_NULL_HANDLE;
 }
 
+// ---- v0.18.16 (issue B): 探针 cube 建图 + CPU 上传 ----
+// 与其它入向图的区别: 这张**不是** D3D11 共享 handle 导入, 而是 main.cpp 用 STAGING 读回后
+// 交给我们的普通 CPU 缓冲 ⇒ 走标准的 HOST_VISIBLE buffer -> vkCmdCopyBufferToImage 通路。
+// data == nullptr ⇒ 灌全 0 (占位图也走同一条路; 采 UNDEFINED 布局的图是未定义行为, 全 0 才可预期)。
+static VkDeviceSize g_ssrV1CubeBufSz = 0;
+static int          g_ssrV1CubeW = 0;
+static int          g_ssrV1CubeH = 0;
+
+static bool ssrV1CubeMake(PocbCtx& c, int w, int h, const void* data, const char* tag,
+                          VkImage& oImg, VkDeviceMemory& oMem, VkImageView& oView)
+{
+	if (w <= 0 || h <= 0)
+		return false;
+	auto note = [&](const std::string& s) { logLine("SSR侦察: [v1-cube] " + std::string(tag) + " " + s); };
+	auto cleanup = [&]() {
+		if (oView) { c.fns.vkDestroyImageView(c.vdev, oView, nullptr); oView = VK_NULL_HANDLE; }
+		if (oImg) { c.fns.vkDestroyImage(c.vdev, oImg, nullptr); oImg = VK_NULL_HANDLE; }
+		if (oMem) { c.fns.vkFreeMemory(c.vdev, oMem, nullptr); oMem = VK_NULL_HANDLE; }
+	};
+
+	// --- 1) 图: CUBE_COMPATIBLE + 6 面 + RGBA16F + mips=1 (与探针 desc 1:1, 无需格式转换) ---
+	if (!oImg)
+	{
+		VkImageCreateInfo ici{};
+		ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		ici.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+		ici.imageType = VK_IMAGE_TYPE_2D;
+		ici.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+		ici.extent = VkExtent3D{static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
+		ici.mipLevels = 1;
+		ici.arrayLayers = 6;
+		ici.samples = VK_SAMPLE_COUNT_1_BIT;
+		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+		ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		VkResult vr = c.fns.vkCreateImage(c.vdev, &ici, nullptr, &oImg);
+		if (vr != VK_SUCCESS)
+		{
+			oImg = VK_NULL_HANDLE;
+			note("vkCreateImage(cube) = " + pocbCode(vr));
+			return false;
+		}
+		VkMemoryRequirements req{};
+		c.fns.vkGetImageMemoryRequirements(c.vdev, oImg, &req);
+		VkPhysicalDeviceMemoryProperties mp{};
+		c.fns.vkGetPhysicalDeviceMemoryProperties(c.phys, &mp);
+		uint32_t pick = UINT32_MAX;
+		for (int pass = 0; pass < 2 && pick == UINT32_MAX; ++pass)
+			for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+			{
+				if (!(req.memoryTypeBits & (1u << i)))
+					continue;
+				if (pass == 0 && !(mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+					continue;
+				pick = i;
+				break;
+			}
+		if (pick == UINT32_MAX)
+		{
+			note("没有可用内存类型 (memoryTypeBits=" + std::to_string(req.memoryTypeBits) + ")");
+			cleanup();
+			return false;
+		}
+		VkMemoryAllocateInfo mai{};
+		mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		mai.allocationSize = req.size;
+		mai.memoryTypeIndex = pick;
+		vr = c.fns.vkAllocateMemory(c.vdev, &mai, nullptr, &oMem);
+		if (vr != VK_SUCCESS)
+		{
+			oMem = VK_NULL_HANDLE;
+			note("vkAllocateMemory(image) = " + pocbCode(vr));
+			cleanup();
+			return false;
+		}
+		if (c.fns.vkBindImageMemory(c.vdev, oImg, oMem, 0) != VK_SUCCESS)
+		{
+			note("vkBindImageMemory(image) 失败");
+			cleanup();
+			return false;
+		}
+	}
+
+	// --- 2) 上传源 buffer: HOST_VISIBLE|COHERENT (表里没有 vkInvalidateMappedMemoryRanges,
+	//          不 COHERENT 就没法保证 CPU 写对 GPU 可见 —— 与读回 buffer 同一条口径) ---
+	const VkDeviceSize need = (VkDeviceSize)w * (VkDeviceSize)h * 8ULL * 6ULL;
+	if (g_ssrV1CubeBuf && g_ssrV1CubeBufSz < need)
+	{
+		if (g_ssrV1CubeBuf) { c.fns.vkDestroyBuffer(c.vdev, g_ssrV1CubeBuf, nullptr); g_ssrV1CubeBuf = VK_NULL_HANDLE; }
+		if (g_ssrV1CubeBufMem) { c.fns.vkFreeMemory(c.vdev, g_ssrV1CubeBufMem, nullptr); g_ssrV1CubeBufMem = VK_NULL_HANDLE; }
+		g_ssrV1CubeBufPtr = nullptr;
+		g_ssrV1CubeBufSz = 0;
+	}
+	if (!g_ssrV1CubeBuf)
+	{
+		VkBufferCreateInfo bci{};
+		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bci.size = need;
+		bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+		bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		VkResult vr = c.fns.vkCreateBuffer(c.vdev, &bci, nullptr, &g_ssrV1CubeBuf);
+		if (vr != VK_SUCCESS)
+		{
+			g_ssrV1CubeBuf = VK_NULL_HANDLE;
+			note("vkCreateBuffer(上传) = " + pocbCode(vr));
+			return false;
+		}
+		VkMemoryRequirements req{};
+		c.fns.vkGetBufferMemoryRequirements(c.vdev, g_ssrV1CubeBuf, &req);
+		VkPhysicalDeviceMemoryProperties mp{};
+		c.fns.vkGetPhysicalDeviceMemoryProperties(c.phys, &mp);
+		uint32_t pick = UINT32_MAX;
+		for (uint32_t i = 0; i < mp.memoryTypeCount && pick == UINT32_MAX; ++i)
+			if ((req.memoryTypeBits & (1u << i)) &&
+			    (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+			    (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+				pick = i;
+		if (pick == UINT32_MAX)
+		{
+			note("没有 HOST_VISIBLE|COHERENT 内存类型");
+			c.fns.vkDestroyBuffer(c.vdev, g_ssrV1CubeBuf, nullptr);
+			g_ssrV1CubeBuf = VK_NULL_HANDLE;
+			return false;
+		}
+		VkMemoryAllocateInfo mai{};
+		mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		mai.allocationSize = req.size;
+		mai.memoryTypeIndex = pick;
+		vr = c.fns.vkAllocateMemory(c.vdev, &mai, nullptr, &g_ssrV1CubeBufMem);
+		if (vr != VK_SUCCESS)
+		{
+			g_ssrV1CubeBufMem = VK_NULL_HANDLE;
+			note("vkAllocateMemory(上传 buffer) = " + pocbCode(vr));
+			c.fns.vkDestroyBuffer(c.vdev, g_ssrV1CubeBuf, nullptr);
+			g_ssrV1CubeBuf = VK_NULL_HANDLE;
+			return false;
+		}
+		if (c.fns.vkBindBufferMemory(c.vdev, g_ssrV1CubeBuf, g_ssrV1CubeBufMem, 0) != VK_SUCCESS)
+		{
+			note("vkBindBufferMemory 失败");
+			c.fns.vkDestroyBuffer(c.vdev, g_ssrV1CubeBuf, nullptr);
+			g_ssrV1CubeBuf = VK_NULL_HANDLE;
+			c.fns.vkFreeMemory(c.vdev, g_ssrV1CubeBufMem, nullptr);
+			g_ssrV1CubeBufMem = VK_NULL_HANDLE;
+			return false;
+		}
+		if (c.fns.vkMapMemory(c.vdev, g_ssrV1CubeBufMem, 0, VK_WHOLE_SIZE, 0, &g_ssrV1CubeBufPtr) != VK_SUCCESS)
+		{
+			g_ssrV1CubeBufPtr = nullptr;
+			note("vkMapMemory(上传 buffer) 失败");
+			c.fns.vkDestroyBuffer(c.vdev, g_ssrV1CubeBuf, nullptr);
+			g_ssrV1CubeBuf = VK_NULL_HANDLE;
+			c.fns.vkFreeMemory(c.vdev, g_ssrV1CubeBufMem, nullptr);
+			g_ssrV1CubeBufMem = VK_NULL_HANDLE;
+			return false;
+		}
+		g_ssrV1CubeBufSz = need;
+	}
+
+	// --- 3) 灌数据 (每面紧密排列, 与 g_probeCpu 的排布一致) ---
+	memset(g_ssrV1CubeBufPtr, 0, static_cast<size_t>(need));
+	if (data)
+		memcpy(g_ssrV1CubeBufPtr, data, static_cast<size_t>(need));
+
+	// --- 4) 自己的 pool/fence/cmd: 上传会反复 begin, 借共用 pool 会把别人在录的命令一起 reset 掉 ---
+	if (!g_ssrV1CubePool)
+	{
+		VkCommandPoolCreateInfo pci{};
+		pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+		pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		pci.queueFamilyIndex = c.qfi;
+		if (c.fns.vkCreateCommandPool(c.vdev, &pci, nullptr, &g_ssrV1CubePool) != VK_SUCCESS)
+		{
+			g_ssrV1CubePool = VK_NULL_HANDLE;
+			note("vkCreateCommandPool(上传) 失败");
+			return false;
+		}
+		VkCommandBufferAllocateInfo cbai{};
+		cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		cbai.commandPool = g_ssrV1CubePool;
+		cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		cbai.commandBufferCount = 1;
+		if (c.fns.vkAllocateCommandBuffers(c.vdev, &cbai, &g_ssrV1CubeCmd) != VK_SUCCESS)
+		{
+			g_ssrV1CubeCmd = VK_NULL_HANDLE;
+			note("vkAllocateCommandBuffers(上传) 失败");
+			return false;
+		}
+	}
+	if (!g_ssrV1CubeFence && c.fns.vkCreateFence(c.vdev, nullptr, nullptr, &g_ssrV1CubeFence) != VK_SUCCESS)
+	{
+		g_ssrV1CubeFence = VK_NULL_HANDLE;
+		note("vkCreateFence(上传) 失败");
+		return false;
+	}
+	if (c.fns.vkResetCommandPool(c.vdev, g_ssrV1CubePool, 0) != VK_SUCCESS)
+	{
+		note("vkResetCommandPool(上传) 失败");
+		return false;
+	}
+
+	auto barrier = [&](VkImage img, VkImageLayout oldL, VkImageLayout newL,
+	                   VkAccessFlags srcA, VkAccessFlags dstA,
+	                   VkPipelineStageFlags srcS, VkPipelineStageFlags dstS) {
+		VkImageMemoryBarrier b{};
+		b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		b.srcAccessMask = srcA;
+		b.dstAccessMask = dstA;
+		b.oldLayout = oldL;
+		b.newLayout = newL;
+		b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		b.image = img;
+		b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6};
+		c.fns.vkCmdPipelineBarrier(g_ssrV1CubeCmd, srcS, dstS, 0, 0, nullptr, 0, nullptr, 1, &b);
+	};
+
+	VkCommandBufferBeginInfo cbb{};
+	cbb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	if (c.fns.vkBeginCommandBuffer(g_ssrV1CubeCmd, &cbb) != VK_SUCCESS)
+	{
+		note("vkBeginCommandBuffer(上传) 失败");
+		return false;
+	}
+	barrier(oImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+	        VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+	for (uint32_t L = 0; L < 6; ++L)
+	{
+		VkBufferImageCopy bc{};
+		bc.bufferOffset = (VkDeviceSize)w * (VkDeviceSize)h * 8ULL * (VkDeviceSize)L;
+		bc.bufferRowLength = 0; // 0 = 按 extent 紧密排列
+		bc.bufferImageHeight = 0;
+		bc.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, L, 1};
+		bc.imageOffset = VkOffset3D{0, 0, 0};
+		bc.imageExtent = VkExtent3D{static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
+		c.fns.vkCmdCopyBufferToImage(g_ssrV1CubeCmd, g_ssrV1CubeBuf, oImg,
+		                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bc);
+	}
+	barrier(oImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+	        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_BIT);
+	if (c.fns.vkEndCommandBuffer(g_ssrV1CubeCmd) != VK_SUCCESS)
+	{
+		note("vkEndCommandBuffer(上传) 失败");
+		return false;
+	}
+	c.fns.vkResetFences(c.vdev, 1, &g_ssrV1CubeFence);
+	VkSubmitInfo si{};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &g_ssrV1CubeCmd;
+	VkResult vr = c.fns.vkQueueSubmit(c.queue, 1, &si, g_ssrV1CubeFence);
+	if (vr == VK_SUCCESS)
+		vr = c.fns.vkWaitForFences(c.vdev, 1, &g_ssrV1CubeFence, VK_TRUE, 5000000000ULL);
+	if (vr != VK_SUCCESS)
+	{
+		note("vkQueueSubmit/vkWaitForFences(上传) = " + pocbCode(vr));
+		return false;
+	}
+
+	// --- 5) cube view ---
+	if (oView)
+		c.fns.vkDestroyImageView(c.vdev, oView, nullptr);
+	VkImageViewCreateInfo v{};
+	v.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	v.image = oImg;
+	v.viewType = VK_IMAGE_VIEW_TYPE_CUBE; // 必须是 CUBE, 不是 2D_ARRAY —— 采样器按 cube 走
+	v.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+	v.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6};
+	if (c.fns.vkCreateImageView(c.vdev, &v, nullptr, &oView) != VK_SUCCESS)
+	{
+		oView = VK_NULL_HANDLE;
+		note("vkCreateImageView(cube) 失败");
+		return false;
+	}
+	return true;
+}
+
+// 同步描述符 binding4 该指的那张图: 占位图必须有 (无论 edge 几), 真 cube 只在 edge>=2 且有数据时建。
+static bool ssrV1CubeSync(PocbCtx& c)
+{
+	if (!g_ssrV1DummyView)
+	{
+		if (!ssrV1CubeMake(c, 1, 1, nullptr, "占位", g_ssrV1DummyImg, g_ssrV1DummyMem, g_ssrV1DummyView))
+			return false;
+		logLine("SSR侦察: [v1-cube] 1×1 占位 cube 建好 (binding4 描述符恒有效)");
+	}
+	if (g_ssrV1Edge >= 2 && g_probeCpu && g_probeCpuTick != 0 &&
+	    (g_probeCpuTick != g_ssrV1CubeTick || !g_ssrV1CubeView ||
+	     g_ssrV1CubeW != g_probeW || g_ssrV1CubeH != g_probeH) &&
+	    g_probeCpuTick != g_ssrV1CubeBad)
+	{
+		if (g_ssrV1CubeView && (g_ssrV1CubeW != g_probeW || g_ssrV1CubeH != g_probeH))
+		{ // 尺寸换了 (换了分辨率/探针没升质) ⇒ 旧图作废重建
+			if (g_ssrV1CubeView) { c.fns.vkDestroyImageView(c.vdev, g_ssrV1CubeView, nullptr); g_ssrV1CubeView = VK_NULL_HANDLE; }
+			if (g_ssrV1CubeImg) { c.fns.vkDestroyImage(c.vdev, g_ssrV1CubeImg, nullptr); g_ssrV1CubeImg = VK_NULL_HANDLE; }
+			if (g_ssrV1CubeMem) { c.fns.vkFreeMemory(c.vdev, g_ssrV1CubeMem, nullptr); g_ssrV1CubeMem = VK_NULL_HANDLE; }
+			logLine("SSR侦察: [v1-cube] 探针尺寸变化 " + std::to_string(g_ssrV1CubeW) + "×" +
+			        std::to_string(g_ssrV1CubeH) + " → " + std::to_string(g_probeW) + "×" +
+			        std::to_string(g_probeH) + " → 重建");
+		}
+		if (ssrV1CubeMake(c, g_probeW, g_probeH, g_probeCpu, "真cube", g_ssrV1CubeImg, g_ssrV1CubeMem, g_ssrV1CubeView))
+		{
+			g_ssrV1CubeTick = g_probeCpuTick;
+			g_ssrV1CubeW = g_probeW;
+			g_ssrV1CubeH = g_probeH;
+			logLine("SSR侦察: [v1-cube] 真 cube 上传完成 " + std::to_string(g_probeW) + "² × 6 面, 第 " +
+			        std::to_string(g_probeCpuTick) + " 代 (ssr.edge=2 生效)");
+		}
+		else
+		{
+			g_ssrV1CubeBad = g_probeCpuTick;
+			logLine("SSR侦察: [v1-cube] 真 cube 上传失败 (第 " + std::to_string(g_probeCpuTick) +
+			        " 代) → 本代放弃, 绑定退回占位图");
+		}
+	}
+	g_ssrV1CubeSrc = g_ssrV1CubeView ? g_ssrV1CubeImg : g_ssrV1DummyImg;
+	return g_ssrV1CubeSrc != VK_NULL_HANDLE;
+}
+
 // 换设备: 旧 device 上的句柄**不能**拿来 destroy, 也不该在新 device 上引用 —— 只丢不毁
 static void ssrV1Drop()
 {
@@ -3355,6 +3738,22 @@ static void ssrV1Drop()
 	g_ssrV1Dsl = VK_NULL_HANDLE;
 	g_ssrV1SmpC = VK_NULL_HANDLE;
 	g_ssrV1SmpD = VK_NULL_HANDLE;
+	g_ssrV1SmpQ = VK_NULL_HANDLE;
+	g_ssrV1CubeImg = VK_NULL_HANDLE;   // 换设备: 旧句柄不能拿来 destroy, 只丢不毁
+	g_ssrV1CubeMem = VK_NULL_HANDLE;
+	g_ssrV1CubeView = VK_NULL_HANDLE;
+	g_ssrV1DummyImg = VK_NULL_HANDLE;
+	g_ssrV1DummyMem = VK_NULL_HANDLE;
+	g_ssrV1DummyView = VK_NULL_HANDLE;
+	g_ssrV1CubeBuf = VK_NULL_HANDLE;
+	g_ssrV1CubeBufMem = VK_NULL_HANDLE;
+	g_ssrV1CubeBufPtr = nullptr;
+	g_ssrV1CubePool = VK_NULL_HANDLE;
+	g_ssrV1CubeCmd = VK_NULL_HANDLE;
+	g_ssrV1CubeFence = VK_NULL_HANDLE;
+	g_ssrV1CubeSrc = VK_NULL_HANDLE;
+	g_ssrV1CubeTick = 0;
+	g_ssrV1CubeBad = 0;
 	g_ssrV1Set = VK_NULL_HANDLE;
 	g_ssrV1OutImg = VK_NULL_HANDLE;
 	g_ssrV1CSrc = VK_NULL_HANDLE;
@@ -3557,8 +3956,9 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		ssrV1DropViewW(c); // 水深图被退掉 (关闸/handle 变/设备变) ⇒ 摘 view, 描述符下次填回色
 	}
 
-	// --- 4) 采样器: 色线性 / 深 NEAREST, 都 clamp-to-edge (出屏兜底靠 clamp) ---
-	if (!g_ssrV1SmpC || !g_ssrV1SmpD)
+	// --- 4) 采样器: 色线性 / 深 NEAREST / 探针cube 线性, 都 clamp-to-edge (出屏兜底靠 clamp) ---
+	// cube 只允许 CLAMP_TO_EDGE, 正好与 mk 的默认一致; 探针 mips=1 ⇒ maxLod=0 也对。
+	if (!g_ssrV1SmpC || !g_ssrV1SmpD || !g_ssrV1SmpQ)
 	{
 		auto mk = [&](VkSampler& h, VkFilter f) -> bool {
 			VkSamplerCreateInfo s{};
@@ -3577,15 +3977,24 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 			return fail("vkCreateSampler(色) 建不出");
 		if (!g_ssrV1SmpD && !mk(g_ssrV1SmpD, VK_FILTER_NEAREST))
 			return fail("vkCreateSampler(深度) 建不出");
+		if (!g_ssrV1SmpQ && !mk(g_ssrV1SmpQ, VK_FILTER_LINEAR))
+			return fail("vkCreateSampler(探针cube) 建不出");
 	}
 
-	// --- 5) 描述符: 四个 COMBINED_IMAGE_SAMPLER (binding 0 色 / 1 深 / 2 底色 / 3 段后水深) ---
+	// v0.18.16: binding4 要指的那张 cube (占位必须有, 真 cube 看 P1 有没有读回数据)。
+	// 放在描述符填充**之前**, 因为那一步就要拿 view; 失败 = 连占位都建不出 ⇒ 关自己, 不留空 view。
+	if (!ssrV1CubeSync(c))
+		return fail("探针 cube 占位图建不出 → binding4 没有有效 view");
+
+	// --- 5) 描述符: 五个 COMBINED_IMAGE_SAMPLER (0 色 / 1 深 / 2 底色 / 3 段后水深 / 4 探针cube) ---
 	// v0.18.7: binding2 没底色时指向**色 view** (描述符必须始终有效), 由 push constant p3.w
 	// 告诉着色器采不采它 —— 免得出现"没底色却采了空 view"的未定义行为。
 	// v0.18.8: binding3 同理, 没水深时也指色 view, 由 p2.w 说了算。
+	// v0.18.16: binding4 是 samplerCube, **不能**指 2D view 兜底 (类型不匹配), 所以 ssrV1CubeSync
+	// 保证要么真 cube 要么 1×1 占位 cube, 描述符恒有一个合法的 cube view。
 	if (!g_ssrV1Dsl)
 	{
-		VkDescriptorSetLayoutBinding b[4]{};
+		VkDescriptorSetLayoutBinding b[5]{};
 		b[0].binding = 0;
 		b[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		b[0].descriptorCount = 1;
@@ -3596,9 +4005,11 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		b[2].binding = 2;
 		b[3] = b[0];
 		b[3].binding = 3;
+		b[4] = b[0];
+		b[4].binding = 4;
 		VkDescriptorSetLayoutCreateInfo li{};
 		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-		li.bindingCount = 4;
+		li.bindingCount = 5;
 		li.pBindings = b;
 		if (c.fns.vkCreateDescriptorSetLayout(c.vdev, &li, nullptr, &g_ssrV1Dsl) != VK_SUCCESS)
 			return fail("vkCreateDescriptorSetLayout 建不出");
@@ -3607,7 +4018,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 	{
 		VkDescriptorPoolSize ps{};
 		ps.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		ps.descriptorCount = 4;
+		ps.descriptorCount = 5;
 		VkDescriptorPoolCreateInfo pi{};
 		pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		pi.maxSets = 1;
@@ -3628,7 +4039,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		// 先填一次 (view 变了会在下面重新填; 未填的 set 绝不能提交)
 	}
 	{
-		VkDescriptorImageInfo di[4]{};
+		VkDescriptorImageInfo di[5]{};
 		di[0].sampler = g_ssrV1SmpC;
 		di[0].imageView = g_ssrV1ViewC;
 		di[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -3641,7 +4052,11 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		di[3].sampler = g_ssrV1SmpD;
 		di[3].imageView = g_ssrV1ViewW ? g_ssrV1ViewW : g_ssrV1ViewC;
 		di[3].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		VkWriteDescriptorSet w[4]{};
+		di[4].sampler = g_ssrV1SmpQ;
+		di[4].imageView = g_ssrV1CubeSrc == g_ssrV1CubeImg && g_ssrV1CubeView ? g_ssrV1CubeView
+		                                                                     : g_ssrV1DummyView;
+		di[4].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; // ssrV1CubeMake 上传完即转好
+		VkWriteDescriptorSet w[5]{};
 		w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		w[0].dstSet = g_ssrV1Set;
 		w[0].dstBinding = 0;
@@ -3657,7 +4072,10 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		w[3] = w[0];
 		w[3].dstBinding = 3;
 		w[3].pImageInfo = &di[3];
-		c.fns.vkUpdateDescriptorSets(c.vdev, 4, w, 0, nullptr);
+		w[4] = w[0];
+		w[4].dstBinding = 4;
+		w[4].pImageInfo = &di[4];
+		c.fns.vkUpdateDescriptorSets(c.vdev, 5, w, 0, nullptr);
 	}
 
 	// --- 6) framebuffer (出向图 view / 尺寸变了要重建) ---
@@ -3947,7 +4365,7 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		pc.p4[0] = g_ssrV1Ripple;
 		pc.p4[1] = static_cast<float>(g_ssrV1RippleSz);
 		pc.p4[2] = static_cast<float>(g_ssrV1RippleMode);
-		pc.p4[3] = static_cast<float>(g_ssrV1Edge);
+		pc.p4[3] = static_cast<float>(ssrV1EffEdge()); // v0.18.16: 有效 edge —— 没真 cube 时 2 会退成 0, 防 mix(baseRGB,全0,1) 黑水
 		// v0.18.14 p5 = (输入端软限幅阈值 / 位移幅度 / 梯度增益), 三者 0 = 自动 = v0.18.13 行为
 		// v0.18.15 p5.w = (原版高光回补量), 0 = 关 = v0.18.14 行为 —— 复用空槽, push constant 仍 96B
 		pc.p5[0] = g_ssrV1RipK;
