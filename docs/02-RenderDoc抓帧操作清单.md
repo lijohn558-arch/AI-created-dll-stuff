@@ -4448,4 +4448,14 @@ structure (p90-p50)  hit 0.2000  miss 0.1490   miss/hit = 0.745
 本版只保证「采得到、不是花屏」。
 
 **本地闸**：`make_shaders.ps1` OK（`ssr.frag.spv` **33228 B**）、`check1.ps1` **RESULT OK**、
-`quotescan3` **oddQuoteLines=0**。CI 结果以 push 后 `ci_once` 为准，本节不预写。
+`quotescan3` **oddQuoteLines=0**。**CI**：`2560b31` **FAILURE**，且**只有一条**编译错 ——
+`vkrenderer.cpp(3642): error C2065 'VK_PIPELINE_STAGE_FRAGMENT_BIT': undeclared identifier`
+（Vulkan 里从来没有 `FRAGMENT_BIT`，只有 `VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT`；
+同文件既有 8 处写的都是后者，新写的 cube 上传收尾 barrier 漏了 `_SHADER`）；
+`14b74c2` 一行对齐后 **SUCCESS**。
+
+> **取 CI 报错的新姿势**（旧 `cierr.ps1` / `get_log.ps1` 已失效）：Actions 日志 API 现在
+> 要求认证，`actions/runs/{id}/logs` 一律 **403**；但 **job 页的 Annotations 是公开的** ——
+> 无需登录、浏览器打开 job 页，`document.querySelectorAll('[class*="annotation"]')` 取
+> `innerText`，每条 `error C####` 是一个独立节点（本轮 2 条注解 = `exit code 2` + 唯一那条
+> `error C2065`）。所以**一次就能看全全部报错**，不用猜。
