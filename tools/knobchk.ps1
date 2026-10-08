@@ -38,8 +38,12 @@ if ($lines[$last] -match '^\[([0-9 :-]+)\]') { $stamp = $matches[1] }
 Write-Output ('last startup = ' + $stamp + '  ' + $ver + '  (line ' + $last + ')')
 
 # scan forward from that banner for the knob echo.
-# NOTE: the plugin echoes the short form (" v1det=0.300000"), while the ini key is "ssr.v1det"
-# => match EITHER the full key or the part after the last dot, or the gate always false-fails.
+# NOTE 1: the plugin echoes the short form (" v1det=0.300000"), while the ini key is "ssr.v1det"
+#         => match EITHER the full key or the part after the last dot, or the gate always false-fails.
+# NOTE 2: START AT $last+1. The banner line itself quotes old notes such as "14.30.5 debug=6",
+#         and matching on the banner line made knobchk read that number instead of the real echo
+#         (caught by pre-flight: -Key ssr.debug reported "used 6" from the banner, while the actual
+#         echo further down said debug=0). The banner is exactly one logLine, so $last+1 is safe.
 $full = [regex]::Escape($Key)
 $short = $Key
 $di = $Key.LastIndexOf('.')
@@ -47,7 +51,7 @@ if ($di -ge 0 -and $di -lt ($Key.Length - 1)) { $short = $Key.Substring($di + 1)
 $shortE = [regex]::Escape($short)
 $rx = '(?:' + $full + '|' + $shortE + ')\s*=\s*([-0-9.eE+]+)'
 $found = $false; $raw = ''; $at = -1
-for ($i = $last; $i -lt $lines.Count; $i++) {
+for ($i = $last + 1; $i -lt $lines.Count; $i++) {
     $m = [regex]::Match($lines[$i], $rx)
     if ($m.Success) { $found = $true; $raw = $m.Groups[1].Value; $at = $i; break }
 }
