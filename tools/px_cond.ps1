@@ -1,6 +1,13 @@
-param([string]$Mask, [string]$Add, [switch]$SceneChecked)
-# px_cond.ps1 -- controlled comparison: read the debug=8 addend CONDITIONED on the
+param([string]$Mask, [string]$Add, [switch]$SceneChecked, [switch]$Normal)
+# px_cond.ps1 -- controlled comparison: read a probe shot CONDITIONED on the
 #                hit/miss mask taken from a debug=2 shot of the SAME POSE.
+#
+# TWO MODES (same table, different question):
+#   default        -Add = ssr.debug=8  -> measures the ssr.v1det ADDEND  (sec14.31 sec9)
+#   -Normal        -Add = ssr.debug=0  -> measures the ORDINARY frame    (sec14.31 sec10 = P0)
+#                    question: how far is the MISS region behind the HIT region in the
+#                    NORMAL picture?  That gap IS issue B ("the fan area has no reflection"),
+#                    and it is the baseline that ssr.edge=2 must close.
 #
 # WHY THIS IS THE RIGHT EXPERIMENT (docs/02 sec14.31 sec8/9):
 #   debug=2 gives a perfect mask:   miss  =>  add == 0   BY CONSTRUCTION
@@ -13,9 +20,24 @@ param([string]$Mask, [string]$Add, [switch]$SceneChecked)
 #   sits above the miss distribution.  Comparing hit against a hard-coded
 #   threshold would silently credit the bleed as addend.
 #
-# RIGOROUS BOUND: bleed <= 0.1 (588 <= 1.0, 585 share 0.9) => y >= 0.10 can NEVER
-#   come from bleed alone, whatever the scene does.  y>=0.06 can (needs 588>=0.6).
-#   Both are reported; trust the y>=0.10 column first.
+# RIGOROUS BOUND (default mode only): bleed <= 0.1 (588 <= 1.0, 585 share 0.9)
+#   => y >= 0.10 can NEVER come from bleed alone, whatever the scene does.
+#   y>=0.06 can (needs 588>=0.6).  Trust the y>=0.10 column first.
+#   -Normal has NO such bound: there the miss group is a real picture, not a
+#   control, so the footer reports a HIT/MISS ratio instead of a verdict about
+#   addend.
+#
+# PIXEL VALUE = Rec.709 luma (0.2126 R + 0.7152 G + 0.0722 B), rounded to a byte
+#   first, then /255.  This is NOT the same as reading G, and the difference is
+#   small but real: a debug=8 pixel on screen is
+#       screen = mix(grey_readout, 588_scene, 0.1) = 0.9*grey + 0.1*scene
+#   and 588 IS COLOURED, so G carries a green-weighted scene bleed while luma
+#   carries the true scene brightness (the same quantity the shader itself uses:
+#   l8 = dot(add8, luma)).  Measured impact on an existing sec14.31 sec9 pair,
+#   G -> luma:  HIT y>=.10 19.82% -> 20.39%, ratio 4.94 -> 5.11 (pose B);
+#   14.24% -> 14.35%, ratio 4.36 -> 4.39 (pose A).  Verdicts unchanged.
+#   G alone would also mis-rank a full-colour debug=0 frame (blue sky vs green
+#   foliage), and -Normal reads exactly that, so one metric is used for both.
 #
 # REQUIRES THE TWO SHOTS TO SHARE A POSE.  check_frame is USELESS across debug
 # modes (it correlates the whole frame, and the water inverts black<->red/green,
@@ -79,19 +101,25 @@ for ($y = 0; $y -lt $H; $y++) {
         $cls = 0
         if ($d -ge $Tol) { $cls = 1 } elseif ($d -le -$Tol) { $cls = 2 }
         if ($cls -eq 0) { continue }
-        $yy = [int]$pa[$i+1] / 255.0                        # G of the ADDEND shot (grey anyway)
+        # Rec.709 luma, rounded to a byte BEFORE dividing: on a grey debug=8 readout
+        # 0.2126k+0.7152k+0.0722k rounds back to exactly k, so the bin index and every
+        # threshold reproduce the old G-only numbers bit-for-bit.  On a full-colour
+        # debug=0 frame G alone would mis-rank the pixels, which is why luma is used.
+        $yl = [int][Math]::Round(0.2126 * [int]$pa[$i+2] + 0.7152 * [int]$pa[$i+1] + 0.0722 * [int]$pa[$i])
+        if ($yl -lt 0) { $yl = 0 } elseif ($yl -gt 255) { $yl = 255 }
+        $yy = $yl / 255.0
         if ($cls -eq 1) {
             $nHit++; $sumH += $yy
             if ($yy -ge 0.10) { $hiH++ }
             if ($yy -ge 0.06) { $loH++ }
             if ($yy -gt $maxH) { $maxH = $yy }
-            $hh[[Math]::Min(255, [int]($yy * 255))]++
+            $hh[$yl]++
         } else {
             $nMiss++; $sumM += $yy
             if ($yy -ge 0.10) { $hiM++ }
             if ($yy -ge 0.06) { $loM++ }
             if ($yy -gt $maxM) { $maxM = $yy }
-            $hm[[Math]::Min(255, [int]($yy * 255))]++
+            $hm[$yl]++
         }
     }
 }
@@ -126,6 +154,45 @@ foreach ($g in @(@(1,'HIT '), @(2,'MISS'))) {
         ("{0,9:N2}%" -f (100.0*$hi/$n)).PadLeft(9))
 }
 Write-Output ""
+if ($Normal) {
+    $hMean = $sumH / $nHit;            $mMean = $sumM / $nMiss
+    $hP50  = Pctl $hh $nHit 0.50;       $mP50  = Pctl $hm $nMiss 0.50
+    $hP90  = Pctl $hh $nHit 0.90;       $mP90  = Pctl $hm $nMiss 0.90
+    $hP99  = Pctl $hh $nHit 0.99;       $mP99  = Pctl $hm $nMiss 0.99
+    $rMean = if ($hMean -gt 0.0001) { $mMean / $hMean } else { 0.0 }
+    $rP50  = if ($hP50  -gt 0.0001) { $mP50  / $hP50  } else { 0.0 }
+    $hStr  = $hP90 - $hP50
+    $mStr  = $mP90 - $mP50
+    $rStr  = if ($hStr -gt 0.0001) { $mStr / $hStr } else { 0.0 }
+    Write-Output "NORMAL-FRAME baseline for ISSUE B (queue #2, ssr.edge=2 must close this gap):"
+    Write-Output ("  mean   hit " + ("{0,7:N4}" -f $hMean) + "   miss " + ("{0,7:N4}" -f $mMean) + "   miss/hit = " + ("{0,6:N3}" -f $rMean))
+    Write-Output ("  p50    hit " + ("{0,7:N4}" -f $hP50)  + "   miss " + ("{0,7:N4}" -f $mP50)  + "   miss/hit = " + ("{0,6:N3}" -f $rP50))
+    Write-Output ("  p90    hit " + ("{0,7:N4}" -f $hP90)  + "   miss " + ("{0,7:N4}" -f $mP90)  + "   p99 hit " + ("{0,6:N4}" -f $hP99) + "  miss " + ("{0,6:N4}" -f $mP99))
+    Write-Output ("  structure (p90-p50)  hit " + ("{0,7:N4}" -f $hStr) + "   miss " + ("{0,7:N4}" -f $mStr) + "   miss/hit = " + ("{0,6:N3}" -f $rStr))
+    Write-Output ""
+    Write-Output "  p50 = brightness of the water (how much reflection is there at all)."
+    Write-Output "  structure = how much DETAIL/contrast (a real cubemap is structured, an"
+    Write-Output "  empty 585 fallback is flat).  HIT group = the SSR-reflecting band, MISS"
+    Write-Output "  group = the near field + screen sides that have no reflection today."
+    Write-Output ""
+    if ($rP50 -ge 0.90 -and $rStr -ge 0.60) {
+        Write-Output ("VERDICT: B is SMALL (p50 ratio " + ("{0:N3}" -f $rP50) + ", structure ratio " + ("{0:N3}" -f $rStr) + ").")
+        Write-Output "         The miss region already looks close to the hit region in the NORMAL"
+        Write-Output "         frame, i.e. v0.18.15 (A) has already flattened most of the fan edge."
+        Write-Output "         QUEUE #2 PRIORITY: LOW - do not spend the cross-API probe work on it"
+        Write-Output "         until a user-visible complaint survives this number."
+    } else {
+        Write-Output ("VERDICT: B CONFIRMED (p50 ratio " + ("{0:N3}" -f $rP50) + ", structure ratio " + ("{0:N3}" -f $rStr) + ").")
+        Write-Output "         The miss region is darker AND flatter than the hit region in the"
+        Write-Output "         NORMAL frame = issue B is real and still visible after A."
+        Write-Output "         ACCEPTANCE for ssr.edge=2: rerun this same pair; the p50 ratio must"
+        Write-Output "         rise toward 1.0 and structure must rise, while the HIT group stays put."
+    }
+    Write-Output ""
+    Write-Output "NOTE: the hit/miss SPLIT itself is pure geometry (ssr.edge/mode/camera) and"
+    Write-Output "      does NOT change with edge=2 - do not use px_hitmiss numbers as acceptance."
+    exit 0
+}
 Write-Output "MISS = control: its screen value is 0.9*0 + 0.1*588, i.e. PURE BLEED."
 Write-Output "HIT  = treatment.  Only a HIT figure above the MISS figure is addend."
 
