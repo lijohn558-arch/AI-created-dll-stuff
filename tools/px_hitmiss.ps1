@@ -82,13 +82,22 @@ for ($y = 0; $y -lt $H; $y++) {
             $gTot[$gy, $gxc]++
             if ($cls -eq 1) { $gHit[$gy, $gxc]++ }
         }
+        # NO `break` here.  The four named boxes do not overlap each other, but the
+        # trailing ALL box (0,0,1920,1080) overlaps ALL of them, so stopping at the
+        # first match silently excluded box pixels from ALL: the row then counted
+        # only the pixels OUTSIDE the four boxes while printing n = 1920*1080.
+        # Seen as water%+other% = 65.17% instead of 100%, and as
+        #   pose-B four-box water 646,449 + ALL water 653,225 = 1,299,674
+        # which is exactly px_cond's whole-frame hit+miss count - the two readers
+        # always agreed, only the ALL label lied.  Keep the loop unbroken: a pixel
+        # lands in its named box AND in ALL; pixels outside every named box land in
+        # ALL alone.  (Named-box rows are unchanged - they never overlapped anyway.)
         for ($bi = 0; $bi -lt $nb; $bi++) {
             $o = $bi * 5
             if ($x -ge $bx[$o+1] -and $x -lt $bx[$o+3] -and $y -ge $bx[$o+2] -and $y -lt $bx[$o+4]) {
                 if ($cls -eq 1) { $hit[$bi]++ }
                 elseif ($cls -eq 2) { $miss[$bi]++ }
                 else { $oth[$bi]++ }
-                break
             }
         }
     }
@@ -117,6 +126,8 @@ for ($bi = 0; $bi -lt $nb; $bi++) {
 }
 Write-Output ""
 Write-Output "hit% / miss% are OF THE CLASSIFIED WATER PIXELS ONLY - other% is scene / non-water."
+Write-Output "ALL is the WHOLE FRAME and re-counts the four boxes on purpose:"
+Write-Output "        ALL water == four-box water + water outside the boxes."
 Write-Output "CAVEAT: boxes are pose-FIXED (framed for v0.18.14).  Run px_v1det -Mark on the shot"
 Write-Output "        first, or these rectangles may be measuring rock instead of water."
 
