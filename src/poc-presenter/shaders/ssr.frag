@@ -489,7 +489,7 @@ void main()
 		if (w8 > 0.0001)
 		{
 			float lb8 = dot(baseRGB, vec3(0.2126, 0.7152, 0.0722));
-			float gb8 = smoothstep(0.35, 0.85, lb8);
+			float gb8 = smoothstep(0.10, 0.45, lb8);
 			add8 = max(baseRGB - refl, vec3(0.0)) * (gb8 * w8);
 		}
 		float l8 = dot(add8, vec3(0.2126, 0.7152, 0.0722));
@@ -524,13 +524,19 @@ void main()
 	// 修法: 只在 SSR 真正接管的像素上 (wSsr = strength * 贴边淡出权重), 把 baseRGB 比 refl
 	//       亮出来的那部分按 det 加回去 —— 亮处取二者较亮的一侧, 暗处不动 (max 只会补不会压)。
 	//       lb/gb 是绝对亮度门, 只让原版本身够亮的像素参与, 防止中等亮度整片倒回原版层削弱 SSR。
+	// v0.18.15 实跑重标定 0.35/0.85 -> 0.10/0.45 (§14.31 实拍, 门限原来定在被门控层的分布之外):
+	//       debug=7 实测 baseRGB 三块水面 meanL = 0.2125 / 0.2355 / 0.3258, 而 luma>=0.35 的像素
+	//       只占 10.1% / 6.1% / 24.4% —— 旧门限 0.35 **高于该层亮度中位数 (0.21~0.33)**, 等于把
+	//       76~94% 的水面挡在门外, debug=8 热力图因此几乎全黑。新门限把下沿放到水体典型亮度
+	//       之下 (0.10), 满量程收到 0.45; 亮片仍满开, 水体部分参与。安全性不变: max(baseRGB-refl,0)
+	//       只加不减 + v1det 缩放 + wSsr 命中门, 且本块 v1det=0 整块不进 = 逐位 v0.18.14。
 	// 门: miss ⇒ wSsr=0 ⇒ 纯原版逐位不动; det=0 ⇒ 整块不进 ⇒ 退化成原合成式 = 逐位 v0.18.14。
 	float wSsr = hit ? (k * bf) : 0.0;
 	vec3 outRGB = mix(baseRGB, refl, k);
 	if (v1det > 0.001 && wSsr > 0.0001)
 	{
 		float lb = dot(baseRGB, vec3(0.2126, 0.7152, 0.0722));
-		float gb = smoothstep(0.35, 0.85, lb);
+		float gb = smoothstep(0.10, 0.45, lb);
 		outRGB += max(baseRGB - refl, vec3(0.0)) * (v1det * gb * wSsr);
 	}
 	oColor = vec4(outRGB, base.a);
