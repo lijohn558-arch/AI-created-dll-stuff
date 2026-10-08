@@ -1328,7 +1328,7 @@ int   g_ssrV1Debug = 0;             // ini ssr.debug  0 正常 / 1 法线 / 2 �
 float g_ssrV1Ripple = 1.0f;         // ini ssr.ripple 涟漪回注量 0..1 (v0.18.9: 段16 的高频涟漪调制乘回 SSR)
 int   g_ssrV1RippleSz = 4;          // ini ssr.ripplesz 回注带宽 (px, 1..16) —— v0.18.10: 治"波纹非常细小" (原写死 2px)
 int   g_ssrV1RippleMode = 1;        // ini ssr.ripplemode 0=亮度调制 1=位移扭曲 —— v0.18.10: 原版涟漪本是方向扰动
-int   g_ssrV1Edge = 0;              // ini ssr.edge 0=未命中回原版层(默认) 1=屏幕边缘延展 —— v0.18.11: 治"扇形区内错位倒影"
+int   g_ssrV1Edge = 0;              // ini ssr.edge 0=未命中回原版层(默认) 1=屏幕边缘延展 2=采真 cubemap —— v0.18.11: 治"扇形区内错位倒影"
                                     //            2=未命中采真 cubemap —— v0.18.16 (issue B), 读入时钳到 0..2
 // ---- v0.18.14 回注三旋钮 (三个默认 0 = 全部沿用 v0.18.13 行为, 零回归) ----
 float g_ssrV1RipK = 0.0f;    // ini ssr.ripk   输入端软限幅阈值 (线性亮度) 0=关 —— 治位移场被亮斑劫持成 4~8px 细碎饱和块
@@ -3141,7 +3141,7 @@ void installProbeOn(ID3D11Device* dev)
 			        "6 回注可视化/7 uBase 原样)");
 			g_ssrV1Debug = 0;
 		}
-		// v0.18.10: 回注带宽 1..16 px, 回注方式 0/1; v0.18.11: 未命中回退源 0/1
+		// v0.18.10: 回注带宽 1..16 px, 回注方式 0/1; v0.18.11: 未命中回退源 0/1/2 (2 = v0.18.16 采真 cubemap)
 		if (g_ssrV1RippleSz < 1 || g_ssrV1RippleSz > 16)
 		{
 			logLine("SSR侦察: ssr.ripplesz 不合法 (" + std::to_string(g_ssrV1RippleSz) +
@@ -3150,8 +3150,23 @@ void installProbeOn(ID3D11Device* dev)
 		}
 		if (g_ssrV1RippleMode != 0)
 			g_ssrV1RippleMode = 1;
-		if (g_ssrV1Edge != 0)
+		// v0.18.16b 定案: ssr.edge 现在是 0/1/2 三档 (0 = 未命中回原版层 / 1 = 屏幕边缘延展 /
+		// 2 = 未命中采真 cubemap)。这里原本是 v0.18.11 的老钳位「非 0 一律钳成 1」—— 那时只有
+		// 两档, P2 加档位 2 时忘了放开这道钳, 于是 2 被**静默**改成 1 而且不打日志:
+		//   · ssrV1CubeSync 的 `g_ssrV1Edge >= 2` 闸永假 => 真 cube 永远不上传
+		//     (日志全程搜不到「真 cube 上传完成」, 也搜不到 ssrV1EffEdge 的「还没就绪」)
+		//   · pc.p4.w 恒 = 1 => shader 走 v0.18.11 的边缘延展 refl = texture(uColor, ruv),
+		//     采的是**屏幕自己**而不是 uProbe
+		// 实拍坐实 (v0.18.16a, 零代码三证): ① ini 回显 ssr.edge=2 但下一行生效值 edge=1;
+		// ② 转 180 度后倒影内容跟着世界变 (屏幕空间才会这样, 世界 cube 不会);
+		// ③ 左右窄带逐位不变 = lastUV == uv 回原版层 —— 正是用户报的那小块没变的水面。
+		// => 改成按 0..2 钳, 只有真越界才回退, 并补日志 (老钳位是无声的)。
+		if (g_ssrV1Edge < 0 || g_ssrV1Edge > 2)
+		{
+			logLine("SSR侦察: ssr.edge 不合法 (" + std::to_string(g_ssrV1Edge) +
+			        ") → 回退 1 (0 回原版层 / 1 屏幕边缘延展 / 2 采真 cubemap)");
 			g_ssrV1Edge = 1;
+		}
 		// v0.18.14: 三个旋钮 0 = 关/自动, 只夹负值与离谱上限 (ripk 实机扫 0.02~0.4, 上限给 4)
 		if (g_ssrV1RipK < 0.0f)
 			g_ssrV1RipK = 0.0f;
