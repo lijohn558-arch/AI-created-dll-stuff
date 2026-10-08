@@ -126,6 +126,47 @@ for ($bi = 0; $bi -lt $nb; $bi++) {
     Write-Output $row
 }
 
+# Floor test.  The 585/588 composite puts a floor at l=0.0324 => y=0.0314 (byte 8).
+# The heat map bins on y, so that floor lands in the '-' bin (y<0.06): a SEA OF '-' IS
+# BLEED, NOT ADDEND.  Reading the map by eye therefore reports "looks like something"
+# for a shot that adds nothing.  Only y>=0.06 (byte>=102) is real addend.  Read this.
+Write-Output ""
+Write-Output "floor test (588 bleed l=0.0324 => y=0.0314 => byte 8;  real addend = y>=0.06 = byte>=102):"
+$fh = 'box     ' + '<=.001'.PadLeft(9) + '<.02'.PadLeft(9) + '<.06'.PadLeft(9) + '<.15'.PadLeft(9) +
+      '<.40'.PadLeft(9) + '>=.40'.PadLeft(9) + 'ABOVE-FLOOR'.PadLeft(14)
+Write-Output $fh
+for ($bi = 0; $bi -lt $nb; $bi++) {
+    $n = $cnt[$bi]
+    $b0 = 0L; $b1 = 0L; $b2 = 0L; $b3 = 0L; $b4 = 0L; $b5 = 0L
+    for ($v = 0; $v -lt 256; $v++) {
+        $c = $hist[$bi, $v]
+        if ($c -eq 0) { continue }
+        if ($v -eq 0) { $b0 += $c }
+        elseif ($v -le 5)   { $b1 += $c }
+        elseif ($v -le 15)  { $b2 += $c }
+        elseif ($v -le 38)  { $b3 += $c }
+        elseif ($v -le 101) { $b4 += $c }
+        else                { $b5 += $c }
+    }
+    $row = ([string]$bx[$bi*5]).PadRight(7)
+    $row += ("{0,8:N2}%" -f (100.0 * $b0 / $n)).PadLeft(9)
+    $row += ("{0,8:N2}%" -f (100.0 * $b1 / $n)).PadLeft(9)
+    $row += ("{0,8:N2}%" -f (100.0 * $b2 / $n)).PadLeft(9)
+    $row += ("{0,8:N2}%" -f (100.0 * $b3 / $n)).PadLeft(9)
+    $row += ("{0,8:N2}%" -f (100.0 * $b4 / $n)).PadLeft(9)
+    $row += ("{0,8:N2}%" -f (100.0 * $b5 / $n)).PadLeft(9)
+    $row += ("{0,13:N2}%" -f (100.0 * ($b3 + $b4 + $b5) / $n)).PadLeft(14)
+    Write-Output $row
+}
+Write-Output "CAVEAT: ABOVE-FLOOR is the only number here that means 'this shot actually added light'."
+Write-Output "        nz% above counts every byte >0, i.e. the bleed itself, and must never be used as"
+Write-Output "        'fraction with addend'.  A water box at ~0% is a NEGATIVE result, not a bad box."
+Write-Output "CAVEAT: these buckets read the B channel, same as the heat map above (so map and table"
+Write-Output "        always agree).  debug=8's own output IS grey, but the screen shows mix(585,588,w)"
+Write-Output "        and 588 is COLOURED scene -> on bleed-only pixels B != luma.  Water boxes are"
+Write-Output "        insensitive to that choice (verified: nearL 3.01% / nearR 0.00% under both B and"
+Write-Output "        luma); divergences show up only in coloured scene pixels (far, the rock in midR)."
+
 Write-Output ""
 Write-Output "CAVEAT: the four boxes are pose-FIXED (framed for the v0.18.14 shot).  Once the camera"
 Write-Output "        moves they measure land / HUD instead of water and the numbers above are garbage."
