@@ -3639,7 +3639,7 @@ static bool ssrV1CubeMake(PocbCtx& c, int w, int h, const void* data, const char
 	}
 	barrier(oImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 	        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-	        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_BIT);
+	        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 	if (c.fns.vkEndCommandBuffer(g_ssrV1CubeCmd) != VK_SUCCESS)
 	{
 		note("vkEndCommandBuffer(上传) 失败");
