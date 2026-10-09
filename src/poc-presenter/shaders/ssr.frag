@@ -498,6 +498,8 @@ void main()
 //                只在**采 uProbe 这一步**把 Rf 旋到世界空间 (p6 四元数), 再乘 p7.xyz 轴符号。
 	//                只动 refl, **不碰 hit** ⇒ hit/miss 分裂仍是纯几何 (mask 图逐位不变), 也**不碰 wSsr**
 	//                (miss 恒 0) ⇒ v1det 回补块在 miss 区照旧不进 = A 的读数逐位不动。
+	//                v0.18.20 推翻上面这条: edge=2 时 miss 也进回补门 (uProbe 顶掉 585 层高光的补偿),
+	//                edge<=1 语义不变 ⇒ A 的读数 (edge<=1 口径) 仍逐位不动, v1det=0 也逐位不动。
 	//                mode0 / 无深度在上面那个提前返回里就 oColor=base 走掉了, 根本到不了这里 ⇒ 透传契约不破。
 	if (!hit)
 	{
@@ -513,7 +515,10 @@ void main()
 					vec3 rw = Rf + 2.0 * cross(qv, cross(qv, Rf) + pc.p6.w * Rf);
 					d = normalize(rw) * pc.p7.xyz;
 				}
-				refl = texture(uProbe, d).rgb;
+				// v0.18.20: 隐式 LOD 按 d 的屏幕导数取 mip —— 平缓水面相邻像素的方向导数趋零,
+				// 顶格采到最高层 mip, 等于在游戏原生内容上又叠一层糊 (实拍: 地形色块在、草树影像无);
+				// uProbe 本来就是 1024² 原生抓取层 ⇒ 显式 LOD 0 直接用原生分辨率。
+				refl = textureLod(uProbe, d, 0.0).rgb;
 			}
 			else
 				refl = baseRGB;
@@ -545,7 +550,7 @@ void main()
 	if (pc.p3.z > 7.5)
 	{
 		float k8 = clamp(pc.p1.z, 0.0, 1.0);
-		float w8 = hit ? (k8 * bf) : 0.0;
+		float w8 = hit ? (k8 * bf) : ((pc.p4.w > 1.5) ? k8 : 0.0); // v0.18.20: 与 wSsr 新式逐项同式 (miss 回补只在 edge=2 进), edge<=1 逐位旧式
 		vec3 add8 = vec3(0.0);
 		if (w8 > 0.0001)
 		{
@@ -592,7 +597,11 @@ void main()
 	//       之下 (0.10), 满量程收到 0.45; 亮片仍满开, 水体部分参与。安全性不变: max(baseRGB-refl,0)
 	//       只加不减 + v1det 缩放 + wSsr 命中门, 且本块 v1det=0 整块不进 = 逐位 v0.18.14。
 	// 门: miss ⇒ wSsr=0 ⇒ 纯原版逐位不动; det=0 ⇒ 整块不进 ⇒ 退化成原合成式 = 逐位 v0.18.14。
-	float wSsr = hit ? (k * bf) : 0.0;
+	// v0.18.20: 上面 17 版契约 (miss 恒 0) 到 edge=2 时破了 —— uProbe 顶掉 baseRGB 的同时把
+	// 585 层里游戏现算的 specular (白亮斑) 也顶掉了, 回补门却没开 ⇒ miss 区高光丢失 (实拍坐实)。
+	// edge=2 时 miss 也给回补权重: max(baseRGB-refl,0) 只在 base 更亮处生效 (高光处差值大,
+	// cube 更亮处为 0) ⇒ 天然只补不压; edge<=1 时 miss 仍 0 ⇒ 逐位 v0.18.19, v1det=0 也逐位不动。
+	float wSsr = hit ? (k * bf) : ((pc.p4.w > 1.5) ? k : 0.0);
 	vec3 outRGB = mix(baseRGB, refl, k);
 	if (v1det > 0.001 && wSsr > 0.0001)
 	{
