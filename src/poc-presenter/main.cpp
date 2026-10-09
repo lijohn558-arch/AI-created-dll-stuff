@@ -1359,28 +1359,47 @@ float g_ssrV1Det = 0.0f; // ini ssr.v1det 回补量 0..1, 0 = 关 = v0.18.14 行
 // ---- v0.18.18 (docs/02 条目18): 单槽死锁修复 —— VS cb 槽 0..13 全扫 + 每槽独立 staging ----
 // 17 的自动轮槽判据是"解析连续 180 次无候选", 而拷贝又要求"轮到的槽上有非空绑定" ⇒ 从没
 // 拷过 = 从没解析过 = 判据计数永不增长 ⇒ 永远卡槽0 (实拍日志全程仅 1 次解析, q 恒 0)。
-// 18 改成: camslot=-1 时 14 槽全扫 (拷贝不依赖解析结果), 首个产出正交候选的槽自动锁定
-// (g_camLockSlot), 锁后收敛回单槽; camCensus 每 ~300 帧报一次各槽绑定普查。
+// ---- v0.18.19 (docs/02 条目19): 18 实拍锁错槽 (槽8 = per-draw 数据, q 乱跳) 的三层修 ----
+// ① camBlockOk 改**列正交**检测: 纯 view 正交, view-projection 合并 = 旋转×列缩放
+//    diag(f/a, f, Q) ⇒ 列正交; 按列长归一化还原旋转, det<0 翻第三列 (D3D 透视 Q<0)。
+// ② 每槽跟踪至多 kCamEntN 个不同 buffer (相机 cb 不一定是该槽首绑)。
+// ③ 锁定判据改稳定度: 候选率 ≥95% 且主 offset 占比 ≥90% 才锁 (per-draw 垃圾锁不上);
+//    **锁前 q 不发布** (p7.w=0 = 16d 安全画面), 锁后才转。
 float g_ssrV1CamQ[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // (x,y,z,w) 单位四元数, v_view → v_world
 float g_ssrV1CamFlip[3] = {1.0f, 1.0f, 1.0f};    // (±1,±1,±1) cube 轴符号 — ini ssr.cubeflip
 int   g_ssrV1CamOn = 1;                          // ini ssr.camrot 0=关 1=开 (默认开; 读不到 q 自动无效)
 static const int kCamSlotN = 14; // VS 常量缓冲槽 0..13 (docs/analysis/d3d11-ctx-slots.txt 权威表)
-static int   g_ssrCamSlot = -1; // ini ssr.camslot  -1=全扫 (锁定前 14 槽都拷) 0..13=只读固定槽
-static int   g_ssrCamIdx = 0;   // ini ssr.camidx   候选 4x4 下标 (日志列出候选后人工选)
+static const int kCamEntN = 6;   // 每槽最多跟踪 6 个不同 buffer (首绑之外再登记后续新指针)
+static int   g_ssrCamSlot = -1; // ini ssr.camslot  -1=全扫 (锁定前全部条目都拷) 0..13=只扫该槽
+static int   g_ssrCamIdx = 0;   // ini ssr.camidx   锁定条目内候选 4x4 下标 (日志列出候选后人工选)
 static int   g_ssrCamConj = 0;  // ini ssr.camconj  0=直接用 1=取共轭 (view/invView 与行列存法二义)
-static int   g_camLockSlot = -1; // 全扫时首个产出候选的槽 (锁后只拷/只发布该槽; ini 固定槽时不锁)
-static ID3D11Buffer* g_camStg[kCamSlotN] = {};    // 每槽独立 STAGING (按源 desc 惰性重建)
-static unsigned      g_camStgW[kCamSlotN] = {};   // 源 ByteWidth 身份 (变了才重建)
-static unsigned      g_camStgM[kCamSlotN] = {};   // 源 MiscFlags 身份
-static unsigned      g_camStgS[kCamSlotN] = {};   // 源 StructureByteStride 身份
-static uint64_t      g_camCopyFr[kCamSlotN] = {}; // 该槽已尝试拷贝的帧号 (每帧每槽至多 1 次)
-static bool          g_camPend[kCamSlotN] = {};   // 该槽有未读回的拷贝
-static long          g_camLogN = 0;        // [cam] 解析次数 (日志节流: 前 6 次后每 128 次)
-// ---- v0.18.18 绑定普查 (camCensus): 每槽计数, 每 ~300 帧打一行 —— 一拍看全谁绑在哪 ----
+// ---- 每 (槽,条目) 一个观察对象: 不同源 buffer 各自独立 staging/帧闸/解析统计 ----
+struct CamEnt
+{
+	ID3D11Buffer* ptr;   // 源 buffer 身份 (登记后不变; 每帧帧闸按它查)
+	ID3D11Buffer* stg;   // 该条目独立 STAGING (按源 desc 三身份惰性重建)
+	unsigned      w;     // 源 ByteWidth 身份
+	unsigned      m;     // 源 MiscFlags 身份
+	unsigned      s;     // 源 StructureByteStride 身份
+	uint64_t      copyFr; // 已尝试拷贝的帧号 (每帧每条目至多 1 次)
+	uint64_t      seenFr; // 最近一次见到该 ptr 被绑定的帧号 (久未见可被换出, 防加载屏占位)
+	bool          pend;   // 有未读回的拷贝
+	long          parses; // 累计解析次数 (跨普查窗口累计)
+	long          cands;  // 累计有候选的解析次数
+	int           off;    // 最近一次选中候选的 offset (近似众数的当前值)
+	int           offCnt; // 选中 offset 命中 off 的次数 (众数计数)
+	float         q[4];   // 该条目最近一次发布的 q (普查行展示用)
+};
+static CamEnt g_camEnt[kCamSlotN][kCamEntN] = {};
+static int   g_camLockS = -1; // 稳定度锁定的槽 (-1 = 未锁; 锁前 q 不发布)
+static int   g_camLockE = -1; // 稳定度锁定的条目
+static long  g_camLogN = 0;   // [cam] 解析次数 (日志节流: 前 6 次后每 128 次)
+// ---- 绑定普查 (camCensus): 每槽计数, 每 ~300 帧打一行 —— 一拍看全谁绑在哪 ----
 static uint32_t      g_camCenBind[kCamSlotN] = {}; // 区间内非空绑定次数
 static uint32_t      g_camCenNull[kCamSlotN] = {}; // 区间内空绑定次数
-static uint32_t      g_camCenCpy[kCamSlotN] = {};  // 区间内实际拷贝次数
+static uint32_t      g_camCenCpy[kCamSlotN] = {};  // 区间内实际拷贝次数 (各条目合计)
 static unsigned      g_camCenW[kCamSlotN] = {};    // 最近一次拷贝的 ByteWidth
+static long          g_camCenOvf[kCamSlotN] = {};  // 槽内第 kCamEntN+1 个不同 buffer 被忽略的计数
 static uint64_t      g_camCenNext = 0; // 下次打普查行的帧号
 static uint64_t      g_camCenFr0 = 0;  // 本区间起始帧号 (行内报帧数做归一)
 static uint32_t      g_camCenN = 0;    // 普查行序号
@@ -2882,50 +2901,73 @@ static void STDMETHODCALLTYPE hookedClearRTV(ID3D11DeviceContext* ctx, ID3D11Ren
 }
 
 // ---- v0.18.17 P3 相机朝向 (方案 B): VSSetConstantBuffers 观察钩 + 读回解析 ----
-// ---- v0.18.18: 单槽死锁修复 —— VS cb 槽 0..13 全扫 + 每槽独立 staging + 绑定普查 ----
-// 观察链路 (只读, 不动游戏的任何绑定): camslot=-1 时本帧对**每个** VS 常量缓冲槽取第一次
-// 非空绑定的 ID3D11Buffer → 当场 CopyResource 到该槽自建 STAGING (插件自己的拷贝包
-// g_ssrSelfCopy, 不进 [2a] 的 COPY= 计数与身份学习) → 下一帧 notePresent 里 Map 读回 →
-// 扫 16B 对齐的 4x4 找正交旋转块 → 提取四元数发布 (g_ssrV1CamQ, 消费方 = ssr.frag 的 p6)。
+// ---- v0.18.18: 槽 0..13 全扫; v0.18.19: 列正交检测 + 每槽多条目 + 稳定度锁定 ----
+// 观察链路 (只读, 不动游戏的任何绑定): camslot=-1 时本帧对**每个** VS 常量缓冲槽登记其
+// 绑定的 ID3D11Buffer (至多 kCamEntN 个不同指针 —— 相机 cb 不保证是首绑) → 各条目当场
+// CopyResource 到自己的 STAGING (插件自己的拷贝包 g_ssrSelfCopy, 不进 [2a] 的 COPY=
+// 计数与身份学习) → 下一帧 notePresent 里 Map 读回 → 扫 16B 对齐的 4x4 找列正交旋转块
+// → 提取四元数发布 (g_ssrV1CamQ, 消费方 = ssr.frag 的 p6)。
 // 为什么当场拷: 本帧此刻 buffer 的内容就是本帧相机 (游戏每帧更新同一块全局常量), 拷贝紧跟
 // 绑定进入 immediate context 的记录流, GPU 时间线顺序天然正确。
-// 每帧每槽至多 1 次 (g_camCopyFr[slot] 帧号闸); 其余成百上千次调用在整型比较上早退。
-// 首个产出正交候选的槽被锁定 (g_camLockSlot) —— 14 槽全扫的多槽拷贝只发生在尚未找到相机
-// 的阶段, 锁后与 camslot 固定同价 (单槽拷贝)。
-static void camStgRelease(int s)
+// 每帧每条目至多 1 次 (CamEnt.copyFr 帧号闸); 其余成百上千次调用在整型比较上早退。
+// 锁定 (g_camLockS/E) = 候选率与主 offset 双达标 (camCensus 窗口判定) —— 锁前 q 不发布,
+// 锁后只拷/只发布锁定条目, 收敛回单条目成本。
+static void camStgRelease(int s, int e)
 {
-	if (g_camStg[s])
+	CamEnt& ce = g_camEnt[s][e];
+	if (ce.stg)
 	{
-		g_camStg[s]->Release();
-		g_camStg[s] = nullptr;
+		ce.stg->Release();
+		ce.stg = nullptr;
 	}
-	g_camStgW[s] = 0;
-	g_camStgM[s] = 0;
-	g_camStgS[s] = 0;
-	g_camPend[s] = false;
+	ce.w = 0;
+	ce.m = 0;
+	ce.s = 0;
+	ce.pend = false;
 }
 
-// 打包行主序 3x3 是否正交旋转: 行两两正交、单位长、det≈+1。**转置也正交** ⇒ 行列存法与
-// view/invView 的二义**都只差一个共轭**, 统一交给 ssr.camconj 一位选; det=-1 是镜像, 舍。
-static bool camBlockOk(const float* r)
+// 打包行主序 3x3 → **原地归一化**为旋转 (v0.18.19 列正交广义检测)。
+// 纯 view = 正交阵 (行列都正交); view-projection 合并 = 视图旋转 × 投影对角缩放:
+//   行主序存法 A = R·diag(f/a, f, Q)  ⇒ **列**正交 (各列 = 列长 × R 的单位列);
+//   列主序存法 A = diag(f/a, f, Q)·Rᵀ ⇒ **行**正交。
+// 判据: 先试列 (长窗 + 两两正交相对容差 1e-3) 归一化, 不行再试行; 归一化后 det<0 =
+// D3D 透视 Q<0 的负号 ⇒ 翻第三列/行还原 det=+1 的真旋转。纯正交阵是特例 (缩放=1)
+// ⇒ v0.18.18 行为全兼容; 转置/行列二义仍都只差共轭 (ssr.camconj), 轴符号交 cubeflip。
+static bool camOrthoSide(float* r, bool colMode)
 {
-	auto dot3 = [](const float* a, const float* b) {
-		return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-	};
-	const float* rows[3] = {r, r + 3, r + 6};
-	for (int i = 0; i < 3; ++i)
+	auto at = [r, colMode](int i, int j) -> float& { return colMode ? r[j * 3 + i] : r[i * 3 + j]; };
+	float ln[3];
+	for (int k = 0; k < 3; ++k)
 	{
-		const float n2 = dot3(rows[i], rows[i]);
-		if (n2 < 0.998f || n2 > 1.002f) // |len-1| < 1e-3  ⇔  len² ∈ (0.998, 1.002)
+		const float n2 = at(k, 0) * at(k, 0) + at(k, 1) * at(k, 1) + at(k, 2) * at(k, 2);
+		if (n2 < 0.0025f || n2 > 400.0f) // 线长² ∈ (0.05², 20²): 相机 f=1/tan(fov/2)≈1.7, Q≈±1
 			return false;
+		ln[k] = std::sqrt(n2);
 	}
 	for (int i = 0; i < 3; ++i)
 		for (int j = i + 1; j < 3; ++j)
-			if (std::fabs(dot3(rows[i], rows[j])) > 1e-3f)
+		{
+			const float d = at(i, 0) * at(j, 0) + at(i, 1) * at(j, 1) + at(i, 2) * at(j, 2);
+			if (std::fabs(d) > 1e-3f * ln[i] * ln[j]) // 正交 (相对容差; 投影缩放不参与)
 				return false;
+		}
+	for (int i = 0; i < 3; ++i)
+		for (int j = 0; j < 3; ++j)
+			at(i, j) /= ln[i]; // 按线归一化 → N = R·diag(sign) 或 diag(sign)·Rᵀ
 	const float det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) +
 	                  r[2] * (r[3] * r[7] - r[4] * r[6]);
-	return std::fabs(det - 1.0f) < 1e-3f;
+	if (det < 0.0f)
+	{ // D3D 透视 Q<0 (或列主序同款负号): 翻第三线 → det=+1 的真旋转
+		for (int j = 0; j < 3; ++j)
+			at(2, j) = -at(2, j);
+	}
+	return true;
+}
+static bool camBlockOk(float* r)
+{
+	if (camOrthoSide(r, true))  // 列正交: 行主序 V / 行主序 VP
+		return true;
+	return camOrthoSide(r, false); // 行正交: 列主序存法 (diag·Rᵀ)
 }
 
 // 打包行主序 3x3 → 四元数 (Shepperd 取最大主元), 出参已归一化; 退化返回 false。
@@ -2973,14 +3015,16 @@ static bool camQuat(const float* r, float* q)
 	return true;
 }
 
-// 读回解析: 每 16B 对齐偏移试一个 4x4 的左上 3x3 → 候选表 → 按 ssr.camidx 选 → 发布四元数。
-// v0.18.18 带槽号 (0..13 全扫): camslot=-1 时**首个**产出候选的槽被锁定, 锁后只有它能发布
-// —— 换槽判据从"解析次数"改成"真实解析结果", v0.18.17 的死锁 (没拷就没解析、没解析就换不了
-// 槽) 结构性消失; camslot 固定则只认那个槽 (拷贝侧已保证只有它会被解析)。
-static void camParse(const unsigned char* data, UINT bytes, int slot)
+// 读回解析: 每 16B 对齐偏移试一个 4x4 的左上 3x3 (camBlockOk 原地归一化) → 候选表 →
+// 条目统计 (解析数/有候选数/主 offset 众数) → **仅锁定条目**按 ssr.camidx 选 → 发布四元数。
+// v0.18.19: 锁前不发布 (q 保持全 0 ⇒ p7.w=0 = 16d 安全画面); 锁定 = camCensus 窗口按
+// 「候选率 ≥95% 且主 offset 命中 ≥90%」的稳定度判定 —— 18 实拍里 per-draw 垃圾 (槽8:
+// 候选率 ~50%、offset 漂移、q 乱跳) 这类数据锁不上, 相机 VP 每帧必在同 offset 才锁。
+static void camParse(const unsigned char* data, UINT bytes, int slot, int ent)
 {
 	if (!data || bytes < 64)
 		return;
+	CamEnt& ce = g_camEnt[slot][ent];
 	float cand[8][9];
 	int   candOff[8];
 	int   n = 0;
@@ -2999,26 +3043,29 @@ static void camParse(const unsigned char* data, UINT bytes, int slot)
 	}
 	const bool logNow = (g_camLogN < 6) || ((g_camLogN % 128) == 0);
 	++g_camLogN;
+	++ce.parses;
+	int k = (g_ssrCamIdx >= 0 && g_ssrCamIdx < n) ? g_ssrCamIdx : 0;
+	if (n > 0)
+	{
+		++ce.cands;
+		if (candOff[k] == ce.off)
+			++ce.offCnt; // 主 offset 众数 (近似: 计与当前众数相同的次数)
+		else
+		{
+			ce.off = candOff[k];
+			ce.offCnt = 1;
+		}
+	}
 	if (n == 0)
 	{
 		if (logNow)
 			logLine("SSR侦察: [cam] 解析#" + std::to_string(g_camLogN) + " bytes=" +
-			        std::to_string(bytes) + " 无正交旋转候选 (槽" +
-			        std::to_string(slot) + ")");
+			        std::to_string(bytes) + " 无旋转候选 (槽" + std::to_string(slot) +
+			        "." + std::to_string(ent) + ")");
 		return;
 	}
-	// 发布闸 (v0.18.18): ini 固定槽只认该槽; 全扫锁前人人可发 (首个发出者被锁定), 锁后只认锁定槽。
-	if (g_ssrCamSlot >= 0 && slot != g_ssrCamSlot)
-		return;
-	if (g_camLockSlot >= 0 && slot != g_camLockSlot)
-		return;
-	if (g_ssrCamSlot < 0 && g_camLockSlot < 0)
-	{
-		g_camLockSlot = slot;
-		logLine("SSR侦察: [cam] 自动锁定 槽" + std::to_string(slot) +
-		        " — 此后只拷/只发布该槽 (ini ssr.camslot 可另指, 需重启)");
-	}
-	const int k = (g_ssrCamIdx >= 0 && g_ssrCamIdx < n) ? g_ssrCamIdx : 0;
+	if (slot != g_camLockS || ent != g_camLockE)
+		return; // 发布闸 (v0.18.19): 未锁定不发布 (q 全 0 = 16d), 锁定后只认锁定条目
 	float q[4];
 	if (!camQuat(cand[k], q))
 		return;
@@ -3032,6 +3079,8 @@ static void camParse(const unsigned char* data, UINT bytes, int slot)
 	g_ssrV1CamQ[1] = q[1];
 	g_ssrV1CamQ[2] = q[2];
 	g_ssrV1CamQ[3] = q[3];
+	for (int i = 0; i < 4; ++i)
+		ce.q[i] = q[i];
 	if (logNow)
 	{
 		std::string cs;
@@ -3042,64 +3091,62 @@ static void camParse(const unsigned char* data, UINT bytes, int slot)
 		        std::to_string(bytes) + " 候选=" + std::to_string(n) + " [" + cs + "] 选 idx=" +
 		        std::to_string(k) + " q=(" + std::to_string(q[0]) + "," + std::to_string(q[1]) +
 		        "," + std::to_string(q[2]) + "," + std::to_string(q[3]) + ") conj=" +
-		        std::to_string(g_ssrCamConj) + " 槽" + std::to_string(slot));
+		        std::to_string(g_ssrCamConj) + " 槽" + std::to_string(slot) + "." +
+		        std::to_string(ent));
 	}
 }
 
 // 帧末读回 (notePresent 调): 上一帧发的拷贝此刻 GPU 必已完成 —— 与 probeDumpTick 同款
 // "不插进游戏记录流中间" 的纪律, Map 不会卡在某个 draw 之间; 上下文从 staging 自取
 // (GetDevice → GetImmediateContext, 与 probeDumpTick 同法), 不持任何悬垂指针。
-// v0.18.18: 逐槽 (0..13) 处理未读回的拷贝, 每槽独立 Map/Unmap; 全无 pend 时帧级早退。
+// v0.18.19: 逐 (槽,条目) 处理未读回的拷贝, 每条目独立 Map/Unmap; 全无 pend 时帧级早退。
 static void camMapTick()
 {
 	if (!g_ssrV1CamOn)
 		return;
 	bool any = false;
-	for (int s = 0; s < kCamSlotN; ++s)
-		any = any || g_camPend[s];
+	for (int s = 0; s < kCamSlotN && !any; ++s)
+		for (int e = 0; e < kCamEntN && !any; ++e)
+			any = g_camEnt[s][e].pend && g_camEnt[s][e].stg;
 	if (!any)
 		return;
-	int s0 = -1; // 任一有 staging 的槽即可取设备 (全部槽共用同一 device)
-	for (int s = 0; s < kCamSlotN; ++s)
-		if (g_camStg[s])
-		{
-			s0 = s;
-			break;
-		}
-	if (s0 < 0)
-		return; // pend 与 staging 同步清, 理论不可达 (防御: 没 buffer 就下帧再试)
 	ID3D11Device* dev = nullptr;
-	g_camStg[s0]->GetDevice(&dev);
+	for (int s = 0; s < kCamSlotN && !dev; ++s) // 任一有 staging 的条目即可取设备 (共用同 device)
+		for (int e = 0; e < kCamEntN && !dev; ++e)
+			if (g_camEnt[s][e].stg)
+				g_camEnt[s][e].stg->GetDevice(&dev);
+	if (!dev)
+		return;
 	ID3D11DeviceContext* ctx = nullptr;
-	if (dev)
-		dev->GetImmediateContext(&ctx);
+	dev->GetImmediateContext(&ctx);
 	if (!ctx)
 	{
-		if (dev)
-			dev->Release();
-		return; // 拿不到上下文 ⇒ 下帧再试 (g_camPend 留着)
+		dev->Release();
+		return; // 拿不到上下文 ⇒ 下帧再试 (pend 留着)
 	}
 	for (int s = 0; s < kCamSlotN; ++s)
-	{
-		if (!g_camPend[s] || !g_camStg[s])
-			continue;
-		D3D11_MAPPED_SUBRESOURCE mr{};
-		const HRESULT hr = ctx->Map(g_camStg[s], 0, D3D11_MAP_READ, 0, &mr);
-		if (SUCCEEDED(hr) && mr.pData)
-			camParse(static_cast<const unsigned char*>(mr.pData), g_camStgW[s], s);
-		if (SUCCEEDED(hr))
+		for (int e = 0; e < kCamEntN; ++e)
 		{
-			ctx->Unmap(g_camStg[s], 0);
-			g_camPend[s] = false; // 读成功才清; 失败留着下帧重试
+			CamEnt& ce = g_camEnt[s][e];
+			if (!ce.pend || !ce.stg)
+				continue;
+			D3D11_MAPPED_SUBRESOURCE mr{};
+			const HRESULT hr = ctx->Map(ce.stg, 0, D3D11_MAP_READ, 0, &mr);
+			if (SUCCEEDED(hr) && mr.pData)
+				camParse(static_cast<const unsigned char*>(mr.pData), ce.w, s, e);
+			if (SUCCEEDED(hr))
+			{
+				ctx->Unmap(ce.stg, 0);
+				ce.pend = false; // 读成功才清; 失败留着下帧重试
+			}
 		}
-	}
 	ctx->Release();
-	if (dev)
-		dev->Release();
+	dev->Release();
 }
 
-// 槽 0..13 绑定普查 (v0.18.18): 逐槽累计非空/空绑次数与最近拷贝字节, 每 ~300 帧打一行
-// —— 一拍看全"哪个槽绑了什么、多大、空绑率多少", 相机 cb 在哪槽直接从这行读。
+// 槽 0..13 绑定普查 (v0.18.18) + v0.18.19 解析统计与稳定度锁定: 每 ~300 帧打两行 —— 绑定画像
+// (谁绑了什么/多大/空绑率) + 各条目 解析/有候选/主offset命中; 候选率 ≥95% 且主 offset 命中
+// ≥90% (已解析 ≥120 次) 才自动锁定 (槽8 那种 per-draw 垃圾: 候选率 ~50%、offset 漂移 ⇒ 锁不上)。
 static void camCensus(uint64_t fr, UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* pp)
 {
 	if (fr >= g_camCenNext)
@@ -3119,12 +3166,64 @@ static void camCensus(uint64_t fr, UINT StartSlot, UINT NumBuffers, ID3D11Buffer
 				      std::to_string(g_camCenNull[s]) + "/" + std::to_string(g_camCenW[s]) + "/" +
 				      std::to_string(g_camCenCpy[s]);
 			logLine(ln);
+			// ---- v0.18.19 解析统计行 (累计): 槽条目=解析/有候选@主offset*命中次数 ----
+			std::string pl = "SSR侦察: [cam] 普查#" + std::to_string(idx + 1) +
+			         " 解析 (槽条目=解析/候选@主offset*命中)";
+			bool pany = false;
+			for (int s = 0; s < kCamSlotN; ++s)
+			{
+				if (g_ssrCamSlot >= 0 && s != g_ssrCamSlot)
+					continue;
+				for (int e = 0; e < kCamEntN; ++e)
+				{
+					const CamEnt& ce = g_camEnt[s][e];
+					if (!ce.parses)
+						continue;
+					pany = true;
+					pl += " 槽" + std::to_string(s) + "." + std::to_string(e) + "=" +
+					      std::to_string(ce.parses) + "/" + std::to_string(ce.cands) + "@" +
+					      std::to_string(ce.off) + "*" + std::to_string(ce.offCnt);
+				}
+			}
+			if (pany)
+				logLine(pl);
+			for (int s = 0; s < kCamSlotN; ++s)
+				if (g_camCenOvf[s]) // 条目满: 第 kCamEntN+1 个不同 buffer 被忽略
+					logLine("SSR侦察: [cam] 槽" + std::to_string(s) + " 条目满, 更多不同buffer被" +
+					        "忽略 x" + std::to_string(g_camCenOvf[s]));
+			// ---- v0.18.19 稳定度锁定 (只在未锁时判): 满足即锁, 锁后只拷/只发布该条目 ----
+			if (g_camLockS < 0)
+			{
+				for (int s = 0; s < kCamSlotN && g_camLockS < 0; ++s)
+				{
+					if (g_ssrCamSlot >= 0 && s != g_ssrCamSlot)
+						continue; // ini 固定槽: 只在该槽内锁
+					for (int e = 0; e < kCamEntN; ++e)
+					{
+						const CamEnt& ce = g_camEnt[s][e];
+						if (ce.parses >= 120 && ce.cands > 0 &&
+						    ce.cands * 20 >= ce.parses * 19 && // 候选率 ≥95%
+						    ce.offCnt * 10 >= ce.cands * 9)    // 主 offset 命中 ≥90%
+						{
+							g_camLockS = s;
+							g_camLockE = e;
+							logLine("SSR侦察: [cam] 自动锁定 槽" + std::to_string(s) + "." +
+							        std::to_string(e) + " — 候选率 " +
+							        std::to_string(ce.cands * 100 / ce.parses) + "% 主offset命中 " +
+							        std::to_string(ce.offCnt * 100 / ce.cands) +
+							        "% — 此后只拷/只发布该条目 (ini ssr.camslot 可另指, 需重启)");
+							break;
+						}
+					}
+				}
+			}
 		}
 		for (int s = 0; s < kCamSlotN; ++s)
 		{
 			g_camCenBind[s] = 0;
 			g_camCenNull[s] = 0;
 			g_camCenCpy[s] = 0;
+			g_camCenOvf[s] = 0;
 		}
 		g_camCenFr0 = fr;
 		// 首拍提前到 ~60 帧 (日志早见真章), 之后每 ~300 帧 (~5s@60fps) 一拍。
@@ -3144,9 +3243,62 @@ static void camCensus(uint64_t fr, UINT StartSlot, UINT NumBuffers, ID3D11Buffer
 	}
 }
 
-// 槽 0..13 观察: 本帧每槽第一次非空绑定 → 拷到该槽 staging (每帧每槽至多一次)。
-// v0.18.18 修死锁: 拷贝不再以"解析有无候选"为前提 —— camslot=-1 时 14 槽全扫 (拷谁与解析
-// 结果无关), 锁定槽后收敛回单槽; camslot 固定则从头只拷那一个槽。
+// 条目拷贝 (v0.18.19): 帧闸由调用方确认 → staging 惰性重建 (desc 三身份) → CopyResource → pend。
+// 先盖帧戳 (copyFr): GetDesc/CreateBuffer 失败也不在本帧重试, 防每 draw 反复开销。
+static void camCopyEnt(ID3D11DeviceContext* ctx, CamEnt& ce, ID3D11Buffer* b, int slot, int ent,
+                       uint64_t fr)
+{
+	ce.copyFr = fr;
+	D3D11_BUFFER_DESC bd{};
+	b->GetDesc(&bd);
+	if (!bd.ByteWidth)
+		return;
+	if (!ce.stg || ce.w != bd.ByteWidth || ce.m != bd.MiscFlags || ce.s != bd.StructureByteStride)
+	{
+		camStgRelease(slot, ent);
+		ID3D11Device* dev = nullptr;
+		b->GetDevice(&dev);
+		if (!dev)
+			return;
+		D3D11_BUFFER_DESC sd = bd;
+		sd.Usage = D3D11_USAGE_STAGING;
+		sd.BindFlags = 0;
+		sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		ID3D11Buffer* stg = nullptr;
+		HRESULT hr = dev->CreateBuffer(&sd, nullptr, &stg); // 先按原样 MiscFlags (同 probeDumpTick 口径)
+		if (FAILED(hr))
+		{
+			sd.MiscFlags = 0; // 再退掉 SHARED/STRUCTURED 之类
+			hr = dev->CreateBuffer(&sd, nullptr, &stg);
+		}
+		if (FAILED(hr) || !stg)
+		{
+			static long s_camCg = 0;
+			if (++s_camCg <= 3 || (s_camCg % 128) == 0)
+				logLine("SSR侦察: [cam] CreateBuffer(STAGING) 失败 hr=" +
+				        std::to_string(static_cast<long>(hr)) + " 槽" + std::to_string(slot) +
+				        "." + std::to_string(ent) + " w=" + std::to_string(bd.ByteWidth) +
+				        " misc=" + std::to_string(bd.MiscFlags));
+			dev->Release();
+			return;
+		}
+		dev->Release();
+		ce.stg = stg;
+		ce.w = bd.ByteWidth;
+		ce.m = bd.MiscFlags;
+		ce.s = bd.StructureByteStride;
+	}
+	g_camCenW[slot] = bd.ByteWidth; // 普查: 最近一次真拷贝的字节数
+	++g_camCenCpy[slot];
+	g_ssrSelfCopy = true;
+	ctx->CopyResource(ce.stg, b);
+	g_ssrSelfCopy = false;
+	ce.pend = true;
+}
+
+// 槽 0..13 观察 (v0.18.19): 每槽登记至多 kCamEntN 个不同 buffer (相机 cb 不保证是首绑), 各条目
+// 帧闸拷贝; 锁定后只拷锁定条目。拷贝不依赖解析结果 ⇒ 无死锁 (18 修)。条目满且有 >120 帧未见
+// 的旧 ptr 则换出 (防加载屏的旧 buffer 占满条目挡住场景相机), 全活跃时忽略并在窗口行里报。
 static void camVSBOnce(ID3D11DeviceContext* ctx, UINT StartSlot, UINT NumBuffers,
                        ID3D11Buffer* const* pp)
 {
@@ -3161,65 +3313,64 @@ static void camVSBOnce(ID3D11DeviceContext* ctx, UINT StartSlot, UINT NumBuffers
 			continue;
 		if (slot >= kCamSlotN)
 			break; // VS 常量缓冲只到 13 (权威表), 之上不碰
-		if (g_ssrCamSlot >= 0)
-		{
-			if (slot != g_ssrCamSlot)
-				continue; // ini 固定: 只拷指定槽
-		}
-		else if (g_camLockSlot >= 0 && slot != g_camLockSlot)
-			continue; // 全扫已锁定: 只拷锁定槽 (锁前 14 槽都拷)
-		if (fr == g_camCopyFr[slot])
-			continue; // 本帧该槽已试过
+		if (g_ssrCamSlot >= 0 && slot != g_ssrCamSlot)
+			continue; // ini 固定: 只观察该槽 (普查画像不收窄)
+		if (g_camLockS >= 0 && slot != g_camLockS)
+			continue; // 锁定后: 只拷锁定槽
 		ID3D11Buffer* b = pp[i];
 		if (!b)
 			continue;
-		g_camCopyFr[slot] = fr;
-		D3D11_BUFFER_DESC bd{};
-		b->GetDesc(&bd);
-		if (!bd.ByteWidth)
+		if (g_camLockS >= 0)
+		{ // 锁定后: ptr 必须就是锁定条目, 是则拷 (每帧至多一次), 不是则跳过
+			CamEnt& le = g_camEnt[slot][g_camLockE];
+			if (le.ptr != b || fr == le.copyFr)
+				continue;
+			le.seenFr = fr;
+			camCopyEnt(ctx, le, b, slot, g_camLockE, fr);
 			continue;
-		if (!g_camStg[slot] || g_camStgW[slot] != bd.ByteWidth ||
-		    g_camStgM[slot] != bd.MiscFlags || g_camStgS[slot] != bd.StructureByteStride)
-		{
-			camStgRelease(slot);
-			ID3D11Device* dev = nullptr;
-			b->GetDevice(&dev);
-			if (!dev)
-				continue;
-			D3D11_BUFFER_DESC sd = bd;
-			sd.Usage = D3D11_USAGE_STAGING;
-			sd.BindFlags = 0;
-			sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-			ID3D11Buffer* stg = nullptr;
-			HRESULT hr = dev->CreateBuffer(&sd, nullptr, &stg); // 先按原样 MiscFlags (同 probeDumpTick 口径)
-			if (FAILED(hr))
-			{
-				sd.MiscFlags = 0; // 再退掉 SHARED/STRUCTURED 之类
-				hr = dev->CreateBuffer(&sd, nullptr, &stg);
-			}
-			if (FAILED(hr) || !stg)
-			{
-				static long s_camCg = 0;
-				if (++s_camCg <= 3 || (s_camCg % 128) == 0)
-					logLine("SSR侦察: [cam] CreateBuffer(STAGING) 失败 hr=" +
-					        std::to_string(static_cast<long>(hr)) + " 槽" +
-					        std::to_string(slot) + " w=" + std::to_string(bd.ByteWidth) +
-					        " misc=" + std::to_string(bd.MiscFlags));
-				dev->Release();
-				continue;
-			}
-			dev->Release();
-			g_camStg[slot] = stg;
-			g_camStgW[slot] = bd.ByteWidth;
-			g_camStgM[slot] = bd.MiscFlags;
-			g_camStgS[slot] = bd.StructureByteStride;
 		}
-		g_camCenW[slot] = bd.ByteWidth; // 普查: 最近一次真拷贝的字节数
-		++g_camCenCpy[slot];
-		g_ssrSelfCopy = true;
-		ctx->CopyResource(g_camStg[slot], b);
-		g_ssrSelfCopy = false;
-		g_camPend[slot] = true;
+		// 未锁: 查/登记条目 (至多 kCamEntN 个不同 ptr)
+		int ei = -1;
+		for (int e = 0; e < kCamEntN; ++e)
+			if (g_camEnt[slot][e].ptr == b)
+			{
+				ei = e;
+				break;
+			}
+		if (ei < 0)
+		{
+			int reuse = -1;
+			for (int e = 0; e < kCamEntN; ++e)
+				if (!g_camEnt[slot][e].ptr)
+				{
+					reuse = e;
+					break;
+				}
+			if (reuse < 0) // 全占: 换出最久未见 (>120 帧) 的条目
+				for (int e = 0; e < kCamEntN; ++e)
+					if (fr > g_camEnt[slot][e].seenFr + 120)
+					{
+						reuse = e;
+						break;
+					}
+			if (reuse < 0)
+			{
+				++g_camCenOvf[slot]; // 全是每帧活跃的 buffer: 本指针忽略 (窗口行里报)
+				continue;
+			}
+			if (g_camEnt[slot][reuse].ptr)
+				logLine("SSR侦察: [cam] 槽" + std::to_string(slot) + "." + std::to_string(reuse) +
+				        " 条目换出 (旧 ptr >120 帧未见)");
+			camStgRelease(slot, reuse);
+			g_camEnt[slot][reuse] = CamEnt{};
+			g_camEnt[slot][reuse].ptr = b;
+			ei = reuse;
+		}
+		CamEnt& ce = g_camEnt[slot][ei];
+		ce.seenFr = fr;
+		if (fr == ce.copyFr)
+			continue; // 本帧该条目已试过
+		camCopyEnt(ctx, ce, b, slot, ei, fr);
 	}
 }
 
@@ -3323,7 +3474,7 @@ static void installSsrRecon(ID3D11Device* dev)
 	logLine("SSR侦察: ctx槽33/50" + std::string(ok47 ? "/47" : "") +
 	        " 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.16.0 Step2; 逃生门 ssr=0)");
 	if (ok7)
-		logLine("SSR侦察: ctx槽7(VSSetConstantBuffers) 已挂 — v0.18.18 P3 相机朝向读回 " +
+		logLine("SSR侦察: ctx槽7(VSSetConstantBuffers) 已挂 — v0.18.19 P3 相机朝向读回(列正交+多条目) " +
 		        std::string(g_ssrV1CamOn ? "开 (camrot=1, VS cb 槽0..13 全扫)" : "关 (camrot=0)"));
 	LeaveCriticalSection(&g_cs);
 	ctx->Release();
@@ -3514,7 +3665,7 @@ void installProbeOn(ID3D11Device* dev)
 		g_ssrV1RipGain = static_cast<float>(iniNum("ssr.ripgain", 0.0));
 		// ---- v0.18.15: 原版高光回补量 (0 = 关 = v0.18.14 行为) ----
 		g_ssrV1Det = static_cast<float>(iniNum("ssr.v1det", 0.0));
-		// ---- v0.18.17 P3 相机朝向 (方案 B): 读回链路五个旋钮 (docs/02 条目17/18) ----
+		// ---- v0.18.17 P3 相机朝向 (方案 B): 读回链路五个旋钮 (docs/02 条目17/18/19) ----
 		g_ssrV1CamOn = (static_cast<int>(iniNum("ssr.camrot", 1.0)) != 0) ? 1 : 0;
 		{
 			const int sv = static_cast<int>(iniNum("ssr.camslot", -1.0));
@@ -4411,7 +4562,7 @@ void notePresent(const char* via, IDXGISwapChain* sc)
 	// ---- v0.18.16 P1: 探针 cube 的 CPU 可读性/静态性探测 (跑满 2 次后每帧只落一个早退) ----
 	// 放在帧末 = 不插进游戏的记录流中间, Map 也不会卡在某个 draw 之间。
 	probeDumpTick();
-	// ---- v0.18.18 P3: 上一帧各槽拷贝的读回 (Map 纪律同 probeDumpTick, 帧末做) ----
+	// ---- v0.18.18/19 P3: 上一帧各条目拷贝的读回 (Map 纪律同 probeDumpTick, 帧末做) ----
 	camMapTick();
 	// ---- 帧时基线 (v0.16.2): 每帧一次, 采样点就放在 Present 这里 ----
 	if (!g_ftIniRead)
@@ -5697,7 +5848,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.18 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13全扫读回); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
+	logLine("==== poc-presenter v0.18.19 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
