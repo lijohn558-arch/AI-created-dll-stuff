@@ -4960,9 +4960,15 @@ edge=2/debug=0）。日志 + 画面双向判读：
 DLL 都会 PASS，**版本以日志横幅 `==== poc-presenter v0.18.19` 为准**；`dllchk -After "<commit %ci>"`
 查 C++ 侧新旧。
 
-**下一发交接（实拍三闸照旧）**：artifact zip 覆盖 DLL → `dllchk` → ini（`ssr.edge=2`、
-`ssr.debug=0`，旋钮全默认）→ 改完重启 → `knobchk` PASS → **同机位**拍图 + 回传含
-`普查` / `普查…解析` / `自动锁定 槽N.M` / `解析` 行的完整日志。判读口径：**未锁** ⇒ 看解析
+**下一发交接（实拍三闸照旧；本批 = v0.18.19 首拍）**：artifact zip 覆盖 DLL → `dllchk`
+→ ini（**`ssr.edge=2` 是硬前提** —— `camVSBOnce` 首行 `g_ssrV1Edge < 2` 早退，edge<2 时
+拷贝/普查/解析整条链路全停、日志里一行 `[cam]` 都不会有；`ssr.debug=0`，旋钮全默认）→
+改完重启 → `knobchk` PASS → **同机位**拍图 + 回传含 `普查` / `普查…解析` /
+`自动锁定 槽N.M` / `解析` 行的完整日志。**本轮 = 数据拍：只读日志、不判读画面** ——
+锁定后的 q 尚未经 camconj/cubeflip 校准，miss 区必然不可判读（18 的教训）；画面判读
+留给锁定校准轮。**任何接缝/涟漪类画面判读前，先核对该局回显行**（`ini ssr.v1=1` 或
+`SSR v1 就绪` 行里的 `ripple=… ripplesz=… ripplemode=…`），否则判读可能白做。
+判读口径：**未锁** ⇒ 看解析
 统计行找候选率 ≥95% 且主 offset 命中高的 (槽,条目) → `ssr.camslot=槽` 固定重试（或该条目
 被 `条目满` 挡 ⇒ 报我加大 kCamEntN）；**已锁但乱面** → `camidx` 换候选；反转/镜像 → `camconj=1`；
 整体错轴 → `cubeflip=1/2/4`。至 miss 区呈「远岸倒影向近处自然延续」→ 与游戏 585 反射并排
