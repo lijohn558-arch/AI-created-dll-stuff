@@ -126,6 +126,12 @@
 //   朝向风险: D3D11 cube 与 Vulkan cube 的**手性与面序不同** (D3D 左手系 + 面序 +X,-X,+Y,-Y,+Z,-Z,
 //   Vulkan 手性/UV 翻转与之不一致) ⇒ 可能需要水平翻转/面重排, 归 P3 朝向校准 (靠 585 对齐校),
 //   本版先保证「采得到、不是花屏」。
+// v0.18.17 (P3 第一步, docs/02 §14.17): **Rf 视图→世界** —— 16d 实拍暴露这里的 Rf (reflect(V,N))
+//   是**视图空间**, 而 uProbe 是**世界空间** cube ⇒ 采到哪个面随相机姿态乱转 (§14.16 内容 FAIL,
+//   miss 区被换成河床/崖体乱面)。修法 = p6 四元数 (数据源方案 B: 槽7 VSSetConstantBuffers 抓游戏
+//   cbuffer → CopyResource → 下帧 Map 读回提取, 链路在 main.cpp) + p7.xyz 轴符号校准 (ssr.cubeflip,
+//   对照游戏 585 反射定符号) + p7.w 总开关 (未就绪 = 0 ⇒ 与 v0.18.16d 逐位一致)。四元数的
+//   共轭歧义 (存的是 view 还是 invView / 行列存法) 由 ssr.camconj 一位选。
 //   验收口径 **不是**「miss/hit 比值涨向 1.0」: hit 与 miss 是不同水域、反射不同的合法环境
 //   (§14.31 §10 保留意见), 正确口径是**同机位配对** —— 同一张 debug=2 掩码下 edge=0 vs edge=2
 //   各跑一次 `-Normal`, 比 MISS 行自身 p50/structure 位移, 同时 HIT 行必须一动不动, 外加人眼看扇形边界。
@@ -153,9 +159,12 @@ layout(push_constant) uniform PC
 	vec4 p4; // v0.18.9: x=ripple(涟漪回注量 0..1)  y=ripplesz(回注带宽 px 1..16)
 	         // v0.18.10: z=ripplemode(0=亮度调制 / 1=位移扭曲)
 	         // v0.18.11: w=edge(0=未命中回原版层(默认) / 1=边缘延展)
-	         // v0.18.16: w=edge 加 2=未命中采真 cubemap 兜底 (push constant 仍 80B, 只扩语义)
+	         // v0.18.16: w=edge 加 2=未命中采真 cubemap 兜底 (只扩语义, 体积未动)
 	vec4 p5; // v0.18.14: x=ripk(输入端软限幅阈值, 线性亮度, 0=关)  y=ripamp(位移幅度 px, 0=自动)
-	         // v0.18.14: z=ripgain(梯度增益, 0=自动 =10)  w=保留 (push constant 80B → 96B)
+	         // v0.18.14: z=ripgain(梯度增益, 0=自动 =10)  v0.18.15: w=v1det(高光回补量, 0=关) (80B → 96B)
+	vec4 p6; // v0.18.17 P3: 相机旋转四元数 (x,y,z,w), 视图空间→世界空间 (D3D11 槽7 cbuffer 读回提取);
+	         //             全 0 = 未就绪 ⇒ p7.w=0 ⇒ 不旋 = v0.18.16d 行为
+	vec4 p7; // v0.18.17 P3: x,y,z = cube 轴校准符号 (±1, ini ssr.cubeflip)  w = 开关 (1 = Rf 转世界空间采 uProbe)
 } pc;
 
 layout(location = 0) in vec2 vUV;
@@ -485,6 +494,8 @@ void main()
 	// edge=2 (v0.18.16): 未命中改**采真 cubemap** —— 射线飞出屏的那部分本来就该交给 cubemap,
 	//                那正是 §14.31 §10 在正常档量到的缺口 (miss 区只有 hit 区 43.7% 亮度 / 74.5% 结构量)。
 	//                采样方向用 Rf = reflect(V,N), 与行进用的是同一个反射方向, 不重推; 先判长度防 NaN。
+//                v0.18.17 P3: 行进照旧用**视图空间** Rf (ray march 是屏内几何, 与世界无关),
+//                只在**采 uProbe 这一步**把 Rf 旋到世界空间 (p6 四元数), 再乘 p7.xyz 轴符号。
 	//                只动 refl, **不碰 hit** ⇒ hit/miss 分裂仍是纯几何 (mask 图逐位不变), 也**不碰 wSsr**
 	//                (miss 恒 0) ⇒ v1det 回补块在 miss 区照旧不进 = A 的读数逐位不动。
 	//                mode0 / 无深度在上面那个提前返回里就 oColor=base 走掉了, 根本到不了这里 ⇒ 透传契约不破。
@@ -493,7 +504,19 @@ void main()
 		if (pc.p4.w > 1.5)
 		{
 			float rl = length(Rf);
-			refl = rl > 1e-4 ? texture(uProbe, Rf / rl).rgb : baseRGB;
+			if (rl > 1e-4)
+			{
+				vec3 d = Rf / rl;
+				if (pc.p7.w > 0.5) // v0.18.17 P3: 视图空间 → 世界空间 (旋转保长, 再按 p7.xyz 轴符号校准)
+				{
+					vec3 qv = pc.p6.xyz;
+					vec3 rw = Rf + 2.0 * cross(qv, cross(qv, Rf) + pc.p6.w * Rf);
+					d = normalize(rw) * pc.p7.xyz;
+				}
+				refl = texture(uProbe, d).rgb;
+			}
+			else
+				refl = baseRGB;
 		}
 		else if (pc.p4.w < 0.5 || lastUV == uv)
 			refl = baseRGB;

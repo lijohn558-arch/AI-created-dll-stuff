@@ -490,6 +490,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -1158,13 +1159,16 @@ static void installCtxProbe(ID3D11Device* dev)
 }
 
 // ---------- SSR Step 1/2a/2b 侦察+介入钩 (v0.13.0/v0.14.0, docs/05 §5) ----------
-// 挂 ctx 槽33 (OMSetRenderTargets) + 槽50 (ClearRenderTargetView) + 槽47 (CopyResource):
+// 挂 ctx 槽33 (OMSetRenderTargets) + 槽50 (ClearRenderTargetView) + 槽47 (CopyResource) +
+// 槽7 (VSSetConstantBuffers, v0.18.17 P3 相机朝向读回):
 //   Step1 (v0.13.0) —— 只读观察: 真机上反射段 (段16: RT0=585 / DS=461) 的绑定特征是否
 //     可辨、段16 结束信号 (特征A/B) 哪个稳定; 只解析参数, 不改任何渲染状态。
 //   Step2a (v0.14.0) —— 槽47 按"来源"学 324/520 身份 (见下方 Step 2a 全局注释), 仍只读。
 //   Step2b (v0.14.0) —— 特征B 处 CopyResource(585<-324) 回写 = 通路哨兵; **首次动渲染**,
 //     独立开关 ssr.sentinel (默认 0), ssr=0 则三槽全不挂 (D5, 基线帧与 v0.12.0 同路径)。
 // 槽号双证: 官方 d3d11.h MIDL 声明序 (与 xosh 44/45 同口径); 槽34 游戏 api-scan 零命中不挂。
+//   槽7 = MIDL 序第一个接口方法 (IUnknown 0-2 + DeviceChild 3-6 之后), 与 33/47/50 同一张
+//   权威表 (docs/analysis/d3d11-ctx-slots.txt), v0.18.17 起也挂 —— 见 hookedVSSetConstantBuffers。
 struct SsrCtxEntry
 {
 	void** vtbl;
@@ -1172,6 +1176,7 @@ struct SsrCtxEntry
 	void*  orig33; // OMSetRenderTargets    (ID3D11DeviceContext 槽33)
 	void*  orig50; // ClearRenderTargetView (槽50, 特征A "用后清")
 	void*  orig47; // CopyResource          (槽47, Step 2a 身份识别 + 2b 回写通道)
+	void*  orig7;  // VSSetConstantBuffers  (槽7, v0.18.17 P3 相机朝向读回)
 };
 static SsrCtxEntry g_ssrCtx[4];
 static int         g_ssrCtxN = 0;
@@ -1345,6 +1350,26 @@ float g_ssrV1RipAmp = 0.0f;  // ini ssr.ripamp 位移幅度 (px) 0=自动 clamp(
 float g_ssrV1RipGain = 0.0f; // ini ssr.ripgain 梯度增益 0=自动 (=10) —— 增益解耦 (原写死 ×10)
 // ---- v0.18.15 高光回补 (§14.30.7 A 的正解): SSR 命中区把 585 层被顶掉的亮斑按比例加回 ----
 float g_ssrV1Det = 0.0f; // ini ssr.v1det 回补量 0..1, 0 = 关 = v0.18.14 行为 (零回归)
+
+// ---- v0.18.17 (P3 朝向, 方案 B): 相机旋转四元数 + cube 轴校准 (docs/02 §14.17) ----
+// 链路: 槽7 VSSetConstantBuffers 钩抓本帧首次绑定的 cbuffer → CopyResource → 下一帧
+// notePresent 里 Map 读回 → 扫 4x4 找正交旋转块 → 提取四元数发布 (写方 main.cpp, 读方
+// vkrenderer.cpp)。未就绪 = 四元数全 0 ⇒ p7.w = 0 ⇒ 着色器不旋 = v0.18.16d 逐位一致。
+float g_ssrV1CamQ[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // (x,y,z,w) 单位四元数, v_view → v_world
+float g_ssrV1CamFlip[3] = {1.0f, 1.0f, 1.0f};    // (±1,±1,±1) cube 轴符号 — ini ssr.cubeflip
+int   g_ssrV1CamOn = 1;                          // ini ssr.camrot 0=关 1=开 (默认开; 读不到 q 自动无效)
+static int   g_ssrCamSlot = -1; // ini ssr.camslot  -1=自动 (连续 ~3s 无候选就换槽) 0..3=固定 VS 槽
+static int   g_ssrCamIdx = 0;   // ini ssr.camidx   候选 4x4 下标 (日志列出候选后人工选)
+static int   g_ssrCamConj = 0;  // ini ssr.camconj  0=直接用 1=取共轭 (view/invView 与行列存法二义)
+static int   g_camCurSlot = 0;  // 实际在用的 VS 槽 (camslot=-1 时由自动逻辑轮转)
+static ID3D11Buffer* g_camStg = nullptr;   // STAGING 读回缓冲 (按源 desc 惰性重建)
+static unsigned      g_camStgW = 0;        // 源 ByteWidth 身份 (变了才重建)
+static unsigned      g_camStgM = 0;        // 源 MiscFlags 身份
+static unsigned      g_camStgS = 0;        // 源 StructureByteStride 身份
+static uint64_t      g_camCopyFr = 0;      // 已尝试拷贝的帧号 (每帧至多 1 次)
+static bool          g_camPend = false;    // 有未读回的拷贝
+static int           g_camNoCand = 0;      // 连续解析无候选次数 (camslot=-1 自动换槽判据)
+static long          g_camLogN = 0;        // [cam] 解析次数 (日志节流: 前 6 次后每 128 次)
 
 // ---- v0.18.16 (issue B / P1 探测): 水体探针 cube 的 CPU 侧镜像, 交给 VK 上传 ----
 // D3D11 这半边 (probeDumpTick) 用 STAGING 把 g_probeCube 读回来, 紧凑排成 6 面;
@@ -2842,6 +2867,269 @@ static void STDMETHODCALLTYPE hookedClearRTV(ID3D11DeviceContext* ctx, ID3D11Ren
 	real(ctx, pRTV, ColorRGBA);
 }
 
+// ---- v0.18.17 P3 相机朝向 (方案 B): 槽7 VSSetConstantBuffers 观察钩 + 读回解析 ----
+// 观察链路 (只读, 不动游戏的任何绑定): 本帧在 ssr.camslot 槽上**第一次**非空绑定的
+// ID3D11Buffer → 当场 CopyResource 到自建 STAGING (插件自己的拷贝包 g_ssrSelfCopy,
+// 不进 [2a] 的 COPY= 计数与身份学习) → 下一帧 notePresent 里 Map 读回 → 扫 16B 对齐的
+// 4x4 找正交旋转块 → 提取四元数发布 (g_ssrV1CamQ, 消费方 = ssr.frag 的 p6)。
+// 为什么当场拷: 本帧此刻 buffer 的内容就是本帧相机 (游戏每帧更新同一块全局常量), 拷贝紧跟
+// 绑定进入 immediate context 的记录流, GPU 时间线顺序天然正确。
+// 每帧至多 1 次 (g_camCopyFr 帧号闸); 其余成百上千次调用在整型比较上早退。
+static void camStgRelease()
+{
+	if (g_camStg)
+	{
+		g_camStg->Release();
+		g_camStg = nullptr;
+	}
+	g_camPend = false;
+}
+
+// 打包行主序 3x3 是否正交旋转: 行两两正交、单位长、det≈+1。**转置也正交** ⇒ 行列存法与
+// view/invView 的二义**都只差一个共轭**, 统一交给 ssr.camconj 一位选; det=-1 是镜像, 舍。
+static bool camBlockOk(const float* r)
+{
+	auto dot3 = [](const float* a, const float* b) {
+		return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+	};
+	const float* rows[3] = {r, r + 3, r + 6};
+	for (int i = 0; i < 3; ++i)
+	{
+		const float n2 = dot3(rows[i], rows[i]);
+		if (n2 < 0.998f || n2 > 1.002f) // |len-1| < 1e-3  ⇔  len² ∈ (0.998, 1.002)
+			return false;
+	}
+	for (int i = 0; i < 3; ++i)
+		for (int j = i + 1; j < 3; ++j)
+			if (std::fabs(dot3(rows[i], rows[j])) > 1e-3f)
+				return false;
+	const float det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) +
+	                  r[2] * (r[3] * r[7] - r[4] * r[6]);
+	return std::fabs(det - 1.0f) < 1e-3f;
+}
+
+// 打包行主序 3x3 → 四元数 (Shepperd 取最大主元), 出参已归一化; 退化返回 false。
+static bool camQuat(const float* r, float* q)
+{
+	const float tr = r[0] + r[4] + r[8];
+	float s;
+	if (tr > 0.0f)
+	{
+		s = std::sqrt(tr + 1.0f) * 2.0f;
+		q[3] = 0.25f * s;
+		q[0] = (r[7] - r[5]) / s;
+		q[1] = (r[2] - r[6]) / s;
+		q[2] = (r[3] - r[1]) / s;
+	}
+	else if (r[0] > r[4] && r[0] > r[8])
+	{
+		s = std::sqrt(1.0f + r[0] - r[4] - r[8]) * 2.0f;
+		q[3] = (r[7] - r[5]) / s;
+		q[0] = 0.25f * s;
+		q[1] = (r[1] + r[3]) / s;
+		q[2] = (r[2] + r[6]) / s;
+	}
+	else if (r[4] > r[8])
+	{
+		s = std::sqrt(1.0f + r[4] - r[0] - r[8]) * 2.0f;
+		q[3] = (r[2] - r[6]) / s;
+		q[0] = (r[1] + r[3]) / s;
+		q[1] = 0.25f * s;
+		q[2] = (r[5] + r[7]) / s;
+	}
+	else
+	{
+		s = std::sqrt(1.0f + r[8] - r[0] - r[4]) * 2.0f;
+		q[3] = (r[3] - r[1]) / s;
+		q[0] = (r[2] + r[6]) / s;
+		q[1] = (r[5] + r[7]) / s;
+		q[2] = 0.25f * s;
+	}
+	const float n = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+	if (!(n > 0.5f))
+		return false;
+	for (int i = 0; i < 4; ++i)
+		q[i] /= n;
+	return true;
+}
+
+// 读回解析: 每 16B 对齐偏移试一个 4x4 的左上 3x3 → 候选表 → 按 ssr.camidx 选 → 发布四元数。
+static void camParse(const unsigned char* data, UINT bytes)
+{
+	if (!data || bytes < 64)
+		return;
+	float cand[8][9];
+	int   candOff[8];
+	int   n = 0;
+	const UINT maxOff = bytes - 64;
+	for (UINT off = 0; off <= maxOff && n < 8; off += 16)
+	{
+		float m[16];
+		std::memcpy(m, data + off, sizeof(m));
+		float p[9] = {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]}; // 左上 3x3 打包
+		if (!camBlockOk(p))
+			continue;
+		for (int i = 0; i < 9; ++i)
+			cand[n][i] = p[i];
+		candOff[n] = static_cast<int>(off);
+		++n;
+	}
+	const bool logNow = (g_camLogN < 6) || ((g_camLogN % 128) == 0);
+	++g_camLogN;
+	if (n == 0)
+	{
+		if (logNow)
+			logLine("SSR侦察: [cam] 解析#" + std::to_string(g_camLogN) + " bytes=" +
+			        std::to_string(bytes) + " 无正交旋转候选 (槽" +
+			        std::to_string(g_camCurSlot) + ")");
+		if (g_ssrCamSlot < 0 && ++g_camNoCand >= 180)
+		{ // 自动轮槽: 连续 ~3s 每帧都空 ⇒ 换下一个 VS 槽试 (camslot 固定值时不轮)
+			g_camNoCand = 0;
+			const int prev = g_camCurSlot;
+			g_camCurSlot = (g_camCurSlot + 1) & 3;
+			logLine("SSR侦察: [cam] 槽" + std::to_string(prev) +
+			        " 连续 180 帧无候选 → 自动试 槽" + std::to_string(g_camCurSlot) +
+			        " (ini ssr.camslot 可固定)");
+		}
+		return;
+	}
+	g_camNoCand = 0;
+	const int k = (g_ssrCamIdx >= 0 && g_ssrCamIdx < n) ? g_ssrCamIdx : 0;
+	float q[4];
+	if (!camQuat(cand[k], q))
+		return;
+	if (g_ssrCamConj)
+	{
+		q[0] = -q[0];
+		q[1] = -q[1];
+		q[2] = -q[2];
+	}
+	g_ssrV1CamQ[0] = q[0];
+	g_ssrV1CamQ[1] = q[1];
+	g_ssrV1CamQ[2] = q[2];
+	g_ssrV1CamQ[3] = q[3];
+	if (logNow)
+	{
+		std::string cs;
+		for (int i = 0; i < n; ++i)
+			cs += (i ? "," : "") + std::string("#") + std::to_string(i) + "@" +
+			      std::to_string(candOff[i]);
+		logLine("SSR侦察: [cam] 解析#" + std::to_string(g_camLogN) + " bytes=" +
+		        std::to_string(bytes) + " 候选=" + std::to_string(n) + " [" + cs + "] 选 idx=" +
+		        std::to_string(k) + " q=(" + std::to_string(q[0]) + "," + std::to_string(q[1]) +
+		        "," + std::to_string(q[2]) + "," + std::to_string(q[3]) + ") conj=" +
+		        std::to_string(g_ssrCamConj) + " 槽" + std::to_string(g_camCurSlot));
+	}
+}
+
+// 帧末读回 (notePresent 调): 上一帧发的拷贝此刻 GPU 必已完成 —— 与 probeDumpTick 同款
+// "不插进游戏记录流中间" 的纪律, Map 不会卡在某个 draw 之间; 上下文从 staging 自取
+// (GetDevice → GetImmediateContext, 与 probeDumpTick 同法), 不持任何悬垂指针。
+static void camMapTick()
+{
+	if (!g_camPend || !g_camStg || !g_ssrV1CamOn)
+		return;
+	ID3D11Device* dev = nullptr;
+	g_camStg->GetDevice(&dev);
+	ID3D11DeviceContext* ctx = nullptr;
+	if (dev)
+		dev->GetImmediateContext(&ctx);
+	if (!ctx)
+	{
+		if (dev)
+			dev->Release();
+		return; // 拿不到上下文 ⇒ 下帧再试 (g_camPend 留着)
+	}
+	D3D11_MAPPED_SUBRESOURCE mr{};
+	const HRESULT hr = ctx->Map(g_camStg, 0, D3D11_MAP_READ, 0, &mr);
+	if (SUCCEEDED(hr) && mr.pData)
+		camParse(static_cast<const unsigned char*>(mr.pData), g_camStgW);
+	if (SUCCEEDED(hr))
+	{
+		ctx->Unmap(g_camStg, 0);
+		g_camPend = false; // 读成功才清; 失败留着下帧重试
+	}
+	ctx->Release();
+	if (dev)
+		dev->Release();
+}
+
+// 槽7 观察: 本帧第一次命中 camslot 的非空绑定 → 拷到 staging (每帧至多一次)。
+static void camVSBOnce(ID3D11DeviceContext* ctx, UINT StartSlot, UINT NumBuffers,
+                       ID3D11Buffer* const* pp)
+{
+	if (!g_ssrV1CamOn || g_ssrV1Edge < 2 || !pp || !NumBuffers)
+		return; // edge<2 用不到 cube 朝向 ⇒ 不白拷 (相机数据只服务 edge=2 的采样方向)
+	if (g_camCurSlot < static_cast<int>(StartSlot) ||
+	    g_camCurSlot >= static_cast<int>(StartSlot + NumBuffers))
+		return;
+	const uint64_t fr = g_presentCount.load(std::memory_order_relaxed) + 1;
+	if (fr == g_camCopyFr)
+		return;
+	ID3D11Buffer* b = pp[g_camCurSlot - static_cast<int>(StartSlot)];
+	if (!b)
+		return;
+	g_camCopyFr = fr;
+	D3D11_BUFFER_DESC bd{};
+	b->GetDesc(&bd);
+	if (!bd.ByteWidth)
+		return;
+	if (!g_camStg || g_camStgW != bd.ByteWidth || g_camStgM != bd.MiscFlags ||
+	    g_camStgS != bd.StructureByteStride)
+	{
+		camStgRelease();
+		ID3D11Device* dev = nullptr;
+		b->GetDevice(&dev);
+		if (!dev)
+			return;
+		D3D11_BUFFER_DESC sd = bd;
+		sd.Usage = D3D11_USAGE_STAGING;
+		sd.BindFlags = 0;
+		sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		ID3D11Buffer* stg = nullptr;
+		HRESULT hr = dev->CreateBuffer(&sd, nullptr, &stg); // 先按原样 MiscFlags (同 probeDumpTick 口径)
+		if (FAILED(hr))
+		{
+			sd.MiscFlags = 0; // 再退掉 SHARED/STRUCTURED 之类
+			hr = dev->CreateBuffer(&sd, nullptr, &stg);
+		}
+		if (FAILED(hr) || !stg)
+		{
+			static long s_camCg = 0;
+			if (++s_camCg <= 3 || (s_camCg % 128) == 0)
+				logLine("SSR侦察: [cam] CreateBuffer(STAGING) 失败 hr=" +
+				        std::to_string(static_cast<long>(hr)) + " w=" +
+				        std::to_string(bd.ByteWidth) + " misc=" + std::to_string(bd.MiscFlags));
+			dev->Release();
+			return;
+		}
+		dev->Release();
+		g_camStg = stg;
+		g_camStgW = bd.ByteWidth;
+		g_camStgM = bd.MiscFlags;
+		g_camStgS = bd.StructureByteStride;
+	}
+	g_ssrSelfCopy = true;
+	ctx->CopyResource(g_camStg, b);
+	g_ssrSelfCopy = false;
+	g_camPend = true;
+}
+
+// 槽7 钩本体: 与其它钩同款 lookup/real/watch 口径; real 永远调 (不观察也绝不吞游戏的绑定)。
+static void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* ctx, UINT StartSlot,
+                                                         UINT NumBuffers,
+                                                         ID3D11Buffer* const* ppConstantBuffers)
+{
+	using Fn_t = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11Buffer* const*);
+	SsrCtxEntry* e = lookupSsrCtx(ctx ? *reinterpret_cast<void***>(ctx) : nullptr);
+	const Fn_t real = e ? reinterpret_cast<Fn_t>(e->orig7) : nullptr;
+	if (!real) // 只有 ok7 校验通过才会被 patch, 理论不可达 (与 hookedCopyResource 同口径)
+		return;
+	if (ssrWatch(e, ctx) && g_ssrOn.load(std::memory_order_relaxed))
+		camVSBOnce(ctx, StartSlot, NumBuffers, ppConstantBuffers);
+	real(ctx, StartSlot, NumBuffers, ppConstantBuffers);
+}
+
 // 挂 immediate context 槽33/50 —— 幂等 (按 vtable 去重); 门控 = pocbEnabled + probe + ssr
 static void installSsrRecon(ID3D11Device* dev)
 {
@@ -2879,10 +3167,13 @@ static void installSsrRecon(ID3D11Device* dev)
 	void* o33 = vtbl[33];
 	void* o50 = vtbl[50];
 	void* o47 = vtbl[47]; // CopyResource (Step 2a 身份识别通道)
+	void* o7 = vtbl[7];   // VSSetConstantBuffers (v0.18.17 P3 相机朝向读回)
 	logLine("SSR侦察: ctx vtable=" + hexOf(vtbl) + " slot33(OMSetRenderTargets) 原值=" + hexOf(o33) +
 	        " 来自 " + modulePathOf(o33) + "; slot50(ClearRenderTargetView) 原值=" + hexOf(o50) +
 	        " 来自 " + modulePathOf(o50) + "; slot47(CopyResource) 原值=" + hexOf(o47) +
 	        " 来自 " + modulePathOf(o47));
+	logLine("SSR侦察: ctx slot7(VSSetConstantBuffers) 原值=" + hexOf(o7) + " 来自 " +
+	        modulePathOf(o7));
 	if (!isD3D11Family(o33) || !isD3D11Family(o50))
 	{
 		logLine("SSR侦察: ctx slot33/50 原值不在 d3d11/renderdoc — 跳过 (防错槽位)");
@@ -2896,6 +3187,11 @@ static void installSsrRecon(ID3D11Device* dev)
 	const bool ok47 = isD3D11Family(o47);
 	if (!ok47)
 		logLine("SSR侦察: ctx slot47 原值不在 d3d11/renderdoc — 不挂 (身份识别降级, 槽33/50 照常)");
+	// slot7 同 ok47 口径: 校验失败只降级该槽 (不挂) —— 挂错槽的代价是游戏每帧绑常量缓冲
+	// 全丢 (比 47 挂错更致命: 绑定吞了 = 整场景无光照/无变换), 所以这道阀绝不能省。
+	const bool ok7 = isD3D11Family(o7);
+	if (!ok7)
+		logLine("SSR侦察: ctx slot7 原值不在 d3d11/renderdoc — 不挂 (P3 相机朝向读回降级, 其余照常)");
 	if (g_ssrCtxN >= (int)(sizeof(g_ssrCtx) / sizeof(g_ssrCtx[0])))
 	{
 		logLine("SSR侦察: ctx 登记表已满 — 跳过 (防越界)");
@@ -2908,13 +3204,19 @@ static void installSsrRecon(ID3D11Device* dev)
 	g_ssrCtx[g_ssrCtxN].orig33 = o33;
 	g_ssrCtx[g_ssrCtxN].orig50 = o50;
 	g_ssrCtx[g_ssrCtxN].orig47 = ok47 ? o47 : nullptr;
+	g_ssrCtx[g_ssrCtxN].orig7 = ok7 ? o7 : nullptr;
 	++g_ssrCtxN;
 	patchSlotLocked(&vtbl[33], reinterpret_cast<void*>(&hookedOMSetRenderTargets));
 	patchSlotLocked(&vtbl[50], reinterpret_cast<void*>(&hookedClearRTV));
 	if (ok47)
 		patchSlotLocked(&vtbl[47], reinterpret_cast<void*>(&hookedCopyResource));
+	if (ok7)
+		patchSlotLocked(&vtbl[7], reinterpret_cast<void*>(&hookedVSSetConstantBuffers));
 	logLine("SSR侦察: ctx槽33/50" + std::string(ok47 ? "/47" : "") +
 	        " 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.16.0 Step2; 逃生门 ssr=0)");
+	if (ok7)
+		logLine("SSR侦察: ctx槽7(VSSetConstantBuffers) 已挂 — v0.18.17 P3 相机朝向读回 " +
+		        std::string(g_ssrV1CamOn ? "开 (camrot=1)" : "关 (camrot=0)"));
 	LeaveCriticalSection(&g_cs);
 	ctx->Release();
 }
@@ -3104,6 +3406,27 @@ void installProbeOn(ID3D11Device* dev)
 		g_ssrV1RipGain = static_cast<float>(iniNum("ssr.ripgain", 0.0));
 		// ---- v0.18.15: 原版高光回补量 (0 = 关 = v0.18.14 行为) ----
 		g_ssrV1Det = static_cast<float>(iniNum("ssr.v1det", 0.0));
+		// ---- v0.18.17 P3 相机朝向 (方案 B): 读回链路五个旋钮 (docs/02 §14.17) ----
+		g_ssrV1CamOn = (static_cast<int>(iniNum("ssr.camrot", 1.0)) != 0) ? 1 : 0;
+		{
+			const int sv = static_cast<int>(iniNum("ssr.camslot", -1.0));
+			g_ssrCamSlot = (sv < -1 || sv > 3) ? -1 : sv; // -1 自动轮槽, 0..3 固定
+			g_camCurSlot = (g_ssrCamSlot >= 0) ? g_ssrCamSlot : 0;
+			const int iv = static_cast<int>(iniNum("ssr.camidx", 0.0));
+			g_ssrCamIdx = (iv < 0 || iv > 7) ? 0 : iv;
+			g_ssrCamConj = (static_cast<int>(iniNum("ssr.camconj", 0.0)) != 0) ? 1 : 0;
+			const int fmv = static_cast<int>(iniNum("ssr.cubeflip", 0.0));
+			const int fm = (fmv < 0 || fmv > 7) ? 0 : fmv; // bit0=x bit1=y bit2=z 置 1 = 该轴取反
+			g_ssrV1CamFlip[0] = ((fm & 1) != 0) ? -1.0f : 1.0f;
+			g_ssrV1CamFlip[1] = (((fm >> 1) & 1) != 0) ? -1.0f : 1.0f;
+			g_ssrV1CamFlip[2] = (((fm >> 2) & 1) != 0) ? -1.0f : 1.0f;
+			logLine("SSR侦察: [cam] ini camrot=" + std::to_string(g_ssrV1CamOn) + " camslot=" +
+			        std::to_string(g_ssrCamSlot) + " camidx=" + std::to_string(g_ssrCamIdx) +
+			        " camconj=" + std::to_string(g_ssrCamConj) + " cubeflip=" +
+			        std::to_string(fm) +
+			        (g_ssrV1CamOn ? " — P3 相机朝向读回 (槽7) 开"
+			                      : " — P3 关 (p7.w 恒 0 = v0.18.16d 行为)"));
+		}
 		// ---- v0.18.8 正解B: 段后水深当法线/原点输入 (只关自己) ----
 		g_ssrWDepOn.store(iniFlag("ssr.wdep", true), std::memory_order_relaxed);
 		if (g_ssrV1Near < 0.01f || g_ssrV1Far <= g_ssrV1Near)
@@ -3981,6 +4304,8 @@ void notePresent(const char* via, IDXGISwapChain* sc)
 	// ---- v0.18.16 P1: 探针 cube 的 CPU 可读性/静态性探测 (跑满 2 次后每帧只落一个早退) ----
 	// 放在帧末 = 不插进游戏的记录流中间, Map 也不会卡在某个 draw 之间。
 	probeDumpTick();
+	// ---- v0.18.17 P3: 上一帧槽7 拷贝的读回 (Map 纪律同 probeDumpTick, 帧末做) ----
+	camMapTick();
 	// ---- 帧时基线 (v0.16.2): 每帧一次, 采样点就放在 Present 这里 ----
 	if (!g_ftIniRead)
 	{
@@ -5265,7 +5590,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.16 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
+	logLine("==== poc-presenter v0.18.17 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽7读回); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

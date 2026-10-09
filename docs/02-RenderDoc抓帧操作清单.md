@@ -3824,7 +3824,7 @@ VERDICT: FRAMING OK   EXIT=0        （闸: |dy|<=6px, |dx|<=30px）
 | 5 | `ssr.debug=6` 的 aspect 加权 bug（`:482` 放大 y 1.778×） | §14.30.5 | ⏸ 与 #4 一起改，改完**重取基线** |
 | 6 | `ssr.ripplemode=0` 对照 / `ssr.fov=58.7155` 不带 debug / `debug=1` / `ssr.blur=0` / §14.25.1 三条隔离试验 / §14.30.1 补帧时闸 | 更早 | ⏸ 旧账 |
 | 7 | 探针 cube **周期性重传**（16c 实测读回 sig 5s 即变 = 内容动态，现 `g_probeDumpN>=2` 后永久停在第 2 代会陈旧） | §14.15 日志判据 | ⏸ 待开 |
-| 8 | **P3 朝向校准**：① `Rf` 视图→世界（缺相机朝向数据源：A=固定版相机地址读 / B=挂 VSSetConstantBuffers；push 96B 满 ⇒ p6=112B 或 UBO）② D3D↔VK cube 轴/Y 翻转校准（对照游戏 585 反射定符号） | §14.16 根因、`ssr.frag:126-128/:313/:496` | ⏸ 待开（= #2 的收尾路径，未知数最大，动前拍板） |
+| 8 | **P3 朝向校准**：① `Rf` 视图→世界（数据源拍板 = B 挂 VSSetConstantBuffers 读回；push 96→128B p6/p7）② D3D↔VK cube 轴/Y 翻转校准（对照游戏 585 反射定符号） | §14.16 根因、**§14.17 实装** | 🚧 v0.18.17 已实装（槽7 读回链路 + 5 旋钮 + dirty 当帧提交），待实拍校准（camidx/camconj/cubeflip）后收口 |
 
 #### 2. v0.18.15 实现：`ssr.v1det` 命中区高光回补
 
@@ -4755,3 +4755,73 @@ sig 恒等于全 0 的 FNV 反算值 **13856201724594908557**（12/12 会话逐�
 
 **FG 亮度悬案（43.7% 缺口）**：edge=2 的 miss p50 已 1.102× HIT，但那是河床不是倒影 ⇒
 **被错内容淹没，P3 修完重拍 `debug=0` 配对再判**。
+
+##### 17 v0.18.17 P3 朝向校准实装（方案 B：槽7 cbuffer 读回；队列 #8）
+
+**拍板**：数据源 = **B 挂 `VSSetConstantBuffers` 读游戏 cbuffer**（A 游戏内存签名读被否）；
+传输 = push 扩 **p6/p7，96B → 128B**（128 = 规范下限 `maxPushConstantsSize`，必合法），
+不走 UBO —— host-visible UBO 虽免重录，但要新增资源+描述符+内存类型选择，动的面比
+「重录一条本就每帧跑的提交链」更大；每帧重录代价 ≈ vkBegin/End 一条小 cmdbuf（µs 级），
+而 fence 每帧本来就全同步 ⇒ 无新增停顿。
+
+**槽号双证（`VSSetConstantBuffers` = 槽7）**：
+- 官方 `d3d11.h` MIDL 声明序：IUnknown 0-2 + `ID3D11DeviceChild` 3-6 之后的**第一个**接口方法
+  即 `VSSetConstantBuffers` ⇒ raw index 7，与 33/47/50 同一张权威表（`docs\analysis\d3d11-ctx-slots.txt`）。
+- 安装口与槽47 同款 `isD3D11Family(vtbl[7])` 阀：原值必须来自 d3d11/renderdoc，不合格**只降级槽7**
+  （不挂），33/47/50 照常 —— 挂错槽的代价 = 游戏每帧绑定全丢（比 47 挂错更致命），阀不能省。
+- 日志**新增独立行**（`ctx slot7(VSSetConstantBuffers) 原值=… 来自 …` / `ctx槽7 … 已挂 —`），
+  **不改既有 `vtable=` 与 `ctx槽33/50` 行格式 ⇒ run2c/工具 grep 口径零影响**。
+
+**读回链路（全在 `main.cpp`，只读不动游戏任何绑定）**：
+1. 槽7 钩 `hookedVSSetConstantBuffers`：本帧在 `ssr.camslot` 槽上**第一次**非空绑定的 buffer →
+   当场 `CopyResource` 到自建 STAGING（`g_ssrSelfCopy` 包住 ⇒ 不进 [2a] 的 COPY= 计数与身份学习）；
+   每帧至多 1 次（帧号闸，其余调用整型比较早退）；staging 按源 desc 惰性重建（ByteWidth/
+   MiscFlags/StructureByteStride 三身份；先原样 MiscFlags 建、失败退 0 —— 同 probeDumpTick 口径）。
+2. `notePresent` 末 `camMapTick()`：帧末纪律同 `probeDumpTick`（不插进游戏记录流、Map 不卡 draw；
+   上下文从 staging `GetDevice→GetImmediateContext` 自取，不持悬垂指针）；上一帧发的拷贝此刻
+   GPU 必已完成（本文件每处 submit 都紧跟 fence wait）⇒ 零卡顿；Map 成功才清 pending，失败下帧重试。
+3. 解析 `camParse`：每 16B 对齐偏移取 4x4 左上 3x3，行两两正交 + 单位长 + **det≈+1** 才入候选
+   （上限 8）→ 按 `ssr.camidx` 选 → Shepperd 提取四元数归一化 → `ssr.camconj` 共轭位 → 发布
+   `g_ssrV1CamQ`。要点：**行列存法与 view/invView 的二义都只差转置 = 四元数共轭** ⇒ 全部折叠成
+   一个共轭位；det=-1 镜像块拒收；轴符号二义不在这层（交 p7.xyz）。日志：解析前 6 次 + 之后每
+   128 次打一条 `[cam] 解析#N bytes=… 候选=K [#0@0,#1@256,…] 选 idx=… q=(…)`；连续 180 帧无候选
+   且 `camslot=-1` 自动轮槽（0→1→2→3→0，可 ini 固定）。
+
+**VK 侧**：
+- push 96B → **128B**：`pcr.size=128`、struct 增 `p6`=相机四元数、`p7`=(轴符号 ±1×3, w=开关)；
+  p7.w = `camrot 且 q≠(0,0,0,0)`，**q 全 0 ⇒ 不旋 = v0.18.16d 逐位一致**（逃生门语义保留）。
+- `ssr.frag` edge=2 采样处（**只动采 uProbe 这一步，行进仍用视图空间 Rf** —— ray march 是屏内几何
+  与世界无关）：`rw = Rf + 2×cross(q.xyz, cross(q.xyz, Rf) + q.w×Rf)`（单位四元数旋转，保长）→
+  `d = normalize(rw) × p7.xyz`。
+- **相机进 `ssrV1Sig()`（仅 `ssrV1EffEdge()>=2` 时掺）**：push 内容在录制期写死 ⇒ 必须重录才生效；
+  edge<2 不掺，避免相机一动就无谓重录。配套把 `ssrOutVkFrame` 的 dirty 分支从「重录后 return 不提交」
+  改成 **「重录成功后当帧照常提交」**（录失败仍 return，RecSig 已清 0 下帧重试）：相机一动 sig 就变，
+  旧行为会变成*永远只重录不提交 ⇒ 出向冻结*；本文件每处 `vkQueueSubmit` 都紧跟 `vkWaitForFences`，
+  上一帧 cmdbuf 必已 retire ⇒ 重录 + 当帧提交合法。
+
+**五个新旋钮**（默认全安全 = 不改 ini 也能跑）：
+
+| 键 | 默认 | 语义 |
+|---|---|---|
+| `ssr.camrot` | 1 | 总开关；0 ⇒ p7.w 恒 0 = v0.18.16d 行为 |
+| `ssr.camslot` | -1 | -1=自动轮槽（~3s 无候选换下一个）；0..3=固定 VS 槽 |
+| `ssr.camidx` | 0 | 候选 4x4 下标（看 `[cam]` 日志选） |
+| `ssr.camconj` | 0 | 1=取四元数共轭（view/invView/行列二义一位切换） |
+| `ssr.cubeflip` | 0 | bit0=x bit1=y bit2=z 置 1 = 该轴取反（D3D↔VK 手性校准） |
+
+**校准协议（实拍定符号，判读口径同 §14.16）**：
+1. ini 保持 `ssr.edge=2`、`ssr.debug=0`、其余默认 → 重启 → `dllchk`→改 ini+重启→`knobchk` 三闸
+   → 与 16d **同机位**拍一张 debug=0。
+2. 目检：miss 区应呈「远岸倒影向近处的自然延续」；同时抓 `[cam]` 日志（候选数/offset/选中 q）。
+3. 不对按表迭代（每轮 = 改 ini + 重启 + 一拍，**无需重编译**）：
+   - 乱面/整片换内容 → `ssr.camidx` 换候选；
+   - 方向反着转/镜像 → `ssr.camconj=1`；
+   - 整体错轴（上下/左右翻） → `ssr.cubeflip` 置 2(y) / 1(x) / 4(z) / 组合；
+   - 全程无候选 → 按 `[cam]` 轮槽日志用 `ssr.camslot` 固定到有候选的槽。
+4. 定符号后与游戏自身 585 反射并排对照（§14.16 口径）过 = 方向修完；随后复拍 debug=0 同机位配对
+   重判 FG 亮度 43.7% 缺口。
+
+**改动面**：`ssr.frag`（PC + 采样点 + 文件头 P3 注记）、`vkrenderer.h`（3 extern）、
+`vkrenderer.cpp`（pcr=128B / struct+fill / sig / dirty 当帧提交 / 就绪日志 5 binding）、
+`main.cpp`（`SsrCtxEntry.orig7`、钩+解析链路、installSsrRecon、5 旋钮、notePresent、
+横幅 v0.18.16→**v0.18.17**、补 `<cmath>`）。编译闸 = CI（本地无编译）。

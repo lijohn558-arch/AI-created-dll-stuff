@@ -2444,12 +2444,15 @@ void ssrOutVkFrame(PocbCtx& c)
 	}
 	if (ssrV1Dirty())
 	{
-		// v1 依赖变了 (深度图刚就绪 / mode 或相机参数改 / v1 被关掉) ⇒ 只重录命令, 资源不动。
-		// 与"建图帧只建不提"同节奏: 重录的这一帧不提交, 下一帧起生效。
+		// v1 依赖变了 (深度图刚就绪 / mode 或相机参数改 / v1 被关掉 / **相机四元数每帧变**) ⇒
+		// 只重录命令, 资源不动。v0.18.17 起重录后**当帧照常提交** (旧版是重录帧不提交、下帧才
+		// 生效 —— 相机一动 sig 就变, 照旧会变成"永远只重录不提交", 出向冻结): 本文件每处
+		// vkQueueSubmit 都紧跟 vkWaitForFences (见 2462/4501 等), 上一帧提交必已 retire,
+		// 重录 + 紧接提交都合法。
 		D3D11_TEXTURE2D_DESC od{};
 		g_ssrOutTexC->GetDesc(&od);
-		ssrV1RecordOut(c, od.Width, od.Height);
-		return;
+		if (!ssrV1RecordOut(c, od.Width, od.Height))
+			return; // 录失败已把 RecSig 清 0 ⇒ 下帧继续 dirty 重试 (绝不提交坏命令)
 	}
 	c.fns.vkResetFences(c.vdev, 1, &c.fence);
 	VkSubmitInfo si{};
@@ -3293,6 +3296,26 @@ static unsigned long long ssrV1Sig()
 	// 都必须重录 + 重填描述符, 口径与 g_ssrVkImgBase/g_ssrWDepImg 那两条一致
 	s = mix(s, (unsigned long long)(uintptr_t)g_ssrV1CubeSrc);
 	s = mix(s, g_probeCpuTick);
+	// v0.18.17 P3: 相机四元数/轴符号/开关进签名 (push p6/p7 变 ⇒ 必须重录)。只在**有效 edge=2**
+	// 时掺 —— edge<2 时着色器根本不碰 p6/p7, 不掺可避免相机一动就无谓重录。
+	if (ssrV1EffEdge() >= 2)
+	{
+		cv.f = g_ssrV1CamQ[0];
+		s = mix(s, cv.u);
+		cv.f = g_ssrV1CamQ[1];
+		s = mix(s, cv.u);
+		cv.f = g_ssrV1CamQ[2];
+		s = mix(s, cv.u);
+		cv.f = g_ssrV1CamQ[3];
+		s = mix(s, cv.u);
+		cv.f = g_ssrV1CamFlip[0];
+		s = mix(s, cv.u);
+		cv.f = g_ssrV1CamFlip[1];
+		s = mix(s, cv.u);
+		cv.f = g_ssrV1CamFlip[2];
+		s = mix(s, cv.u);
+		s = mix(s, (unsigned long long)(unsigned)(g_ssrV1CamOn ? 1 : 0));
+	}
 	return s ? s : 1;
 }
 
@@ -4132,7 +4155,8 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		VkPushConstantRange pcr{};
 		pcr.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 		pcr.offset = 0;
-		pcr.size = 96; // v0.18.7: 48B → 64B (p3); v0.18.9: 64B → 80B (多一格 p4); v0.18.14: 80B → 96B (多一格 p5 = ripk/ripamp/ripgain)
+		pcr.size = 128; // v0.18.7: 48B → 64B (p3); v0.18.9: 64B → 80B (p4); v0.18.14: 80B → 96B (p5);
+		                // v0.18.17: 96B → 128B (p6 相机四元数 + p7 轴校准/开关) —— 128B = 规范下限 maxPushConstantsSize
 		VkPipelineLayoutCreateInfo li{};
 		li.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 		li.setLayoutCount = 1;
@@ -4207,7 +4231,7 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 	}
 
 	g_ssrV1State = 1;
-	logLine("SSR侦察: [v1] SSR v1 就绪: 全屏三角 + 4 binding(色/深/底色/段后水深) + push constant 96B "
+	logLine("SSR侦察: [v1] SSR v1 就绪: 全屏三角 + 5 binding(色/深/底色/段后水深/探针cube) + push constant 128B "
 	        "mode=" + std::to_string(g_ssrV1Mode) +
 	        " fov=" + std::to_string(g_ssrV1Fov) +
 	        " near=" + std::to_string(g_ssrV1Near) +
@@ -4358,6 +4382,8 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 			float p3[4];
 			float p4[4];
 			float p5[4];
+			float p6[4]; // v0.18.17: 相机四元数 (视图→世界), 全 0 = 未就绪
+			float p7[4]; // v0.18.17: cube 轴符号 (±1) + 开关 (p6 就绪且 camrot=1 才为 1)
 		} pc;
 		pc.p0[0] = std::tan(g_ssrV1Fov * 3.14159265358979f / 360.0f); // tan(垂直FOV/2)
 		pc.p0[1] = static_cast<float>(w) / static_cast<float>(h ? h : 1);
@@ -4382,11 +4408,23 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		pc.p4[2] = static_cast<float>(g_ssrV1RippleMode);
 		pc.p4[3] = static_cast<float>(ssrV1EffEdge()); // v0.18.16: 有效 edge —— 没真 cube 时 2 会退成 0, 防 mix(baseRGB,全0,1) 黑水
 		// v0.18.14 p5 = (输入端软限幅阈值 / 位移幅度 / 梯度增益), 三者 0 = 自动 = v0.18.13 行为
-		// v0.18.15 p5.w = (原版高光回补量), 0 = 关 = v0.18.14 行为 —— 复用空槽, push constant 仍 96B
+		// v0.18.15 p5.w = (原版高光回补量), 0 = 关 = v0.18.14 行为 (到此 96B); v0.18.17 扩 128B 见 p6/p7
 		pc.p5[0] = g_ssrV1RipK;
 		pc.p5[1] = g_ssrV1RipAmp;
 		pc.p5[2] = g_ssrV1RipGain;
 		pc.p5[3] = g_ssrV1Det;
+		// v0.18.17 P3: p6 = 相机四元数 (视图→世界); p7 = cube 轴符号 + 开关 (q 全 0 或 camrot=0 ⇒ 关)
+		pc.p6[0] = g_ssrV1CamQ[0];
+		pc.p6[1] = g_ssrV1CamQ[1];
+		pc.p6[2] = g_ssrV1CamQ[2];
+		pc.p6[3] = g_ssrV1CamQ[3];
+		pc.p7[0] = g_ssrV1CamFlip[0];
+		pc.p7[1] = g_ssrV1CamFlip[1];
+		pc.p7[2] = g_ssrV1CamFlip[2];
+		pc.p7[3] = (g_ssrV1CamOn && (g_ssrV1CamQ[0] != 0.0f || g_ssrV1CamQ[1] != 0.0f ||
+		                             g_ssrV1CamQ[2] != 0.0f || g_ssrV1CamQ[3] != 0.0f))
+		              ? 1.0f
+		              : 0.0f;
 		c.fns.vkCmdPushConstants(g_ssrVkCmdOut, g_ssrV1Pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
 		                         sizeof(pc), &pc);
 	}

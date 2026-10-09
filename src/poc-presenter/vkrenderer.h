@@ -223,6 +223,12 @@ namespace pocmain
 	extern float                   g_ssrV1RipAmp;  // ini ssr.ripamp 位移幅度 (px, 0=自动 clamp(ripplesz*1.5,6,16); v0.18.14, 默认 0)
 	extern float                   g_ssrV1RipGain; // ini ssr.ripgain 梯度增益 (0=自动=10; v0.18.14, 默认 0)
 	extern float                   g_ssrV1Det;     // ini ssr.v1det 原版高光回补量 0..1 (0=关; v0.18.15, 默认 0)
+	// ---- v0.18.17 (P3 朝向, 方案 B): 相机旋转四元数 + cube 轴校准 ----
+	// main.cpp 的槽7 cbuffer 读回链路写, vkrenderer.cpp 只读; q 全 0 = 未就绪 (⇒ p7.w=0,
+	// 行为与 v0.18.16d 逐位一致)。两者都进 ssrV1Sig (push p6/p7 内容变 ⇒ 重录)。
+	extern float                   g_ssrV1CamQ[4];    // (x,y,z,w) 单位四元数, v_view → v_world
+	extern float                   g_ssrV1CamFlip[3]; // (±1,±1,±1) cube 轴符号 — ini ssr.cubeflip
+	extern int                     g_ssrV1CamOn;      // ini ssr.camrot 0=关 (p7.w 恒 0) 1=开 (默认 1)
 	// ---- v0.18.16 (issue B): 探针 cube 从 D3D11 读回后交给 VK 上传 ----
 	// D3D11 侧 (main.cpp 的 P1 探测) 负责写这四个, VK 侧 (vkrenderer.cpp) 只读;
 	// tick 变 = 内容换过一次 ⇒ ssrV1Sig 变 ⇒ 重录 + 重填描述符 (与其它入向图同一口径)。
