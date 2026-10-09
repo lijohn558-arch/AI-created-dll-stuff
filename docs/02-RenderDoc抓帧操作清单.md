@@ -3824,7 +3824,7 @@ VERDICT: FRAMING OK   EXIT=0        （闸: |dy|<=6px, |dx|<=30px）
 | 5 | `ssr.debug=6` 的 aspect 加权 bug（`:482` 放大 y 1.778×） | §14.30.5 | ⏸ 与 #4 一起改，改完**重取基线** |
 | 6 | `ssr.ripplemode=0` 对照 / `ssr.fov=58.7155` 不带 debug / `debug=1` / `ssr.blur=0` / §14.25.1 三条隔离试验 / §14.30.1 补帧时闸 | 更早 | ⏸ 旧账 |
 | 7 | 探针 cube **周期性重传**（16c 实测读回 sig 5s 即变 = 内容动态，现 `g_probeDumpN>=2` 后永久停在第 2 代会陈旧） | §14.15 日志判据 | ⏸ 待开 |
-| 8 | **P3 朝向校准**：① `Rf` 视图→世界（数据源拍板 = B 挂 VSSetConstantBuffers 读回；push 96→128B p6/p7）② D3D↔VK cube 轴/Y 翻转校准（对照游戏 585 反射定符号） | §14.16 根因、**§14.17 实装** | 🚧 v0.18.17 已实装（槽7 读回链路 + 5 旋钮 + dirty 当帧提交），待实拍校准（camidx/camconj/cubeflip）后收口 |
+| 8 | **P3 朝向校准**：① `Rf` 视图→世界（数据源拍板 = B 挂 VSSetConstantBuffers 读回；push 96→128B p6/p7）② D3D↔VK cube 轴/Y 翻转校准（对照游戏 585 反射定符号） | §14.16 根因、**§14.17 实装**、**条目18 死锁修复** | 🚧 v0.18.17 已实装但实拍日志证实**读回死锁**（q 恒 0、旋转从未生效，见条目18）；**v0.18.18 改 14 槽全扫 + 首候选锁定 + 绑定普查**，待实拍（普查定槽 → camidx/camconj/cubeflip 迭代）后收口 |
 
 #### 2. v0.18.15 实现：`ssr.v1det` 命中区高光回补
 
@@ -4804,7 +4804,7 @@ sig 恒等于全 0 的 FNV 反算值 **13856201724594908557**（12/12 会话逐�
 | 键 | 默认 | 语义 |
 |---|---|---|
 | `ssr.camrot` | 1 | 总开关；0 ⇒ p7.w 恒 0 = v0.18.16d 行为 |
-| `ssr.camslot` | -1 | -1=自动轮槽（~3s 无候选换下一个）；0..3=固定 VS 槽 |
+| `ssr.camslot` | -1 | -1=自动（条目17 为 ~3s 无候选轮槽 0..3；**条目18 改为 14 槽全扫 + 首候选锁定**）；0..3=固定 VS 槽（**条目18 起扩为 0..13**） |
 | `ssr.camidx` | 0 | 候选 4x4 下标（看 `[cam]` 日志选） |
 | `ssr.camconj` | 0 | 1=取四元数共轭（view/invView/行列二义一位切换） |
 | `ssr.cubeflip` | 0 | bit0=x bit1=y bit2=z 置 1 = 该轴取反（D3D↔VK 手性校准） |
@@ -4825,3 +4825,75 @@ sig 恒等于全 0 的 FNV 反算值 **13856201724594908557**（12/12 会话逐�
 `vkrenderer.cpp`（pcr=128B / struct+fill / sig / dirty 当帧提交 / 就绪日志 5 binding）、
 `main.cpp`（`SsrCtxEntry.orig7`、钩+解析链路、installSsrRecon、5 旋钮、notePresent、
 横幅 v0.18.16→**v0.18.17**、补 `<cmath>`）。编译闸 = CI（本地无编译）。
+
+> **⚠️ 条目18 修订**：本条描述的「自动轮槽」实拍证实是**死锁**（没拷就没解析、没解析就换不了
+> 槽 ⇒ 永远卡槽0，q 恒 0），v0.18.18 已改为 14 槽全扫 + 首候选锁定 + 绑定普查 —— 见下条目18。
+
+---
+
+##### 18 v0.18.18 P3 读回死锁修复：VS cb 槽 0..13 全扫 + 每槽独立 staging + 绑定普查（队列 #8 二段）
+
+**为什么还有这一发（v0.18.17 实拍日志诊断，2026-10-09）**：v0.18.17（`b2ac5f6`，CI SUCCESS）
+用户实拍回报「还是问题严重」，但日志证明**旋转链路从未生效** —— 全会话只有两条 `[cam]` 行：
+
+| 日志证据 | 含义 |
+|---|---|
+| `[cam] ini camrot=1 camslot=-1 camidx=0 camconj=0 cubeflip=0` | 五旋钮默认值读入正常（启动回显） |
+| `[cam] 解析#1 bytes=128 无正交旋转候选 (槽0)`（13:55:08 加载期） | **全程唯一一次解析**，此后零拷贝、零解析 |
+
+⇒ `g_ssrV1CamQ` 恒全 0 ⇒ `p7.w=0` ⇒ 着色器不旋 ⇒ 画面 = 16d 原行为。截图 miss 区的放射状
+涂抹是该机位下视图空间直喂的表现，与 16d 的差异仅机位差，**不构成朝向判读依据**。
+其余链路全正常（已排除）：`v1 就绪 128B / 5 binding`、`edge=2` 全程、`[2a]` 心跳照常、
+无 `ssrWatch` 身份失配、`ctx vtable=` 10 行 = 5 次启动×2 行（探针+SSR）装钩正常。
+
+**根因 = 结构性死锁（不是朝向算错）**：
+- 拷贝条件 = 「`camslot` 槽上有非空绑定」，而 `camslot=-1` 时当前槽 `g_camCurSlot` 初始 0；
+- 自动换槽判据 = 「`camParse` 里连续 180 次无候选」；
+- **没有拷贝 ⇒ 没有解析 ⇒ `g_camNoCand` 永不增 ⇒ 永远卡槽0** —— 判据的输入依赖判据自己的输出；
+- 实拍里槽0 恰只在加载期绑过一次 128B（无旋转块）⇒ 链路从此静默，日志不再有任何 `[cam]` 行。
+
+**修法（仅 `main.cpp`，shader/p6p7 语义不动）**：
+
+1. **14 槽全扫**：`camslot=-1` 时本帧对 VS 常量缓冲槽 0..13 **每个**槽取第一次非空绑定 →
+   各自 `CopyResource` 到**每槽独立的 staging**（帧号闸按槽记，每帧每槽至多 1 次；
+   staging 身份 ByteWidth/MiscFlags/StructureByteStride 三元组按槽惰性重建）。
+   `camslot=0..13` 固定值语义不变（只拷那一个槽），ini 校验从 0..3 放宽到 **0..13**。
+2. **锁定替代轮槽**：`camParse` 带槽号参数；全扫时**首个产出正交候选的槽**写进 `g_camLockSlot`
+   并打 `[cam] 自动锁定 槽N` 行，锁后只拷/只发布该槽（收敛回单槽成本）。换槽判据从
+   「解析次数」改成「真实解析结果」，死锁结构性消失；180 次轮槽分支已删除
+   （`g_camCurSlot`/`g_camNoCand` 两个全局已删）。
+3. **绑定普查 `camCensus`**：每 ~300 帧（首拍提前到 ~60 帧）打一行
+   `[cam] 普查#N 帧=F (槽:非空/空/字节/拷) 槽0:b/n/w/c 槽1:… 槽13:…`
+   —— 一拍看全各槽绑定次数 / 空绑次数 / 最近真拷贝字节数 / 拷贝次数，
+   **相机 cb 在哪槽直接从这行读**；计数在 `camVSBOnce` 里逐绑定累计（纯整型，无额外 vtable 调用，
+   字节数只在真拷贝处取 `GetDesc`）。
+4. **`camMapTick` 帧末逐槽 Map/Unmap**：全无 pend 时帧级早退；设备从任一有 staging 的槽
+   `GetDevice → GetImmediateContext` 自取（与 `probeDumpTick` 同纪律，不持悬垂指针）；
+   Map 成功才清该槽 pending，失败下帧重试。
+
+**新日志速览（实拍判读口径）**：
+
+- `ctx槽7(VSSetConstantBuffers) 已挂 — v0.18.18 P3 相机朝向读回 开 (camrot=1, VS cb 槽0..13 全扫)` = 新 DLL 装钩；
+- `[cam] ini camrot=… camslot=… camidx=… camconj=… cubeflip=…` = 五旋钮启动回显（**行格式不变，knobchk 口径不变**）；
+- `[cam] 普查#…` = 各槽绑定画像（定槽依据）；
+- `[cam] 自动锁定 槽N` = 相机 cb 所在槽已锁定（此后可 `ssr.camslot=N` 固定，需重启）；
+- `[cam] 解析#… 候选=… q=(…)` = 朝向真发布；q 全 0 或无解析 ⇒ `p7.w=0` = 16d 行为。
+
+**五旋钮语义变化**：仅 `ssr.camslot` —— 默认 -1 仍为自动，含义从「~3s 无候选轮槽 0..3」改为
+「14 槽全扫 + 首候选锁定」，固定值范围 0..3 → **0..13**；`camrot/camidx/camconj/cubeflip`
+不变，回显行格式不变。五旋钮默认值仍全安全（不改 ini 即可跑）。
+
+**改动面**：仅 `main.cpp` —— 全局状态改 14 槽数组 + `g_camLockSlot` + 普查计数、
+`camStgRelease(int)` 按槽释放、`camParse(…, int slot)`、`camMapTick` 逐槽、`camCensus` 新增、
+`camVSBOnce` 全槽扫描、ini 校验与回显、挂载日志行、横幅 v0.18.17→**v0.18.18**。
+本地闸：`check1` RESULT OK / `quotescan3` oddQuoteLines=0 / `enc_gate` ENC GATE PASS /
+`badNullCreateInfo=0`；编译闸 = CI（本地无编译）。
+**判新旧注意**：本发 shader/spv 未动 ⇒ `dllchk` 的 spv 内容闸对 17/18 两版 DLL 都会 PASS，
+**版本以日志横幅 `==== poc-presenter v0.18.18` 为准**；`dllchk -After "<commit 的 %ci 时间>"`
+可查 C++ 侧新旧（artifact 时区已归一）。
+
+**下一发交接（实拍三闸照旧）**：artifact zip 覆盖 DLL → `dllchk` → ini（`ssr.edge=2`、
+`ssr.debug=0`，旋钮全默认）→ 改完重启 → `knobchk` PASS → **同机位**拍图 + 回传含
+`[cam] 普查` / `自动锁定` / `解析` 行的完整日志 → 按普查行确认锁定槽 →
+迭代 `camidx`（乱面）/ `camconj=1`（反转镜像）/ `cubeflip`（错轴）至 miss 区呈
+「远岸倒影向近处自然延续」→ 与游戏 585 反射并排对照过 → 队列 #8 收口、#2 走通。
