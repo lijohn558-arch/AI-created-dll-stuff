@@ -1394,6 +1394,9 @@ static CamEnt g_camEnt[kCamSlotN][kCamEntN] = {};
 static int   g_camLockS = -1; // 稳定度锁定的槽 (-1 = 未锁; 锁前 q 不发布)
 static int   g_camLockE = -1; // 稳定度锁定的条目
 static long  g_camLogN = 0;   // [cam] 解析次数 (日志节流: 前 6 次后每 128 次)
+// v0.18.21 观测: 锁定条目首帧全量 hex 落盘一次 (默认关 = v0.18.20 逐位; 只写文件不改画面)
+static int   g_ssrCamDumpOn = 0;
+static bool  g_camDumpDone = false;
 // ---- 绑定普查 (camCensus): 每槽计数, 每 ~300 帧打一行 —— 一拍看全谁绑在哪 ----
 static uint32_t      g_camCenBind[kCamSlotN] = {}; // 区间内非空绑定次数
 static uint32_t      g_camCenNull[kCamSlotN] = {}; // 区间内空绑定次数
@@ -1413,6 +1416,9 @@ int                  g_probeW         = 0;
 int                  g_probeH         = 0;
 int                  g_probeLayers    = 0;
 unsigned long long   g_probeCpuTick   = 0;       // 内容代数, 变了才重传
+// v0.18.21 观测: cube 6 面 PFM 落盘一次 (默认关 = v0.18.20 逐位; 只写文件不改画面)
+static int                  g_probeDumpOn = 0;
+static bool                 g_probeFileDone = false;
 
 // ---- v0.18.7 B 水色保留 (docs/05 D4 补遗): 585 在被出向回写覆盖**之前**抢一份当合成底色 ----
 // 为什么必须有它: 合成底色原先 = 324 快照 = 段16 (水体 pass) **之前**的画面, 里面没画水;
@@ -3066,6 +3072,40 @@ static void camParse(const unsigned char* data, UINT bytes, int slot, int ent)
 	}
 	if (slot != g_camLockS || ent != g_camLockE)
 		return; // 发布闸 (v0.18.19): 未锁定不发布 (q 全 0 = 16d), 锁定后只认锁定条目
+	if (g_ssrCamDumpOn && !g_camDumpDone)
+	{ // v0.18.21 观测: 锁定条目首帧全量 hex 落盘 (辨识 mat4 块 -> 反解真投影, docs/02 条目22)
+		g_camDumpDone = true;
+		const std::string path = pluginDir() + "\\ssr-camdump.txt";
+		FILE* fp = fopen(path.c_str(), "wb");
+		if (fp)
+		{
+			std::string head = "# poc-presenter v0.18.21 camdump 槽" + std::to_string(slot) + "." +
+				std::to_string(ent) + " bytes=" + std::to_string(bytes) +
+				" (锁定条目首帧; 16B/行 = 1 vec4; hex 为原始小端字节)\n";
+			head += "候选: ";
+			for (int i = 0; i < n; ++i)
+				head += "#" + std::to_string(i) + "@" + std::to_string(candOff[i]) +
+				        (i + 1 < n ? "," : "\n");
+			fwrite(head.data(), 1, head.size(), fp);
+			for (UINT off = 0; off + 16 <= bytes; off += 16)
+			{
+				unsigned int u[4];
+				float f[4];
+				std::memcpy(u, data + off, 16);
+				std::memcpy(f, data + off, 16);
+				char line[224];
+				const int ln = std::snprintf(line, sizeof line,
+					"+0x%03X | %08X %08X %08X %08X | %+.6f %+.6f %+.6f %+.6f\n",
+					off, u[0], u[1], u[2], u[3], f[0], f[1], f[2], f[3]);
+				fwrite(line, 1, static_cast<size_t>(ln), fp);
+			}
+			fclose(fp);
+			logLine("SSR侦察: [cam] camdump: 槽" + std::to_string(slot) + "." + std::to_string(ent) +
+				" bytes=" + std::to_string(bytes) + " -> ssr-camdump.txt (每行 1 vec4)");
+		}
+		else
+			logLine("SSR侦察: [cam] camdump: 打不开 " + path);
+	}
 	float q[4];
 	if (!camQuat(cand[k], q))
 		return;
@@ -3474,7 +3514,7 @@ static void installSsrRecon(ID3D11Device* dev)
 	logLine("SSR侦察: ctx槽33/50" + std::string(ok47 ? "/47" : "") +
 	        " 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.16.0 Step2; 逃生门 ssr=0)");
 	if (ok7)
-		logLine("SSR侦察: ctx槽7(VSSetConstantBuffers) 已挂 — v0.18.20 P3 相机朝向读回(列正交+多条目) " +
+		logLine("SSR侦察: ctx槽7(VSSetConstantBuffers) 已挂 — v0.18.21 P3 相机朝向读回(列正交+多条目) " +
 		        std::string(g_ssrV1CamOn ? "开 (camrot=1, VS cb 槽0..13 全扫)" : "关 (camrot=0)"));
 	LeaveCriticalSection(&g_cs);
 	ctx->Release();
@@ -3685,6 +3725,13 @@ void installProbeOn(ID3D11Device* dev)
 			        (g_ssrV1CamOn ? " — P3 相机朝向读回 (槽0..13 全扫) 开"
 			                      : " — P3 关 (p7.w 恒 0 = v0.18.16d 行为)"));
 		}
+		// ---- v0.18.21 观测两旋钮 (默认 0 = 关 = v0.18.20 逐位; 只写文件不改画面) ----
+		g_probeDumpOn = (static_cast<int>(iniNum("ssr.probedump", 0.0)) != 0) ? 1 : 0;
+		g_ssrCamDumpOn = (static_cast<int>(iniNum("ssr.camdump", 0.0)) != 0) ? 1 : 0;
+		if (g_probeDumpOn)
+			logLine("SSR侦察: ini ssr.probedump=1 -> 探针 cube 6 面 PFM 落盘一次 (ssr-probe-face0..5.pfm, 插件目录)");
+		if (g_ssrCamDumpOn)
+			logLine("SSR侦察: [cam] ini ssr.camdump=1 -> 锁定条目首帧全量 hex 落盘一次 (ssr-camdump.txt, 插件目录)");
 		// ---- v0.18.8 正解B: 段后水深当法线/原点输入 (只关自己) ----
 		g_ssrWDepOn.store(iniFlag("ssr.wdep", true), std::memory_order_relaxed);
 		if (g_ssrV1Near < 0.01f || g_ssrV1Far <= g_ssrV1Near)
@@ -4265,6 +4312,35 @@ static unsigned long long fnv1a64(const void* p, size_t n, unsigned long long h)
 	return h;
 }
 
+// v0.18.21 观测: half -> float (PFM 落盘与面统计用; 规格化/非规格化/Inf/NaN 全覆盖)
+static float probeHalf2f(unsigned short h)
+{
+	const unsigned int sign = static_cast<unsigned int>(h & 0x8000u) << 16;
+	const unsigned int exp = (h >> 10) & 0x1Fu;
+	const unsigned int man = h & 0x3FFu;
+	unsigned int bits;
+	if (exp == 0)
+	{
+		if (man == 0)
+			bits = sign; // 正负零
+		else
+		{
+			unsigned int m = man;
+			unsigned int sh = 0;
+			while (!(m & 0x400u)) { m <<= 1; ++sh; } // 非规格化: 尾数前导零归一
+			m &= 0x3FFu;
+			bits = sign | ((113u - sh) << 23) | (m << 13);
+		}
+	}
+	else if (exp == 31)
+		bits = sign | 0x7F800000u | (man << 13); // Inf / NaN 透传
+	else
+		bits = sign | ((exp + 112u) << 23) | (man << 13);
+	float f;
+	std::memcpy(&f, &bits, sizeof f);
+	return f;
+}
+
 static void probeDumpTick()
 {
 	if (g_probeDumpN >= 2)
@@ -4533,6 +4609,67 @@ static void probeDumpTick()
 			++g_probeCpuTick; // 发布: VK 侧看到 tick 变就上传 (ssrV1Sig 会跟着换)
 			logLine("P1探针: 已发布 CPU 镜像 " + std::to_string(g_probeW) + "² × 6 面, 第 " +
 			        std::to_string(g_probeCpuTick) + " 代");
+			if (g_probeDumpOn && !g_probeFileDone)
+			{ // v0.18.21 观测: 6 面 PFM 落盘 + 每面 min/max/mean 统计 (max>1 = HDR 域日志级坐实)
+				g_probeFileDone = true;
+				const UINT W = d.Width;
+				const UINT H = d.Height;
+				const size_t rowN = static_cast<size_t>(W) * 3;
+				float* rowBuf = static_cast<float*>(malloc(rowN * sizeof(float)));
+				for (UINT L = 0; L < 6; ++L)
+				{
+					const unsigned char* face = g_probeCpu + static_cast<size_t>(L) * W * H * 8;
+					float mn[3] = { 1e30f, 1e30f, 1e30f };
+					float mx[3] = { -1e30f, -1e30f, -1e30f };
+					double sum[3] = { 0.0, 0.0, 0.0 };
+					const std::string path = pluginDir() + "\\ssr-probe-face" + std::to_string(L) + ".pfm";
+					FILE* fp = rowBuf ? fopen(path.c_str(), "wb") : nullptr;
+					if (fp)
+					{
+						char hdr[64];
+						const int hn = std::snprintf(hdr, sizeof hdr, "PF\n%u %u\n-1.0\n", W, H);
+						fwrite(hdr, 1, static_cast<size_t>(hn), fp);
+					}
+					else
+						logLine("P1探针: face" + std::to_string(L) + " PFM 打不开 " + path + " (只打统计)");
+					// PFM 行序 = 自下而上, 我们的 face 是 top-down => y 倒着写
+					for (UINT y = H; y-- > 0; )
+					{
+						const unsigned short* src =
+							reinterpret_cast<const unsigned short*>(face + static_cast<size_t>(y) * W * 8);
+						for (UINT x = 0; x < W; ++x)
+						{
+							float v[3];
+							for (int c = 0; c < 3; ++c)
+							{
+								v[c] = probeHalf2f(src[x * 4 + c]);
+								if (v[c] < mn[c]) mn[c] = v[c];
+								if (v[c] > mx[c]) mx[c] = v[c];
+								sum[c] += v[c];
+							}
+							if (rowBuf)
+							{
+								rowBuf[x * 3 + 0] = v[0];
+								rowBuf[x * 3 + 1] = v[1];
+								rowBuf[x * 3 + 2] = v[2];
+							}
+						}
+						if (fp)
+							fwrite(rowBuf, sizeof(float), rowN, fp);
+					}
+					if (fp)
+						fclose(fp);
+					const double np = static_cast<double>(W) * static_cast<double>(H);
+					char st[256];
+					std::snprintf(st, sizeof st,
+						"P1探针: face%d 统计 R[%.4f %.4f %.4f] G[%.4f %.4f %.4f] B[%.4f %.4f %.4f] (min max mean)",
+						L, mn[0], mx[0], sum[0] / np, mn[1], mx[1], sum[1] / np, mn[2], mx[2], sum[2] / np);
+					logLine(st);
+				}
+				if (rowBuf)
+					free(rowBuf);
+				logLine("P1探针: 6 面 PFM 已落盘 ssr-probe-face0..5.pfm (行序 bottom-up, -1.0 = little-endian float32)");
+			}
 		}
 	}
 	else
@@ -5848,7 +5985,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.20 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
+	logLine("==== poc-presenter v0.18.21 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

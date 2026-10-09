@@ -5083,3 +5083,68 @@ DLL 都会 PASS，**版本以日志横幅 `==== poc-presenter v0.18.19` 为准**
 - 第一张可直接用现值 `v1det=0.3`（清晰度与高光分区域目检、可分离归因）；要严格单变量再补拍 `ssr.v1det=0`（纯 textureLod）——改 ini 必跑 `knobchk -Key ssr.v1det -Value <值>`、重启生效；
 - 判据：① miss 区草树结构清晰度（textureLod 生效否）② 下半白亮斑 sparkle 是否回归（miss 回补门生效否）③ 方向维持角色侧地形（不回退）；
 - textureLod 后若结构清楚但方向有系统方位偏 ⇒ 再动 `camidx=1/2`（@64/@128）；**cubeflip 仅在结构显示轴向错（如反射里树冠朝向反）时才试**。
+
+##### 22 v0.18.21 观测版（ssr.probedump cube 6 面 PFM + ssr.camdump 锁定条目 hex，零行为变化）+ 20 四局判读收口（textureLod 生效、v1det 门死 = HDR/LDR 域不匹配坐实、fov 58.7155 试验、方向偏下证据链）（队列 #8）
+
+**四局局况**（判读前提逐局回显核对 ✓ `ripple=1 / ripplesz=4 / ripplemode=1` + `edge=2` + `camslot=12 camidx=0 camconj=1 cubeflip=0` 全程不动，单变量纪律）：
+
+| 局 | 启动 | 关键回显 | 证据图 |
+|---|---|---|---|
+| B1 基线 | 21:04:23 | `fov=65 v1det=0.3 debug=0` | `Screenshot_v0.18.20 edge=2.png` |
+| B2 v1det=1 | 21:18:31 | `v1det=1.000000`（fov=65 debug=0） | `Screenshot_v0.18.20 ssr.v1det=1 .png` |
+| B3 fov 反解候选 | 21:21:22（:42 重启同参） | `fov=58.715500 v1det=0.3` | `Screenshot_v0.18.20 ssr.fov=58.7155.png` |
+| B4 三分判据键 | 21:39:09 | `debug=8 fov=65 v1det=0.3` | `Screenshot_v0.18.20 ssr.debug=8 .png` |
+
+定量（quant20 同框：nearL 200×150 / nearR 250×150 / midR 140×70；meanL = 框内亮度均值，white = luma>.55 且 sat<.20）：
+
+| 局 | nearL meanL | nearL white | nearR white | midR white |
+|---|---|---|---|---|
+| 19 edge0 基线 | 0.1816 | 2.500% | 2.731% | 2.245% |
+| B1 v20 | 0.5545 | 0.000% | 0.000% | 1.143% |
+| B2 v1det=1 | 0.5557 | 0.000% | 0.000% | 1.153% |
+| B3 fov58.7 | 0.5368 | 0.000% | 0.008% | **6.122%** |
+
+**一、textureLod 判据（20 主收益成立）**
+- B1 miss 区径向拉丝可见 = 方向梯度 mip 拉伸的原生形态，显式 LOD 0 后暴露（A2 的云状糊 → 可辨地形明暗）；方向维持角色侧地形；miss 框白点 0.000% vs edge0 基线 2.2–2.7% ⇒ **sparkle 零回归**。
+
+**二、v1det=1 定量 = 回补门"数学死"（不是被淹没）**
+- B2 vs B1：三框 meanL/白点全在噪声内（0.5545→0.5557、0→0、1.143→1.153）—— v1det 拉满 3.3 倍**逐像素零变化** ⇒ 回补量恒 ≈0；
+- 代码复查排除"门死"：`k=clamp(pc.p1.z,0,1)` 无条件（strength=1 ⇒ k=1）、`:604-612` miss 分支 `(p4.w>1.5)?k:0`=1、`v1det=clamp(pc.p5.w)` 与 echo `v1det=1.000000` 已核 —— **门开着，数学上无东西可补**。
+
+**三、debug=8 miss 全黑 = HDR/LDR 域不匹配坐实（B4）**
+- 同图分裂：**miss 区整片全黑（add8=0）+ HIT 区白点密布**（回补量灰度直出）⇒ `max(baseRGB−refl,0)` 在 miss 区恒 0；
+- 机理：`baseRGB` = uBase（D3D 拷出 clamp 0–1，sparkle 顶格 0.9）；`refl` = uProbe **RGBA16F HDR**（echo 常报），俯视近水方向采到 sunlit 草坡、值域整体压过 LDR ⇒ 差值恒负 ⇒ max=0 ⇒ **v1det 无关**；
+- **HIT 区为何一直有效**：hit 的 `refl = texture(uColor, ruv)`（ssr.frag:483）= 屏幕 LDR 镜像、与 base 同域 ⇒ 差值存在 ⇒ 回补正常 —— hit/miss 分裂在一张图内互证；
+- ⇒ **诚实记档：20 改动②（miss 回补门）对 HDR cube 是 no-op**（无害但无效），20 的实际收益 = 改动① textureLod；
+- ⇒ 修复需**域匹配重设计**（曝光归一 / 高光模板法，22 议）；**Fresnel 混合必须同域**（LDR base vs HDR refl 的 mix 先归一域）—— Fresnel 口径讨论的硬输入。
+
+**四、fov=58.7155 试验（§14.29.1 反解候选 = 水平 90° 在 16:9 的垂直等价）**
+- HIT 落点没动（岩壁/船/晶体倒影位置与 fov=65 一致）✓ = 判 4「fov 不移动落点」预言成立；
+- **midR 白点 1.143%→6.122%（5.4×）**：法线俯仰变 ⇒ 命中几何/边界带形变、HIT 区向框内扩张（hot 仅 0.031% = 中亮白边，非高光级）；
+- miss 区内容分布变（黄绿带角度/范围移动、中右大片暗棕灰出现）= 方向场对 fov 敏感 ✓ 法线斜率论证成立；nearL meanL 0.5545→0.5368 亮度几乎不动；
+- 「哪个 fov 更对」**画面内不可判**（相机身后是未知参照）→ 五、转身对照。
+
+**五、转身图对照 = 方向「偏下几度」证据链**
+- 身后实景（`Screenshot_v0.18.16a ssr.edge=2 转180.png`，同机位 180°）：**大面积蓝紫树冠（上部）+ 黄绿草灌（中低）+ 灰岩坡**；
+- 俯视近水的物理反射方向 = 相机身后偏上 ⇒ **树冠倒影理应出现** —— 但 B1/B3 两局 miss 区**都缺蓝紫**（B1 黄绿主导、B3 暗棕灰主导）；
+- 旁证：16a 图下半（当年方向未校准的 cube 反射）反而**大片蓝紫** ⇒ **cube 探针里确有蓝树内容** —— 不是探针没树，是现在的采样方向没指向树 = **系统性偏下几度**（采到树下草地）；
+- B3 暗棕灰 = 方向抬高的迹象（更近岩坡/树影带）⇒ 与「fov 错 ⇒ 法线俯仰偏 ⇒ 偏下」链条吻合，**fov 首嫌**；
+- 分清「方向偏」vs「探针内容与眼前场景不同代」的钥匙 = **cube 六面对表**（树冠/草坡/天空的方位分布 → 把偏差量化成角度）→ 21 观测版①。
+
+**六、投影参数评估（对分析者的修正，随 B3/B4 收口）**
+- near/far 错误被两机制部分吸收（P 与 sz 同 viewZ 自洽相消；far≫near 时 viewZ≈n/(1−d) 近似纯全局尺度、法线 normalize 幸存）⇒ **真正不被吸收的是 fov**（横纵/纵深尺度比错 ⇒ 水面法线俯仰系统偏 = §14.29.1 相消推导「法线斜率错」半句）；
+- 优先级 **fov ≥ near（dist 以 near 为单位 = 射程标定）> far**；修法**不猜 ini**，读槽12 720B 真 proj 矩阵反解（R4 路线）→ 21 观测版②；
+- B3 实测 = fov 对法线俯仰敏感的直接证据（midR 5.4×、miss 内容分布变），支持「值得拿真值」。
+
+**七、v0.18.21 改动（观测版，零行为变化 —— 只写文件不改画面）**
+- ① `ssr.probedump=1` → 探针 cube **6 面 PFM 落盘一次**（`ssr-probe-face0..5.pfm`，插件目录；数据源 = `g_probeCpu` 现成 half4，`probeHalf2f` 解码 → float32、PFM 行序 bottom-up、固定名覆盖写）+ **每面 min/max/mean 统计行**（`max>1` = HDR 域的日志级坐实，第三节机理的数字版判据）；
+- ② `ssr.camdump=1` → 锁定条目**首帧全量 hex 落盘一次**（`ssr-camdump.txt`：头部 bytes + 候选 offset 表，16B/行 = 1 vec4，hex 原始字节 + float 双列）→ 辨识 mat4 块（proj 特征 `[0]=1/tanHalfX [5]=1/tanHalfY [14]=−f·n/(f−n)`）→ 反解真 fov/near/far；
+- 兼容两闸：**两旋钮默认 0 ⇒ 逐位 v0.18.20**（一次性闸 `g_probeFileDone`/`g_camDumpDone`，插桩在既有发布路径内、不触画面路径）；**spv 未动** ⇒ dllchk spv 闸与 20 同值（主证 = DLL banner）；
+- bump：横幅 + 挂载行 → v0.18.21。
+
+**八、交接（21 拍法）**
+- 换 DLL（artifact zip 手动覆盖）→ `dllchk`（spv 与 20 同值，看 banner/内容闸）；
+- ini 追加 `ssr.probedump=1`、`ssr.camdump=1`，**其余全保持**（`edge=2 / camslot=12 / camidx=0 / camconj=1 / cubeflip=0 / debug=0 / fov=65 near=10 far=100000 / v1det=0.3`）→ `knobchk -Key ssr.probedump -Value 1` + `-Key ssr.camdump -Value 1` → 重启 → 进场景站定约 1min（等锁定 + 首帧读回）；
+- 产物（插件目录 = MO overwrite 下）：`ssr-probe-face0..5.pfm`（约 72MB，分析完删）+ `ssr-camdump.txt` + 日志 `face%d 统计` 六行 + `camdump` 行；
+- 判读两路：**cube 六面对表**（树冠/草坡/天空方位 vs 五节证据 → 方向偏差角量化，校准从盲试变对表）；**720B 矩阵辨识**（proj 特征对上 → 真 fov/near/far 直接填 ini 或矩阵化 viewPos/projectUV = R4）；
+- 修观测分离：后续三选一拍板（23 起）—— **真投影同步 / 域匹配回补（或 Fresnel 混合同域设计）/ 方向精校**；外部方案 S2 边界淡出（`ssr.seamw`）与 Fresnel 槽位（p5.z）口径讨论仍挂起。
