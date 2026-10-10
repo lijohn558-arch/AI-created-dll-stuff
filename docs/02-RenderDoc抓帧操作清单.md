@@ -5241,3 +5241,49 @@ dump 结构（45 vec4）：`0x000 V`（4×4 刚体、末行 0001）、`0x040 P`�
 - 拍法（换 DLL → `dllchk` → ini）：**`ssr.camslot=12`（方向源回正 = 本局 miss 乱象的修复）+ `ssr.camdump=2` 保持 + `ssr.fov=70` 保持**（与 22 局单变量：只动 camslot）→ `knobchk` 两键 → 重启 → 站定 ~40s → 回传日志 + `ssr-cams-all.txt` + 外观图一张；
 - 判读三件：① 外观图 miss 区是否回到"前方景色"（方向源回正验证）；② all dump 应新增槽7/8 首读（真相机 cb 嫌疑）→ 扫 P 窗口；③ 槽12.0 应有首个非零 720B（与 21 锁定 dump 互证）；
 - 后续：真 P 定位后 v0.23 矩阵化（每帧读真投影，R4 从"填常量"升"同步"）；域匹配回补/Fresnel 仍挂队列。
+
+##### 25 v0.18.24 方向链修复（chain=D^f·C^T·D 直发四元数）+ RD 真值投影三旋钮对齐 —— 四级根因链闭合：旧链 quat(C) 少两次翻转 = miss 方向错总根源（队列 #2/#8 = issue B）
+
+**一、RenderDoc 真值包**（`captures/skyrimse_frame_frame1664.rdc` → `tools/rdc_cbuf_scan.py` 全槽扫描 → `docs/analysis/skyrimse_frame_frame1664-cbuf-scan.json/.log`：3137 draw、314 采样、PROJ 窗口全命中）
+
+- **真主视角 = ResourceId 1506，720B**（与我方钩子"槽12"同一块缓冲）：VS 槽0 主绑（90% draw，280/314）+ PS 槽0/1；布局 `V@0x000 / P@0x040 / P·V×3@0x080/0x0C0/0x100 / invP@0x140 / P 副本@0x180 / V⁻¹@0x1C0 / campos@0x280`；
+- **真 P**（全精度）：`A=1.0 B=1.7777778 C=1.0000424 D=−15.00064` ⇒ **tanHalfY=0.5625（9/16 精确）、fovY=58.7155°、fovX=90.0000°、aspect=16:9、near=15.0000、far=353467.57**；raw 布局 row3=(0,0,1,0)（scanP22 判据可中）；
+- **V = 行主序 4×4**（末行 0001），det=−1（X 翻转 · 真旋转，主/影两态皆然）；`0x080 块 = P×V` 逐位吻合 ⇒ 列向量约定坐实 ⇒ `d_world = V^T · d_view`；
+- 槽12 首读 dump（21 局锁定）= 同一缓冲的**影子态**（fovY 9.59°、far 20481.7、campos(−50,600,80)）—— **条目22 的"9.59° 反解 / 58.7155 出局"由此作废**；主视角 campos=(−1172.677, −58639.41, 900.108)。同一缓冲帧内被多次改写、首读恰抓非主状态 = 当时"影子相机嫌疑"的真相；
+- 绑定图景：槽12 每帧 5 次可见该缓冲（拷闸活跃）。
+
+**二、方向根因四级证据链**
+
+1. **det(V)=−1**：真视图为反常阵，纯四元数直接吃 V 数学死（主视角、影子态都验过）；
+2. **列向量约定**：raw 0x080 = raw_P × raw_V（行主序矩阵乘逐位验证）⇒ 存的是世界→视图 V ⇒ `d_world = V^T · d_view`；
+3. **我方视图空间 = 游戏视图 z 取反**：`viewZ(d)=B/−(d+A)`（A=f/(n−f)、B=fn/(n−f)，ssr.frag:180）数值反推 = `−z_g` ⇒ `d_game_view = D · d_ours`，D=diag(1,1,−1)；
+4. **camBlockOk 翻线**：raw det<0 ⇒ 翻第三线（列模式 = 列2）⇒ C = V·D；**旧发布链 quat(C)(+conj) 与真链恰差两次翻转** —— 正确链 `d_world = D^f · C^T · D · Rf`（f = 翻线旗标）。
+
+**三、端到端数值验证**（`tools/chain_verify.ps1` → `docs/analysis/chain-verify-v24.log`；改码前完成，CI 唯一编译闸的数学侧）
+
+- 复刻 camOrthoSide(colMode) → 翻线旗标 → chain=D^f·C^T·D → camQuat → shader 同式旋转（`v + 2·cross(qv, cross(qv,v)+w·v)`，ssr.frag:515），5 测试向量对 RD 真值 V：
+- **V1 真值：NEW maxErr=9.78e-08 PASS；OLD(quat+conj)=1.80**（方向完全错 = 23 局实拍 miss 仍错的解释）；V2 合成反常阵 1.01e-07 PASS；
+- V3 人工正阵（det=+1）：chain det=−1 ⇒ **GUARD-OK**（正阵 raw 的 V^T·D 不可四元数表示 → 发布处跳过；RD 两态 det=−1 不会进）；
+- 中心射线 d_world=(0.4445, −0.7830, −0.4351) = 东南下 ✓（几何常识核）；P 精确值 **fovY=58.715507° / near=15.000000 / far=353467.5730** ⇒ ini 三旋钮。
+
+**四、v0.18.24 改动**（main.cpp 单文件 + ini 四键；ssr.frag **零改动** —— p6 旋转 + p7 cubeflip 被链公式吸收，push 常量 128B 已满不加字段）
+
+- camOrthoSide/camBlockOk 附加 flipped/colMode 出参 → 候选表增 candFlip/candCol；
+- 发布处重建 chain（列模式 D^f·C^T·D / 行模式 C^T·D^(f?0:1)）→ **det<0 守卫**（跳过发布、保上次值 + log）→ camQuat(chain) 直发；camconj 保留为共轭覆盖，C++ 默认本为 0、ini 改 0；
+- 解析日志增 `chain=col+flip` 旗标回显（判读回显新增项）；
+- ini 四键：`ssr.fov=58.7155 / ssr.near=15 / ssr.far=353467.573 / ssr.camconj=0`（p0=tan(垂直fov/2)/aspect/near/far，vkrenderer.cpp:4388-4391）；
+- 横幅 v0.18.24（24 描述段）；
+- **作废旧结论**：v0.18.20"方向物理正确"、"影子相机身份"、"fov 几何区间 65–75°"、"fov=60.4 比 65 差"（皆被方向 bug 混淆）、条目22"58.7155 出局"（影子态首读所致）。
+
+**五、开放项（不阻塞）**
+
+- **钩子盲区**：VS 槽0 相机主绑 ~2800 次/帧与槽3–6 绑定不进 vtbl[7] 钩（普查槽0 Ovf 仅 ~109–300/窗、槽3–6 恒 0，对不上；疑 VSSetConstantBuffers1/deferred 路径）—— 槽12 每帧 5 次仍见同一缓冲 ⇒ 方向修复不依赖盲区，待查；
+- far 是否会话恒定（主 353467.6 / 影 20480）未验证 —— 若按会话切，ini far 只对主视角准；
+- 行模式分支为推导实现（真值存储必走列模式，未实测）。
+
+**六、闸与交接**
+
+- 本地四闸：check1 / quotescan3 / verify_banner=v0.18.24 / enc（docs 00/02/05）；
+- 拍法（换 DLL → `dllchk` → ini）：保持 `camslot=12 / camdump=2 / cubeflip=0 / debug=0`，四键 `knobchk` 改 `ssr.fov=58.7155`、`ssr.near=15`、`ssr.far=353467.573`、`ssr.camconj=0` → 重启 → 站定 ~40s → 回传日志 + 外观图一张；
+- 判读三件：① 日志回显 `chain=col+flip` + `fov=58.7155` echo + q 值；② **miss 区是否回到前方景色**（方向修复主判据）；③ debug=2 掩码看反射几何（HIT 带随 fov 归位）；
+- 后续排位：fov 单变量复判（debug=2 掩码）> 真投影同步（v0.23 R4 矩阵化，invP@0x140 已在手）> 域匹配回补/Fresnel；S2 边界淡出（ssr.seamw）与 Fresnel 槽位（p5.z）仍挂起；钩子盲区（Buffers1/deferred）记查。

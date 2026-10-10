@@ -2946,8 +2946,10 @@ static void camStgRelease(int s, int e)
 // 判据: 先试列 (长窗 + 两两正交相对容差 1e-3) 归一化, 不行再试行; 归一化后 det<0 =
 // D3D 透视 Q<0 的负号 ⇒ 翻第三列/行还原 det=+1 的真旋转。纯正交阵是特例 (缩放=1)
 // ⇒ v0.18.18 行为全兼容; 转置/行列二义仍都只差共轭 (ssr.camconj), 轴符号交 cubeflip。
-static bool camOrthoSide(float* r, bool colMode)
+// v0.18.24: 附加 flipped 出参 —— 翻线动作必须上报, 发布侧靠它重建方向链 (见 camParse)。
+static bool camOrthoSide(float* r, bool colMode, bool* flipped)
 {
+	*flipped = false;
 	auto at = [r, colMode](int i, int j) -> float& { return colMode ? r[j * 3 + i] : r[i * 3 + j]; };
 	float ln[3];
 	for (int k = 0; k < 3; ++k)
@@ -2973,14 +2975,28 @@ static bool camOrthoSide(float* r, bool colMode)
 	{ // D3D 透视 Q<0 (或列主序同款负号): 翻第三线 → det=+1 的真旋转
 		for (int j = 0; j < 3; ++j)
 			at(2, j) = -at(2, j);
+		*flipped = true;
 	}
 	return true;
 }
-static bool camBlockOk(float* r)
+// v0.18.24: 上报哪套模式过了 + 是否翻过线 (发布侧重建链用; 失败时两出参不保证)。
+static bool camBlockOk(float* r, bool* flipped, bool* colMode)
 {
-	if (camOrthoSide(r, true))  // 列正交: 行主序 V / 行主序 VP
+	bool f = false;
+	if (camOrthoSide(r, true, &f)) // 列正交: 行主序 V / 行主序 VP
+	{
+		*flipped = f;
+		*colMode = true;
 		return true;
-	return camOrthoSide(r, false); // 行正交: 列主序存法 (diag·Rᵀ)
+	}
+	f = false;
+	if (camOrthoSide(r, false, &f)) // 行正交: 列主序存法 (diag·Rᵀ)
+	{
+		*flipped = f;
+		*colMode = false;
+		return true;
+	}
+	return false;
 }
 
 // 打包行主序 3x3 → 四元数 (Shepperd 取最大主元), 出参已归一化; 退化返回 false。
@@ -3113,6 +3129,8 @@ static void camParse(const unsigned char* data, UINT bytes, int slot, int ent)
 	CamEnt& ce = g_camEnt[slot][ent];
 	float cand[8][9];
 	int   candOff[8];
+	bool  candFlip[8]; // v0.18.24: 该候选是否走过 det<0 翻线
+	bool  candCol[8];  // v0.18.24: 该候选过的是列模式 (行主序 V) 还是行模式
 	int   n = 0;
 	const UINT maxOff = bytes - 64;
 	for (UINT off = 0; off <= maxOff && n < 8; off += 16)
@@ -3120,11 +3138,14 @@ static void camParse(const unsigned char* data, UINT bytes, int slot, int ent)
 		float m[16];
 		std::memcpy(m, data + off, sizeof(m));
 		float p[9] = {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]}; // 左上 3x3 打包
-		if (!camBlockOk(p))
+		bool flip = false, col = false;
+		if (!camBlockOk(p, &flip, &col))
 			continue;
 		for (int i = 0; i < 9; ++i)
 			cand[n][i] = p[i];
 		candOff[n] = static_cast<int>(off);
+		candFlip[n] = flip;
+		candCol[n] = col;
 		++n;
 	}
 	const bool logNow = (g_camLogN < 6) || ((g_camLogN % 128) == 0);
@@ -3175,8 +3196,41 @@ static void camParse(const unsigned char* data, UINT bytes, int slot, int ent)
 		else
 			logLine("SSR侦察: [cam] camdump: 打不开 " + path);
 	}
+	// v0.18.24 方向链 (docs/02 条目25): 我方 shader 视图空间 = 游戏视图 z 取反
+	// (viewZ = -z_g, ssr.frag:180), 故 d_world = V^T·D·Rf, D = diag(1,1,-1)。
+	// camBlockOk 后 C 已是 det=+1 阵: 列模式 C = V·D^f, 行模式 C = D^f·V, 反解得
+	//   列模式 chain = D^f·C^T·D; 行模式 chain = C^T·D^(f?0:1)。
+	// 该积恰为正阵时直发四元数 (数值验证: 与 V^T·D 差 1e-7; 旧链 quat(C) 差 1.80)。
+	float chain[9];
+	for (int i = 0; i < 3; ++i)
+		for (int j = 0; j < 3; ++j)
+			chain[i * 3 + j] = cand[k][j * 3 + i]; // C^T
+	if (candCol[k])
+	{
+		if (candFlip[k])
+			for (int j = 0; j < 3; ++j)
+				chain[2 * 3 + j] = -chain[2 * 3 + j]; // 左乘 D
+		for (int i = 0; i < 3; ++i)
+			chain[i * 3 + 2] = -chain[i * 3 + 2]; // 右乘 D
+	}
+	else if (!candFlip[k])
+		for (int i = 0; i < 3; ++i)
+			chain[i * 3 + 2] = -chain[i * 3 + 2]; // 行模式未翻: 右乘 D
+	const float chainDet =
+	    chain[0] * (chain[4] * chain[8] - chain[5] * chain[7]) -
+	    chain[1] * (chain[3] * chain[8] - chain[5] * chain[6]) +
+	    chain[2] * (chain[3] * chain[7] - chain[4] * chain[6]);
+	if (chainDet < 0.0f)
+	{ // raw det=+1 时 V^T·D 为反常阵, 四元数不可表示 => 跳过发布保留上次值。
+		// RD 真值两态 (主视角/影子) det(V)=-1, 不会进此支; 进了说明来了新相机约定。
+		if (logNow)
+			logLine("SSR侦察: [cam] 解析#" + std::to_string(g_camLogN) + " chain 非正阵 det=" +
+			        std::to_string(chainDet) + " 跳过发布 槽" + std::to_string(slot) + "." +
+			        std::to_string(ent));
+		return;
+	}
 	float q[4];
-	if (!camQuat(cand[k], q))
+	if (!camQuat(chain, q))
 		return;
 	if (g_ssrCamConj)
 	{
@@ -3200,7 +3254,9 @@ static void camParse(const unsigned char* data, UINT bytes, int slot, int ent)
 		        std::to_string(bytes) + " 候选=" + std::to_string(n) + " [" + cs + "] 选 idx=" +
 		        std::to_string(k) + " q=(" + std::to_string(q[0]) + "," + std::to_string(q[1]) +
 		        "," + std::to_string(q[2]) + "," + std::to_string(q[3]) + ") conj=" +
-		        std::to_string(g_ssrCamConj) + " 槽" + std::to_string(slot) + "." +
+		        std::to_string(g_ssrCamConj) + " chain=" +
+		        (candCol[k] ? std::string("col") : std::string("row")) +
+		        (candFlip[k] ? "+flip" : "-flip") + " 槽" + std::to_string(slot) + "." +
 		        std::to_string(ent));
 	}
 }
@@ -6072,7 +6128,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.23 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
+	logLine("==== poc-presenter v0.18.24 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

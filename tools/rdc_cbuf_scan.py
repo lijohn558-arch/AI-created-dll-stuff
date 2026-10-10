@@ -217,7 +217,7 @@ for ev in sample:
         except Exception as e:
             note_err("GetConstantBlocks(%s)@%d" % (sname, ev), e)
             continue
-        for slot, c in enumerate(list(cbs)[:6]):
+        for slot, c in enumerate(list(cbs)):   # v2: scan ALL slots (main camera may sit >5)
             try:
                 rid = c.descriptor.resource
                 if rid is None or int(rid) < 0:
