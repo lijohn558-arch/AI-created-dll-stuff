@@ -1389,7 +1389,8 @@ struct CamEnt
 	int           off;    // 最近一次选中候选的 offset (近似众数的当前值)
 	int           offCnt; // 选中 offset 命中 off 的次数 (众数计数)
 	float         q[4];   // 该条目最近一次发布的 q (普查行展示用)
-	bool          dumped; // v0.18.22: 全槽普查已落过盘 (= {} 零初始化; 只落首次读回)
+	bool          dumped; // v0.18.23: 全槽普查已落过盘 (= {} 零初始化; 首个**非零**读回落盘)
+	short         dumpTries; // v0.18.23: 全零重试计数 (未初始化缓冲; 60 次到顶放弃)
 };
 static CamEnt g_camEnt[kCamSlotN][kCamEntN] = {};
 static int   g_camLockS = -1; // 稳定度锁定的槽 (-1 = 未锁; 锁前 q 不发布)
@@ -1402,6 +1403,7 @@ static long  g_camLogN = 0;   // [cam] 解析次数 (日志节流: 前 6 次后�
 static int   g_ssrCamDumpOn = 0; // 0=关 (默认) 1=锁定条目一次 2=全槽首次读回普查
 static bool  g_camDumpDone = false;
 static bool  g_camAllOpen = false;
+static long  g_camAllN = 0;   // v0.18.23: 已落盘条目数 (≥400 关普查通道, 防换出循环刷文件)
 // ---- 绑定普查 (camCensus): 每槽计数, 每 ~300 帧打一行 —— 一拍看全谁绑在哪 ----
 static uint32_t      g_camCenBind[kCamSlotN] = {}; // 区间内非空绑定次数
 static uint32_t      g_camCenNull[kCamSlotN] = {}; // 区间内空绑定次数
@@ -3073,24 +3075,38 @@ static void camParse(const unsigned char* data, UINT bytes, int slot, int ent)
 	//   的 48B 盲区 —— 真相机若是 3x4 紧凑存法就在那里, 正交检永远够不着) 会被那道闸挡在解析
 	//   之外 ⇒ 普查绕过它直接落原始字节, 辨认交给人 (3x4 = 旋转 3x3 + 平移列, 一眼可辨)。
 	// 一次性闸挂条目上 ⇒ 每进程每条目只落一次; 首篇 "wb" 截断 (g_camAllOpen) 防上局残留。
+	// v0.18.23: **首个非零读回**才落 —— 22 实拍槽12.0 首读 720B 全零 (游戏还没写过的缓冲),
+	//   一次性闸打在垃圾上就再也没机会; 改为全零不落不置闸、每帧重试至 60 次, 到顶仍零则
+	//   放弃置闸并注明留档 (永零缓冲不值得反复拷)。
 	if (g_ssrCamDumpOn == 2 && !g_camEnt[slot][ent].dumped)
 	{
-		g_camEnt[slot][ent].dumped = true;
-		const std::string path = pluginDir() + "\\ssr-cams-all.txt";
-		FILE* fp = fopen(path.c_str(), g_camAllOpen ? "ab" : "wb");
-		if (fp)
+		bool nz = false;
+		for (UINT zi = 0; zi < bytes && !nz; ++zi)
+			if (data[zi])
+				nz = true;
+		if (nz || ++g_camEnt[slot][ent].dumpTries >= 60)
 		{
-			g_camAllOpen = true;
-			std::string head = "# slot=" + std::to_string(slot) + " ent=" + std::to_string(ent) +
-				" bytes=" + std::to_string(bytes) + " (首次读回原值; 16B/行 = 1 vec4; hex 为原始小端字节)\n";
-			fwrite(head.data(), 1, head.size(), fp);
-			camHexRows(fp, data, bytes);
-			fclose(fp);
-			logLine("SSR侦察: [cam] camall: 槽" + std::to_string(slot) + "." + std::to_string(ent) +
-				" bytes=" + std::to_string(bytes) + " -> ssr-cams-all.txt (首次读回)");
+			g_camEnt[slot][ent].dumped = true;
+			++g_camAllN;
+			const std::string path = pluginDir() + "\\ssr-cams-all.txt";
+			FILE* fp = fopen(path.c_str(), g_camAllOpen ? "ab" : "wb");
+			if (fp)
+			{
+				g_camAllOpen = true;
+				std::string head = "# slot=" + std::to_string(slot) + " ent=" + std::to_string(ent) +
+					" bytes=" + std::to_string(bytes) +
+					(nz ? " (首个非零读回; 16B/行 = 1 vec4; hex 为原始小端字节)\n"
+					    : " (全零 x60 放弃前留档; 游戏未写该缓冲)\n");
+				fwrite(head.data(), 1, head.size(), fp);
+				camHexRows(fp, data, bytes);
+				fclose(fp);
+				logLine("SSR侦察: [cam] camall: 槽" + std::to_string(slot) + "." + std::to_string(ent) +
+					" bytes=" + std::to_string(bytes) + " -> ssr-cams-all.txt (" +
+					(nz ? std::string("首个非零读回") : std::string("全零x60 放弃")) + ")");
+			}
+			else
+				logLine("SSR侦察: [cam] camall: 打不开 " + path);
 		}
-		else
-			logLine("SSR侦察: [cam] camall: 打不开 " + path);
 	}
 	if (!data || bytes < 64)
 		return;
@@ -3406,14 +3422,25 @@ static void camVSBOnce(ID3D11DeviceContext* ctx, UINT StartSlot, UINT NumBuffers
 			continue;
 		if (slot >= kCamSlotN)
 			break; // VS 常量缓冲只到 13 (权威表), 之上不碰
-		if (g_ssrCamSlot >= 0 && slot != g_ssrCamSlot)
-			continue; // ini 固定: 只观察该槽 (普查画像不收窄)
-		if (g_camLockS >= 0 && slot != g_camLockS)
-			continue; // 锁定后: 只拷锁定槽
 		ID3D11Buffer* b = pp[i];
 		if (!b)
 			continue;
-		if (g_camLockS >= 0)
+		// ---- v0.18.23 普查通道: camdump=2 时, 被 pin/锁定排除的槽照样登记+拷到落盘 ----
+		// 22 实拍教训: 槽7/8 到 ~600-900 帧才首绑, 15s 自动锁一落就被原闸挡死 (53821/2640
+		// 绑、字节=0、拷=0) —— 真相机 cb 若在那里就永远见不到; 且 camslot=12 保方向时普查
+		// 也要另开道。该通道只喂 ssr-cams-all.txt: camParse 的发布闸 (slot==lockS) 照旧,
+		// 永不发布; 已落过盘的条目不再拷 (省每帧开销), 新 ptr 仍会登记再收一次。
+		const bool censusCh = (g_ssrCamDumpOn == 2 && g_camAllN < 400 &&
+		                       ((g_ssrCamSlot >= 0 && slot != g_ssrCamSlot) ||
+		                        (g_camLockS >= 0 && slot != g_camLockS)));
+		if (!censusCh)
+		{
+			if (g_ssrCamSlot >= 0 && slot != g_ssrCamSlot)
+				continue; // ini 固定: 只观察该槽 (普查画像不收窄)
+			if (g_camLockS >= 0 && slot != g_camLockS)
+				continue; // 锁定后: 只拷锁定槽
+		}
+		if (g_camLockS >= 0 && slot == g_camLockS)
 		{ // 锁定后: ptr 必须就是锁定条目, 是则拷 (每帧至多一次), 不是则跳过
 			CamEnt& le = g_camEnt[slot][g_camLockE];
 			if (le.ptr != b || fr == le.copyFr)
@@ -3422,7 +3449,7 @@ static void camVSBOnce(ID3D11DeviceContext* ctx, UINT StartSlot, UINT NumBuffers
 			camCopyEnt(ctx, le, b, slot, g_camLockE, fr);
 			continue;
 		}
-		// 未锁: 查/登记条目 (至多 kCamEntN 个不同 ptr)
+		// 未锁主路径 / 普查通道: 查/登记条目 (至多 kCamEntN 个不同 ptr)
 		int ei = -1;
 		for (int e = 0; e < kCamEntN; ++e)
 			if (g_camEnt[slot][e].ptr == b)
@@ -3463,6 +3490,8 @@ static void camVSBOnce(ID3D11DeviceContext* ctx, UINT StartSlot, UINT NumBuffers
 		ce.seenFr = fr;
 		if (fr == ce.copyFr)
 			continue; // 本帧该条目已试过
+		if (censusCh && ce.dumped)
+			continue; // 普查通道: 已落过盘, 不再拷 (锁定槽主路径不受此限)
 		camCopyEnt(ctx, ce, b, slot, ei, fr);
 	}
 }
@@ -3567,7 +3596,7 @@ static void installSsrRecon(ID3D11Device* dev)
 	logLine("SSR侦察: ctx槽33/50" + std::string(ok47 ? "/47" : "") +
 	        " 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.16.0 Step2; 逃生门 ssr=0)");
 	if (ok7)
-		logLine("SSR侦察: ctx槽7(VSSetConstantBuffers) 已挂 — v0.18.22 P3 相机朝向读回(列正交+多条目) " +
+		logLine("SSR侦察: ctx槽7(VSSetConstantBuffers) 已挂 — v0.18.23 P3 相机朝向读回(列正交+多条目) " +
 		        std::string(g_ssrV1CamOn ? "开 (camrot=1, VS cb 槽0..13 全扫)" : "关 (camrot=0)"));
 	LeaveCriticalSection(&g_cs);
 	ctx->Release();
@@ -6043,7 +6072,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.22 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
+	logLine("==== poc-presenter v0.18.23 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
