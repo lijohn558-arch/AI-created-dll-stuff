@@ -1389,14 +1389,19 @@ struct CamEnt
 	int           off;    // 最近一次选中候选的 offset (近似众数的当前值)
 	int           offCnt; // 选中 offset 命中 off 的次数 (众数计数)
 	float         q[4];   // 该条目最近一次发布的 q (普查行展示用)
+	bool          dumped; // v0.18.22: 全槽普查已落过盘 (= {} 零初始化; 只落首次读回)
 };
 static CamEnt g_camEnt[kCamSlotN][kCamEntN] = {};
 static int   g_camLockS = -1; // 稳定度锁定的槽 (-1 = 未锁; 锁前 q 不发布)
 static int   g_camLockE = -1; // 稳定度锁定的条目
 static long  g_camLogN = 0;   // [cam] 解析次数 (日志节流: 前 6 次后每 128 次)
 // v0.18.21 观测: 锁定条目首帧全量 hex 落盘一次 (默认关 = v0.18.20 逐位; 只写文件不改画面)
-static int   g_ssrCamDumpOn = 0;
+// v0.18.22: ssr.camdump 扩到 2 = **全槽普查** —— 每个 (槽,条目) 首次读回的原始字节, 不做
+//   正交过滤 ⇒ 盖住 64B 正交闸够不着的 48B 槽 (队列 #8 的 48B 盲区 = 真相机 3x4 紧凑存法的
+//   最后嫌疑); 追加写 ssr-cams-all.txt, g_camAllOpen 管首篇 "wb" 截断 (防上局残留)。
+static int   g_ssrCamDumpOn = 0; // 0=关 (默认) 1=锁定条目一次 2=全槽首次读回普查
 static bool  g_camDumpDone = false;
+static bool  g_camAllOpen = false;
 // ---- 绑定普查 (camCensus): 每槽计数, 每 ~300 帧打一行 —— 一拍看全谁绑在哪 ----
 static uint32_t      g_camCenBind[kCamSlotN] = {}; // 区间内非空绑定次数
 static uint32_t      g_camCenNull[kCamSlotN] = {}; // 区间内空绑定次数
@@ -3023,11 +3028,70 @@ static bool camQuat(const float* r, float* q)
 
 // 读回解析: 每 16B 对齐偏移试一个 4x4 的左上 3x3 (camBlockOk 原地归一化) → 候选表 →
 // 条目统计 (解析数/有候选数/主 offset 众数) → **仅锁定条目**按 ssr.camidx 选 → 发布四元数。
+// v0.18.22: vec4 行 hex 落盘助手 (锁定 dump 与全槽普查共用一处实现)
+// 每 16B 一行: hex 原始小端字节 + float 双读 (矩阵辨认两个视图都要); bytes 非 16 倍数时
+// 尾部落差按字节留一行 (48B 槽整好 3 行无尾; 别的怪尺寸 cb 也不丢字节)。
+static void camHexRows(FILE* fp, const unsigned char* data, UINT bytes)
+{
+	for (UINT off = 0; off + 16 <= bytes; off += 16)
+	{
+		unsigned int u[4];
+		float f[4];
+		std::memcpy(u, data + off, 16);
+		std::memcpy(f, data + off, 16);
+		char line[224];
+		const int ln = std::snprintf(line, sizeof line,
+			"+0x%03X | %08X %08X %08X %08X | %+.6f %+.6f %+.6f %+.6f\n",
+			off, u[0], u[1], u[2], u[3], f[0], f[1], f[2], f[3]);
+		fwrite(line, 1, static_cast<size_t>(ln), fp);
+	}
+	if (bytes & 0xFu)
+	{
+		const UINT base = bytes & ~0xFu;
+		char off[16];
+		std::snprintf(off, sizeof off, "+0x%03X", base);
+		std::string tl(off);
+		tl += " | ";
+		char hb[4];
+		for (UINT i = base; i < bytes; ++i)
+		{
+			std::snprintf(hb, sizeof hb, "%02X ", data[i]);
+			tl += hb;
+		}
+		tl += "(尾 " + std::to_string(bytes - base) + " 字节)\n";
+		fwrite(tl.data(), 1, tl.size(), fp);
+	}
+}
+
 // v0.18.19: 锁前不发布 (q 保持全 0 ⇒ p7.w=0 = 16d 安全画面); 锁定 = camCensus 窗口按
 // 「候选率 ≥95% 且主 offset 命中 ≥90%」的稳定度判定 —— 18 实拍里 per-draw 垃圾 (槽8:
 // 候选率 ~50%、offset 漂移、q 乱跳) 这类数据锁不上, 相机 VP 每帧必在同 offset 才锁。
 static void camParse(const unsigned char* data, UINT bytes, int slot, int ent)
 {
+	// ---- v0.18.22 全槽普查 (ssr.camdump=2): 每个 (槽,条目) 首次读回的**原始字节** ----
+	// 为什么必须放在 bytes<64 早退**之前**: camBlockOk 要求 >= 64B, 48B 的槽 0/1 (队列 #8
+	//   的 48B 盲区 —— 真相机若是 3x4 紧凑存法就在那里, 正交检永远够不着) 会被那道闸挡在解析
+	//   之外 ⇒ 普查绕过它直接落原始字节, 辨认交给人 (3x4 = 旋转 3x3 + 平移列, 一眼可辨)。
+	// 一次性闸挂条目上 ⇒ 每进程每条目只落一次; 首篇 "wb" 截断 (g_camAllOpen) 防上局残留。
+	if (g_ssrCamDumpOn == 2 && !g_camEnt[slot][ent].dumped)
+	{
+		g_camEnt[slot][ent].dumped = true;
+		const std::string path = pluginDir() + "\\ssr-cams-all.txt";
+		FILE* fp = fopen(path.c_str(), g_camAllOpen ? "ab" : "wb");
+		if (fp)
+		{
+			g_camAllOpen = true;
+			std::string head = "# slot=" + std::to_string(slot) + " ent=" + std::to_string(ent) +
+				" bytes=" + std::to_string(bytes) + " (首次读回原值; 16B/行 = 1 vec4; hex 为原始小端字节)\n";
+			fwrite(head.data(), 1, head.size(), fp);
+			camHexRows(fp, data, bytes);
+			fclose(fp);
+			logLine("SSR侦察: [cam] camall: 槽" + std::to_string(slot) + "." + std::to_string(ent) +
+				" bytes=" + std::to_string(bytes) + " -> ssr-cams-all.txt (首次读回)");
+		}
+		else
+			logLine("SSR侦察: [cam] camall: 打不开 " + path);
+	}
 	if (!data || bytes < 64)
 		return;
 	CamEnt& ce = g_camEnt[slot][ent];
@@ -3087,18 +3151,7 @@ static void camParse(const unsigned char* data, UINT bytes, int slot, int ent)
 				head += "#" + std::to_string(i) + "@" + std::to_string(candOff[i]) +
 				        (i + 1 < n ? "," : "\n");
 			fwrite(head.data(), 1, head.size(), fp);
-			for (UINT off = 0; off + 16 <= bytes; off += 16)
-			{
-				unsigned int u[4];
-				float f[4];
-				std::memcpy(u, data + off, 16);
-				std::memcpy(f, data + off, 16);
-				char line[224];
-				const int ln = std::snprintf(line, sizeof line,
-					"+0x%03X | %08X %08X %08X %08X | %+.6f %+.6f %+.6f %+.6f\n",
-					off, u[0], u[1], u[2], u[3], f[0], f[1], f[2], f[3]);
-				fwrite(line, 1, static_cast<size_t>(ln), fp);
-			}
+			camHexRows(fp, data, bytes);
 			fclose(fp);
 			logLine("SSR侦察: [cam] camdump: 槽" + std::to_string(slot) + "." + std::to_string(ent) +
 				" bytes=" + std::to_string(bytes) + " -> ssr-camdump.txt (每行 1 vec4)");
@@ -3514,7 +3567,7 @@ static void installSsrRecon(ID3D11Device* dev)
 	logLine("SSR侦察: ctx槽33/50" + std::string(ok47 ? "/47" : "") +
 	        " 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.16.0 Step2; 逃生门 ssr=0)");
 	if (ok7)
-		logLine("SSR侦察: ctx槽7(VSSetConstantBuffers) 已挂 — v0.18.21 P3 相机朝向读回(列正交+多条目) " +
+		logLine("SSR侦察: ctx槽7(VSSetConstantBuffers) 已挂 — v0.18.22 P3 相机朝向读回(列正交+多条目) " +
 		        std::string(g_ssrV1CamOn ? "开 (camrot=1, VS cb 槽0..13 全扫)" : "关 (camrot=0)"));
 	LeaveCriticalSection(&g_cs);
 	ctx->Release();
@@ -3727,11 +3780,16 @@ void installProbeOn(ID3D11Device* dev)
 		}
 		// ---- v0.18.21 观测两旋钮 (默认 0 = 关 = v0.18.20 逐位; 只写文件不改画面) ----
 		g_probeDumpOn = (static_cast<int>(iniNum("ssr.probedump", 0.0)) != 0) ? 1 : 0;
-		g_ssrCamDumpOn = (static_cast<int>(iniNum("ssr.camdump", 0.0)) != 0) ? 1 : 0;
+		// v0.18.22: camdump 扩到 2 = 全槽普查 (每个(槽,条目)首次读回原始字节, 不做正交过滤)
+		const int camDumpV = static_cast<int>(iniNum("ssr.camdump", 0.0));
+		g_ssrCamDumpOn = (camDumpV < 0 || camDumpV > 2) ? 0 : camDumpV;
 		if (g_probeDumpOn)
 			logLine("SSR侦察: ini ssr.probedump=1 -> 探针 cube 6 面 PFM 落盘一次 (ssr-probe-face0..5.pfm, 插件目录)");
 		if (g_ssrCamDumpOn)
-			logLine("SSR侦察: [cam] ini ssr.camdump=1 -> 锁定条目首帧全量 hex 落盘一次 (ssr-camdump.txt, 插件目录)");
+			logLine("SSR侦察: [cam] ini ssr.camdump=" + std::to_string(g_ssrCamDumpOn) + " -> " +
+				(g_ssrCamDumpOn == 2
+					? "全槽普查: 每个(槽,条目)首次读回原始字节落盘 ssr-cams-all.txt (盖住 48B 槽)"
+					: "锁定条目首帧全量 hex 落盘一次 (ssr-camdump.txt)") + ", 插件目录");
 		// ---- v0.18.8 正解B: 段后水深当法线/原点输入 (只关自己) ----
 		g_ssrWDepOn.store(iniFlag("ssr.wdep", true), std::memory_order_relaxed);
 		if (g_ssrV1Near < 0.01f || g_ssrV1Far <= g_ssrV1Near)
@@ -5985,7 +6043,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.21 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
+	logLine("==== poc-presenter v0.18.22 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
