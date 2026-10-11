@@ -3238,6 +3238,32 @@ static int ssrV1EffEdge()
 	return g_ssrV1Edge;
 }
 
+// v0.18.25 采样基底合成 (docs/02 条目25): 探针 cube 是相机对齐基底捕获的 —— 实拍六面: ±相机右轴
+// 两面地平线竖直、±上轴两面水平、±前后两面均匀, 捕获机位 = 载入帧俯仰 -82.4° (两会话逐位相同)。
+// 直接拿世界方向查 cube 带恒定旋转错位: 15:23 机位 (俯仰 -38.2°) 屏幕底部 miss 像素该采 +67.6°
+// 天空, 未补偿推算落点 +2° 岸带 = 实拍黄绿草皮 (与用户实拍吻合)。精确补偿:
+//   d_cube = Vcap·d_world = D·chain_cap^T·chain_cur·Rf,  D = diag(1,1,-1)
+// 旋转段 = conj(qcap)⊗qchain 折进 p6, 轴段 D 折进 p7.z (调用点见 pc 装填处)。公式数值验证 =
+// tools/chain_verify.ps1 compose 测试三例 PASS (同姿态恒等 / 两侧互换 / 37° 相对姿态)。
+// qcap 全 0 = 未快照 ⇒ 退化直发链路 q (此时真 cube 必不存在 ⇒ eff edge<2 ⇒ 变换块根本不跑)。
+// camconj 作用在发布侧 g_ssrV1CamQ 上, 快照取的也是已 conj 的值 ⇒ 同约定, 合成不受影响。
+static void ssrV1CamComposed(float q[4])
+{
+	if (g_ssrV1CamQCap[0] == 0.0f && g_ssrV1CamQCap[1] == 0.0f &&
+	    g_ssrV1CamQCap[2] == 0.0f && g_ssrV1CamQCap[3] == 0.0f)
+	{
+		for (int i = 0; i < 4; ++i)
+			q[i] = g_ssrV1CamQ[i];
+		return;
+	}
+	const float* a = g_ssrV1CamQCap; // qcap = 捕获基底 (cube 上传换代时刻快照)
+	const float* b = g_ssrV1CamQ;    // qchain = 当前链路 q
+	q[0] = a[3] * b[0] - a[0] * b[3] - a[1] * b[2] + a[2] * b[1];
+	q[1] = a[3] * b[1] + a[0] * b[2] - a[1] * b[3] - a[2] * b[0];
+	q[2] = a[3] * b[2] - a[0] * b[1] + a[1] * b[0] - a[2] * b[3];
+	q[3] = a[3] * b[3] + a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
 // 依赖签名: 只要影响"命令内容"的任何东西变了, 签名就变 ⇒ 需要重录 (不重建资源)。
 // 返回 0 = 本帧应当录成**纯拷贝** (v1 关着 / mode=0 / 前置能力缺 / 深度没就绪)。
 static unsigned long long ssrV1Sig()
@@ -3298,15 +3324,19 @@ static unsigned long long ssrV1Sig()
 	s = mix(s, g_probeCpuTick);
 	// v0.18.17 P3: 相机四元数/轴符号/开关进签名 (push p6/p7 变 ⇒ 必须重录)。只在**有效 edge=2**
 	// 时掺 —— edge<2 时着色器根本不碰 p6/p7, 不掺可避免相机一动就无谓重录。
+	// v0.18.25: q 改掺**合成后**的值 (qcap/qchain 任一变都重录); qcap 换代本身由上面
+	// g_probeCpuTick 那条兜住 (快照与换代同一处更新, 见 ssrV1CubeSync)。
 	if (ssrV1EffEdge() >= 2)
 	{
-		cv.f = g_ssrV1CamQ[0];
+		float qc[4];
+		ssrV1CamComposed(qc);
+		cv.f = qc[0];
 		s = mix(s, cv.u);
-		cv.f = g_ssrV1CamQ[1];
+		cv.f = qc[1];
 		s = mix(s, cv.u);
-		cv.f = g_ssrV1CamQ[2];
+		cv.f = qc[2];
 		s = mix(s, cv.u);
-		cv.f = g_ssrV1CamQ[3];
+		cv.f = qc[3];
 		s = mix(s, cv.u);
 		cv.f = g_ssrV1CamFlip[0];
 		s = mix(s, cv.u);
@@ -3743,8 +3773,14 @@ static void ssrV1CubeSync(PocbCtx& c)
 			g_ssrV1CubeTick = g_probeCpuTick;
 			g_ssrV1CubeW = g_probeW;
 			g_ssrV1CubeH = g_probeH;
+			// v0.18.25: 捕获基底快照 —— cube 内容是**捕获机位**的相机基底 (上传时刻 ≈ 捕获时刻;
+			// 实拍两会话 q 流均在上传前 9s 就绪)。全 0 = 发布侧 q 还没来过 (随后换代会补上)。
+			for (int i = 0; i < 4; ++i)
+				g_ssrV1CamQCap[i] = g_ssrV1CamQ[i];
 			logLine("SSR侦察: [v1-cube] 真 cube 上传完成 " + std::to_string(g_probeW) + "² × 6 面, 第 " +
-			        std::to_string(g_probeCpuTick) + " 代 (ssr.edge=2 生效)");
+			        std::to_string(g_probeCpuTick) + " 代 (ssr.edge=2 生效) 捕获基底快照 qcap=(" +
+			        std::to_string(g_ssrV1CamQCap[0]) + "," + std::to_string(g_ssrV1CamQCap[1]) + "," +
+			        std::to_string(g_ssrV1CamQCap[2]) + "," + std::to_string(g_ssrV1CamQCap[3]) + ")");
 		}
 		else
 		{
@@ -4414,15 +4450,19 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		pc.p5[2] = g_ssrV1RipGain;
 		pc.p5[3] = g_ssrV1Det;
 		// v0.18.17 P3: p6 = 相机四元数 (视图→世界); p7 = cube 轴符号 + 开关 (q 全 0 或 camrot=0 ⇒ 关)
-		pc.p6[0] = g_ssrV1CamQ[0];
-		pc.p6[1] = g_ssrV1CamQ[1];
-		pc.p6[2] = g_ssrV1CamQ[2];
-		pc.p6[3] = g_ssrV1CamQ[3];
+		// v0.18.25: p6 换成基底合成 q = conj(qcap)⊗qchain (探针捕获基底补偿, 见 ssrV1CamComposed);
+		// p7.z 取反 = 折进补偿的轴段 D=diag(1,1,-1) —— 着色器两段结构 (旋转 + 轴乘) 天然承载, 布局零改动。
+		float qOut[4];
+		ssrV1CamComposed(qOut);
+		pc.p6[0] = qOut[0];
+		pc.p6[1] = qOut[1];
+		pc.p6[2] = qOut[2];
+		pc.p6[3] = qOut[3];
 		pc.p7[0] = g_ssrV1CamFlip[0];
 		pc.p7[1] = g_ssrV1CamFlip[1];
-		pc.p7[2] = g_ssrV1CamFlip[2];
-		pc.p7[3] = (g_ssrV1CamOn && (g_ssrV1CamQ[0] != 0.0f || g_ssrV1CamQ[1] != 0.0f ||
-		                             g_ssrV1CamQ[2] != 0.0f || g_ssrV1CamQ[3] != 0.0f))
+		pc.p7[2] = -g_ssrV1CamFlip[2];
+		pc.p7[3] = (g_ssrV1CamOn && (qOut[0] != 0.0f || qOut[1] != 0.0f || qOut[2] != 0.0f ||
+		                             qOut[3] != 0.0f))
 		              ? 1.0f
 		              : 0.0f;
 		c.fns.vkCmdPushConstants(g_ssrVkCmdOut, g_ssrV1Pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0,

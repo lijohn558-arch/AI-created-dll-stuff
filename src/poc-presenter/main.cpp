@@ -1368,6 +1368,9 @@ float g_ssrV1Det = 0.0f; // ini ssr.v1det 回补量 0..1, 0 = 关 = v0.18.14 行
 float g_ssrV1CamQ[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // (x,y,z,w) 单位四元数, v_view → v_world
 float g_ssrV1CamFlip[3] = {1.0f, 1.0f, 1.0f};    // (±1,±1,±1) cube 轴符号 — ini ssr.cubeflip
 int   g_ssrV1CamOn = 1;                          // ini ssr.camrot 0=关 1=开 (默认开; 读不到 q 自动无效)
+// v0.18.25: 探针捕获基底快照 (cube 上传换代时刻的 g_ssrV1CamQ 副本, 全 0 = 未快照)。
+// 采样合成 conj(qcap)⊗qchain 在 vkrenderer.cpp 侧做; 详见 vkrenderer.h 注释与 chain_verify.ps1。
+float g_ssrV1CamQCap[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 static const int kCamSlotN = 14; // VS 常量缓冲槽 0..13 (docs/analysis/d3d11-ctx-slots.txt 权威表)
 static const int kCamEntN = 6;   // 每槽最多跟踪 6 个不同 buffer (首绑之外再登记后续新指针)
 static int   g_ssrCamSlot = -1; // ini ssr.camslot  -1=全扫 (锁定前全部条目都拷) 0..13=只扫该槽
@@ -6128,7 +6131,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.24 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
+	logLine("==== poc-presenter v0.18.25 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

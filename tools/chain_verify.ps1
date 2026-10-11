@@ -239,4 +239,73 @@ foreach ($row in $Dm) { for ($jj = 0; $jj -lt 3; $jj++) { $D9[$idx] = $row[$jj];
 $V3 = Mul3 $V1 $D9
 Test-Chain $V3 "V3=V1*D (proper, no-flip branch)"
 
+# ---- v0.18.25 compose replica (探针捕获基底补偿) ----
+# Replicates main.cpp camOrthoSide(colMode)+chain+CamQuat and returns the chain q (or $null).
+function ChainQ([double[]]$Vraw) {
+    $m = [double[]]$Vraw.Clone()
+    $ln = New-Object double[] 3
+    for ($k = 0; $k -lt 3; $k++) {
+        $n2 = 0.0
+        for ($jj = 0; $jj -lt 3; $jj++) { $e = $m[$jj*3+$k]; $n2 += $e*$e }
+        if ($n2 -lt 0.0025 -or $n2 -gt 400.0) { return $null }
+        $ln[$k] = [Math]::Sqrt($n2)
+    }
+    for ($i = 0; $i -lt 3; $i++) {
+        for ($k = $i + 1; $k -lt 3; $k++) {
+            $d = 0.0
+            for ($jj = 0; $jj -lt 3; $jj++) { $d += $m[$jj*3+$i] * $m[$jj*3+$k] }
+            if ([Math]::Abs($d) -gt 1e-3 * $ln[$i] * $ln[$k]) { return $null }
+        }
+    }
+    for ($i = 0; $i -lt 3; $i++) { for ($jj = 0; $jj -lt 3; $jj++) { $m[$jj*3+$i] /= $ln[$i] } }
+    $flipped = $false
+    if ((Det3 $m) -lt 0.0) { for ($jj = 0; $jj -lt 3; $jj++) { $m[$jj*3+2] = -$m[$jj*3+2] }; $flipped = $true }
+    $chain = New-Object double[] 9
+    for ($i = 0; $i -lt 3; $i++) { for ($jj = 0; $jj -lt 3; $jj++) { $chain[$i*3+$jj] = $m[$jj*3+$i] } }
+    if ($flipped) { for ($jj = 0; $jj -lt 3; $jj++) { $chain[2*3+$jj] = -$chain[2*3+$jj] } }  # left D^f
+    for ($i = 0; $i -lt 3; $i++) { $chain[$i*3+2] = -$chain[$i*3+2] }                        # right D
+    return ,(CamQuat $chain)
+}
+
+# exact replica of the planned vkrenderer.cpp ssrV1CamComposed: conj(a) x b (Hamilton)
+function QConjMul([double[]]$a, [double[]]$b) {
+    $q = New-Object double[] 4
+    $q[3] = $a[3]*$b[3] + $a[0]*$b[0] + $a[1]*$b[1] + $a[2]*$b[2]
+    $q[0] = $a[3]*$b[0] - $a[0]*$b[3] - $a[1]*$b[2] + $a[2]*$b[1]
+    $q[1] = $a[3]*$b[1] + $a[0]*$b[2] - $a[1]*$b[3] - $a[2]*$b[0]
+    $q[2] = $a[3]*$b[2] - $a[0]*$b[1] + $a[1]*$b[0] - $a[2]*$b[3]
+    return ,$q
+}
+
+# Desired: d_cube = Vcap . (Vcur^T . D . Rf_ours)
+# Shader replica: d = D . RotQ( conj(qcap) x qchain , Rf_ours )   [D folded into p7 send as (1,1,-1)]
+function Test-Compose([double[]]$VcapRaw, [double[]]$VcurRaw, [string]$name) {
+    $qcap = ChainQ $VcapRaw
+    $qch  = ChainQ $VcurRaw
+    if (-not $qcap) { Write-Output ("{0}: qcap FAIL" -f $name); return }
+    if (-not $qch)  { Write-Output ("{0}: qchain FAIL" -f $name); return }
+    $qo = QConjMul $qcap $qch
+    $err = 0.0
+    foreach ($v in $vecs) {
+        $dv = New-Object double[] 3
+        $dv[0] = $v[0]; $dv[1] = $v[1]; $dv[2] = -$v[2]                 # D . Rf
+        $dw = New-Object double[] 3                                     # Vcur^T . dv
+        for ($i = 0; $i -lt 3; $i++) { $dw[$i] = $VcurRaw[0*3+$i]*$dv[0] + $VcurRaw[1*3+$i]*$dv[1] + $VcurRaw[2*3+$i]*$dv[2] }
+        $exp = New-Object double[] 3                                    # Vcap . dw
+        for ($i = 0; $i -lt 3; $i++) { $exp[$i] = $VcapRaw[$i*3+0]*$dw[0] + $VcapRaw[$i*3+1]*$dw[1] + $VcapRaw[$i*3+2]*$dw[2] }
+        $g = RotQ $qo $v                                                # shader: rotate then x (1,1,-1)
+        $g[2] = -$g[2]
+        for ($i = 0; $i -lt 3; $i++) { $e = [Math]::Abs($g[$i] - $exp[$i]); if ($e -gt $err) { $err = $e } }
+    }
+    Write-Output ("{0}: compose maxErr={1:E2}  {2}" -f $name, $err, $(if ($err -lt 1e-5) { "PASS" } else { "CHECK" }))
+}
+
+Write-Output "=== v0.18.25 compose tests (probe capture-basis compensation) ==="
+# Only flipped raws (det=-1) reach g_ssrV1CamQ: proper raws hit the det(chain)<0 publish
+# guard and keep the last value, so qcap/qchain are always valid-published states.
+$V2b = Mul3 $V1 $Rz9
+Test-Compose $V2b $V1 "cap=V1*Rz(37) cur=V1"
+Test-Compose $V1 $V2b "cap=V1        cur=V1*Rz(37)"
+Test-Compose $V1 $V1 "cap=V1        cur=V1 (same pose -> identity correction)"
+
 Write-Output "=== done ==="

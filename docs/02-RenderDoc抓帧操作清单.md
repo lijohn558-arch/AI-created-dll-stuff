@@ -5287,3 +5287,47 @@ dump 结构（45 vec4）：`0x000 V`（4×4 刚体、末行 0001）、`0x040 P`�
 - 拍法（换 DLL → `dllchk` → ini）：保持 `camslot=12 / camdump=2 / cubeflip=0 / debug=0`，四键 `knobchk` 改 `ssr.fov=58.7155`、`ssr.near=15`、`ssr.far=353467.573`、`ssr.camconj=0` → 重启 → 站定 ~40s → 回传日志 + 外观图一张；
 - 判读三件：① 日志回显 `chain=col+flip` + `fov=58.7155` echo + q 值；② **miss 区是否回到前方景色**（方向修复主判据）；③ debug=2 掩码看反射几何（HIT 带随 fov 归位）；
 - 后续排位：fov 单变量复判（debug=2 掩码）> 真投影同步（v0.23 R4 矩阵化，invP@0x140 已在手）> 域匹配回补/Fresnel；S2 边界淡出（ssr.seamw）与 Fresnel 槽位（p5.z）仍挂起；钩子盲区（Buffers1/deferred）记查。
+
+##### 26 v0.18.25 探针捕获基底补偿（cube = 相机对齐基底捕获；qcap 快照 + conj(qcap)⊗qchain 合成 + D 折进 p7.z）—— issue B 双缺陷终局：偏航跟手 = p6 链路正常（pan_meas4），倒影类别错 = 恒定旋转错位（队列 #2/#8 = issue B）
+
+**一、像素判决（pan_meas4，2D 模板匹配；pan_meas/2/3 判据不纯作废，pan_meas4 为测量正本；数据 = `docs/analysis/Screenshot_a.png/_c.png/_d.png`，同批 `_b.png` 与 `Screenshot_58.7155  15  353467.573  0.png` 一并入库）**
+
+- A→C（近纯偏航 −31.5° 无平移，干净对照；A→D 夹带横移、预测模型只算旋转，不作终判）：cube 特征 blue best=(−475,−134) vs 预测(−469,−135) 死合（sad 21.06 vs 预测点 21.43 vs 零位 32.87）、rock 78% / boat 85% 同向；mush/hole 假匹配（草皮自相似/盯上岸上黑影）；ctrl A-vs-A sad=0.00 方法干净 ⇒ **p6 旋转链正常，缺陷 A（偏航不跟手）= 观察被均匀糊斑掩盖**（`pan_meas4.ps1/txt`，Add-Type C# 内核 8s 出全量；重数值循环必须 C# 内核，纯 PS 循环 5 亿采样 45min+ 被杀）。
+
+**二、根因 = 探针 cube 是「相机对齐基底」捕获的（恒定旋转错位；非 Y 翻 —— cubeflip=2 单变量实测纹丝不动）**
+
+- **六面实拍解剖**：`ssr.probedump=1` 落盘 `ssr-probe-face0..5.pfm`（各 1024²×12B，`PF\n1024 1024\n-1.0\n` float32 RGB 底行优先）→ `probe2png.ps1`（Add-Type C# 内核，注意 `-ReferencedAssemblies 'System.Drawing.dll'` + `using System.Runtime.InteropServices`）转 PNG 逐面看：face0/1 地平线**竖直**（树横长、天空分居左右）、face2 180° 翻（天空在下）、face3 正立、face4/5 均匀（天 / 正下水面）⇒ 标准 cubemap 四侧面应全部天空朝上，此布局 = **±相机右轴两面竖直 + ±上轴两面水平 + ±前后两面均匀**；
+- **捕获机位 = 载入帧**：cube 上传时刻（15:16:20）q 流 `(0, 0.658725, 0.752384, 0)` = 俯仰 **−82.4° 近垂直朝下**，**上会话（11:53:54）逐位相同**（读取载入帧确定性机位）⇒ q 流在上传前 9s 就绪，快照时序安全；
+- **定量复核**（用户实拍 15:23 机位俯仰 −38.2°）：屏幕底部 miss 像素该采 **+67.6° 天空**；未补偿推算落点 = `R_cap·mirrorY(R(qchain)·Rf)` = **+2° 岸带** ⇒ 与实拍「黄绿草皮」逐字吻合；补偿路径落点 = +67.6° 天空 ✓；
+- cubeflip=2 无变化的机理：错位是 ~82° 旋转，轴镜像无法还原；band 与其 Y 镜像都在地平线附近（都读岸带）⇒「纹丝不动」本身就是诊断信息；**cube 无辜**（世界对齐、有天有地）、「Y 翻」旧假设作废；
+- 用户俯仰扫描「草→山→天空」= 恒定旋转下俯仰按正确次序穿越内容（方向对、绝对高度错）；pan_meas4 真几何块（rock/boat）平移正常、cube 特征块（mush/hole）匹配全乱 ⇒ 与「链路对、cube 基底错」一致。
+
+**三、修法（v0.18.25：ssr.frag 零改动、push 常量仍 128B、签名覆盖改合成值）**
+
+- 精确补偿 `d_cube = Vcap·d_world = D·chain_cap^T·chain_cur·Rf`，D=diag(1,1,−1)（V_cap = D·chain_cap^T 代入即得）；
+- **旋转段** `q_out = conj(qcap)⊗qchain`（Hamilton，conj=转置=逆）进 p6；**轴段 D 折进 p7.z**（发送前取反）—— 着色器两段结构（p6 旋转 + p7 轴乘）天然承载，push constant 布局零改动；
+- `g_ssrV1CamQCap[4]`（vkrenderer.h extern + main.cpp 定义）：`ssrV1CubeSync` 真 cube 上传成功处快照当时 `g_ssrV1CamQ`，日志增 `捕获基底快照 qcap=(x,y,z,w)` 回显；全 0 = 未快照 ⇒ 合成退化直发链路 q（此时真 cube 必不存在 ⇒ eff edge<2 ⇒ 变换块根本不跑）；
+- 签名 `ssrV1Sig()` q 段改掺**合成后**值（qcap/qchain 任一变都重录；qcap 换代本身由既有 `g_probeCpuTick` 条兜住）；pc 装填 p6=合成 q、p7=(flip0,flip1,**−**flip2)、p7.w 门改看合成 q 非零；
+- 新增 `ssrV1CamComposed()`（vkrenderer.cpp，pc 装填与签名共用同一合成器，保证两者一致）；
+- ini：`ssr.cubeflip` 2 → **0**（D 已折进 p7.z，用户翻转位归零）；`ssr.probedump=1` 保持（复验轮再落 PFM 对账）。
+
+**四、离线闸（改码前；CI 唯一编译闸的数学侧，`tools/chain_verify.ps1` → `docs/analysis/chain-verify-v25.log`）**
+
+- 新增 compose 测试（ChainQ 复刻 + QConjMul = conj(a)⊗b + Test-Compose：期望 `Vcap·(Vcur^T·D·Rf)` vs 实得 `D·RotQ(qout,Rf)`）：**三例 PASS maxErr 1.95e-07 / 1.95e-07 / 2.25e-07**（同姿态恒等 / 37° 相对姿态两侧互换 ×2）；链路五向量 PASS 不变；
+- proper raw（det=+1）不进 compose 用例：其 chain det<0 撞发布守卫 ⇒ `g_ssrV1CamQ` 永不持有该态；
+- **该闸拦下两个真 bug**：① ChainQ 复刻漏「flipped 才左乘 D」（行2取反）；② QConjMul z 分量末项符号错（`+a[2]·b[3]` 应为 `−`）—— 同姿态合成应得单位四元数却冒出 2wz 项。先闸后码的纪律再次成立；
+- 判定矩阵：A=掩盖（p6 正常）/ B=基底错位 ⇒ 一次修复解决 A+B 两缺陷的观察面。
+
+**五、开放项（不阻塞）**
+
+- 捕获基底与「纯相机朝向」之间的残差未知（若游戏 face 槽位带固定置换，需一轮 PFM+截图校准）；复验轮若仍有恒定偏移，用落盘 PFM 离线钉 face 布局推导校准量，不盲试 cubeflip 组合；
+- 探针周期性重传（队列 #7）仍挂 —— 换代即重快照的机制本轮已就位；
+- qX 确定性回位（三次出现均在截图后、逐位重现）不影响判读；A→B 段 25 秒帧荒（11:53:29–11:53:54 无帧）—— 均记档；
+- 影子 far=20480 恒定性未验、行模式分支未实测 —— 维持条目25 开放项。
+
+**六、闸与交接**
+
+- 本地四闸：check1 / quotescan3 / verify_banner=v0.18.25 / enc（docs UTF-8 无 BOM 纯 LF）；
+- 拍法（换 DLL → `dllchk -After` → ini）：`knobchk -Key ssr.cubeflip -Value 0`（须重启后 PASS）→ 站定俯视水面（A 姿态）+ 偏航约 30°（C 姿态）各一张外观图；
+- 判读两件：① miss 区是否变**蓝天/崖顶**（基底补偿主判据）；② 新 PFM 落盘后离线复核（预期 face 布局转正：四侧面天空朝上）；
+- 后续排位恢复：fov 单变量复判（debug=2 掩码）> 真投影同步（v0.23 R4 矩阵化）> 域匹配回补/Fresnel。
