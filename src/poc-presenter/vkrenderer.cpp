@@ -3238,32 +3238,15 @@ static int ssrV1EffEdge()
 	return g_ssrV1Edge;
 }
 
-// v0.18.25 采样基底合成 (docs/02 条目25): 探针 cube 是相机对齐基底捕获的 —— 实拍六面: ±相机右轴
-// 两面地平线竖直、±上轴两面水平、±前后两面均匀, 捕获机位 = 载入帧俯仰 -82.4° (两会话逐位相同)。
-// 直接拿世界方向查 cube 带恒定旋转错位: 15:23 机位 (俯仰 -38.2°) 屏幕底部 miss 像素该采 +67.6°
-// 天空, 未补偿推算落点 +2° 岸带 = 实拍黄绿草皮 (与用户实拍吻合)。精确补偿:
-//   d_cube = Vcap·d_world = D·chain_cap^T·chain_cur·Rf,  D = diag(1,1,-1)
-// 旋转段 = conj(qcap)⊗qchain 折进 p6, 轴段 D 折进 p7.z (调用点见 pc 装填处)。公式数值验证 =
-// tools/chain_verify.ps1 compose 测试三例 PASS (同姿态恒等 / 两侧互换 / 37° 相对姿态)。
-// qcap 全 0 = 未快照 ⇒ 退化直发链路 q (此时真 cube 必不存在 ⇒ eff edge<2 ⇒ 变换块根本不跑)。
-// camconj 作用在发布侧 g_ssrV1CamQ 上, 快照取的也是已 conj 的值 ⇒ 同约定, 合成不受影响。
-static void ssrV1CamComposed(float q[4])
-{
-	if (g_ssrV1CamQCap[0] == 0.0f && g_ssrV1CamQCap[1] == 0.0f &&
-	    g_ssrV1CamQCap[2] == 0.0f && g_ssrV1CamQCap[3] == 0.0f)
-	{
-		for (int i = 0; i < 4; ++i)
-			q[i] = g_ssrV1CamQ[i];
-		return;
-	}
-	const float* a = g_ssrV1CamQCap; // qcap = 捕获基底 (cube 上传换代时刻快照)
-	const float* b = g_ssrV1CamQ;    // qchain = 当前链路 q
-	q[0] = a[3] * b[0] - a[0] * b[3] - a[1] * b[2] + a[2] * b[1];
-	q[1] = a[3] * b[1] + a[0] * b[2] - a[1] * b[3] - a[2] * b[0];
-	q[2] = a[3] * b[2] - a[0] * b[1] + a[1] * b[0] - a[2] * b[3];
-	q[3] = a[3] * b[3] + a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
+// v0.18.29 撤销 v0.18.25 的采样基底合成 (原 ssrV1CamComposed 函数已删, 依据 = docs/02 条目30):
+// 探针 cube 实为**世界轴对齐**捕获 —— ① PFM 六面纹样与 GL cube 采样世界 Z-up 内容逐面吻合
+// (face3=-Y 立正地平线 / face2=+Y 天空在下 / face0/1=±X 地平线竖直 / face4=+Z 蓝天 / face5=-Z 湖底);
+// ② 若基底跟上传时机位 (站定 俯仰 -18.2°), face2/face3 应是近竖直方向的天/地特写, 实拍却是地平线风景;
+// ③ Skyrim 反射探针 = 世界定点捕获 (引擎先验, capture-helper 只回读内容不重建基底)。
+// 链路直发 q 满足 RotQ(q,Rf) = V^T·D·Rf = 真世界反射方向 (chain_verify V1 实测 1e-7) —— 多乘 Vcap
+// 只是把世界方向拧回站定相机系再查 cube, 带入站位相关的恒定错位 (本会话定点 Vcap*(+Z) 落 face2)。
+// debug=9 两姿态方向场 (条目30) 证链路在跑; 残余轴符号交 ssr.cubeflip (v0.18.16 冻结期它是死旋钮,
+// 本轮起真正生效)。qcap 快照代码保留在 ssrV1CubeSync (换代机位日志取证用)。
 // 依赖签名: 只要影响"命令内容"的任何东西变了, 签名就变 ⇒ 需要重录 (不重建资源)。
 // 返回 0 = 本帧应当录成**纯拷贝** (v1 关着 / mode=0 / 前置能力缺 / 深度没就绪)。
 static unsigned long long ssrV1Sig()
@@ -3324,19 +3307,16 @@ static unsigned long long ssrV1Sig()
 	s = mix(s, g_probeCpuTick);
 	// v0.18.17 P3: 相机四元数/轴符号/开关进签名 (push p6/p7 变 ⇒ 必须重录)。只在**有效 edge=2**
 	// 时掺 —— edge<2 时着色器根本不碰 p6/p7, 不掺可避免相机一动就无谓重录。
-	// v0.18.25: q 改掺**合成后**的值 (qcap/qchain 任一变都重录); qcap 换代本身由上面
-	// g_probeCpuTick 那条兜住 (快照与换代同一处更新, 见 ssrV1CubeSync)。
+	// v0.18.29: 撤销基底合成 (条目30), 掺**直发** q 本身; qcap 换代仍由上面 g_probeCpuTick 兜住。
 	if (ssrV1EffEdge() >= 2)
 	{
-		float qc[4];
-		ssrV1CamComposed(qc);
-		cv.f = qc[0];
+		cv.f = g_ssrV1CamQ[0];
 		s = mix(s, cv.u);
-		cv.f = qc[1];
+		cv.f = g_ssrV1CamQ[1];
 		s = mix(s, cv.u);
-		cv.f = qc[2];
+		cv.f = g_ssrV1CamQ[2];
 		s = mix(s, cv.u);
-		cv.f = qc[3];
+		cv.f = g_ssrV1CamQ[3];
 		s = mix(s, cv.u);
 		cv.f = g_ssrV1CamFlip[0];
 		s = mix(s, cv.u);
@@ -4436,7 +4416,7 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		pc.p2[3] = g_ssrV1ViewW ? 1.0f : 0.0f; // v0.18.8: 段后水深开关 (没水深 ⇒ 法线用 520)
 		pc.p3[0] = static_cast<float>(g_ssrV1Smooth); // 法线差分邻域 (px) —— 抗"倒影破碎"主力
 		pc.p3[1] = static_cast<float>(g_ssrV1Blur);   // 反射色 5tap 空间平滑
-		pc.p3[2] = static_cast<float>(g_ssrV1Debug);  // 0..8 (v0.18.10: +6 回注可视化 / +7 uBase 原样; v0.18.15: +8 单位回补量)
+		pc.p3[2] = static_cast<float>(g_ssrV1Debug);  // 0..9 (v0.18.10: +6 回注可视化 / +7 uBase 原样; v0.18.15: +8 单位回补量; v0.18.28: +9 采样方向场)
 		pc.p3[3] = g_ssrV1ViewB ? 1.0f : 0.0f;        // 底色开关 (没底色 ⇒ 采 uColor 当底色)
 		// v0.18.9 p4 = (涟漪回注量); v0.18.10 填 y=带宽(px) z=回注方式 0亮度/1位移
 		pc.p4[0] = g_ssrV1Ripple;
@@ -4450,19 +4430,18 @@ static bool ssrV1RecordRender(PocbCtx& c, unsigned w, unsigned h)
 		pc.p5[2] = g_ssrV1RipGain;
 		pc.p5[3] = g_ssrV1Det;
 		// v0.18.17 P3: p6 = 相机四元数 (视图→世界); p7 = cube 轴符号 + 开关 (q 全 0 或 camrot=0 ⇒ 关)
-		// v0.18.25: p6 换成基底合成 q = conj(qcap)⊗qchain (探针捕获基底补偿, 见 ssrV1CamComposed);
-		// p7.z 取反 = 折进补偿的轴段 D=diag(1,1,-1) —— 着色器两段结构 (旋转 + 轴乘) 天然承载, 布局零改动。
-		float qOut[4];
-		ssrV1CamComposed(qOut);
-		pc.p6[0] = qOut[0];
-		pc.p6[1] = qOut[1];
-		pc.p6[2] = qOut[2];
-		pc.p6[3] = qOut[3];
+		// v0.18.29: p6 回归**直发链路 q** —— RotQ(q,Rf) = V^T·D·Rf 即真世界反射方向 (chain_verify V1
+		// 实测 1e-7); 撤销 v0.18.25 的 Vcap 合成与 p7.z 取反 (cube 世界轴对齐, 依据见 ssrV1Sig 上方注释
+		// 与 docs/02 条目30)。p7 = ssr.cubeflip 轴符号, 默认 (1,1,1)。
+		pc.p6[0] = g_ssrV1CamQ[0];
+		pc.p6[1] = g_ssrV1CamQ[1];
+		pc.p6[2] = g_ssrV1CamQ[2];
+		pc.p6[3] = g_ssrV1CamQ[3];
 		pc.p7[0] = g_ssrV1CamFlip[0];
 		pc.p7[1] = g_ssrV1CamFlip[1];
-		pc.p7[2] = -g_ssrV1CamFlip[2];
-		pc.p7[3] = (g_ssrV1CamOn && (qOut[0] != 0.0f || qOut[1] != 0.0f || qOut[2] != 0.0f ||
-		                             qOut[3] != 0.0f))
+		pc.p7[2] = g_ssrV1CamFlip[2];
+		pc.p7[3] = (g_ssrV1CamOn && (g_ssrV1CamQ[0] != 0.0f || g_ssrV1CamQ[1] != 0.0f ||
+		                             g_ssrV1CamQ[2] != 0.0f || g_ssrV1CamQ[3] != 0.0f))
 		              ? 1.0f
 		              : 0.0f;
 		c.fns.vkCmdPushConstants(g_ssrVkCmdOut, g_ssrV1Pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
