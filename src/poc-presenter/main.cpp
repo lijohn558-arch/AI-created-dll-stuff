@@ -1426,9 +1426,8 @@ int                  g_probeW         = 0;
 int                  g_probeH         = 0;
 int                  g_probeLayers    = 0;
 unsigned long long   g_probeCpuTick   = 0;       // 内容代数, 变了才重传
-// v0.18.21 观测: cube 6 面 PFM 落盘一次 (默认关 = v0.18.20 逐位; 只写文件不改画面)
+// v0.18.21 观测: cube 6 面 PFM 落盘 (默认关 = v0.18.20 逐位; 只写文件不改画面); v0.18.26 起每次换代都落盘
 static int                  g_probeDumpOn = 0;
-static bool                 g_probeFileDone = false;
 
 // ---- v0.18.7 B 水色保留 (docs/05 D4 补遗): 585 在被出向回写覆盖**之前**抢一份当合成底色 ----
 // 为什么必须有它: 合成底色原先 = 324 快照 = 段16 (水体 pass) **之前**的画面, 里面没画水;
@@ -3872,7 +3871,7 @@ void installProbeOn(ID3D11Device* dev)
 		const int camDumpV = static_cast<int>(iniNum("ssr.camdump", 0.0));
 		g_ssrCamDumpOn = (camDumpV < 0 || camDumpV > 2) ? 0 : camDumpV;
 		if (g_probeDumpOn)
-			logLine("SSR侦察: ini ssr.probedump=1 -> 探针 cube 6 面 PFM 落盘一次 (ssr-probe-face0..5.pfm, 插件目录)");
+			logLine("SSR侦察: ini ssr.probedump=1 -> 探针 cube 6 面 PFM 每次换代落盘 (ssr-probe-face0..5.pfm, 插件目录)");
 		if (g_ssrCamDumpOn)
 			logLine("SSR侦察: [cam] ini ssr.camdump=" + std::to_string(g_ssrCamDumpOn) + " -> " +
 				(g_ssrCamDumpOn == 2
@@ -4755,9 +4754,8 @@ static void probeDumpTick()
 			++g_probeCpuTick; // 发布: VK 侧看到 tick 变就上传 (ssrV1Sig 会跟着换)
 			logLine("P1探针: 已发布 CPU 镜像 " + std::to_string(g_probeW) + "² × 6 面, 第 " +
 			        std::to_string(g_probeCpuTick) + " 代");
-			if (g_probeDumpOn && !g_probeFileDone)
+			if (g_probeDumpOn) // v0.18.26: 每次换代都落盘 (原一次性 g_probeFileDone 作废 —— 活跃的常是第 2 代, 盘上留第 1 代会对不上)
 			{ // v0.18.21 观测: 6 面 PFM 落盘 + 每面 min/max/mean 统计 (max>1 = HDR 域日志级坐实)
-				g_probeFileDone = true;
 				const UINT W = d.Width;
 				const UINT H = d.Height;
 				const size_t rowN = static_cast<size_t>(W) * 3;
@@ -6131,7 +6129,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.25 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
+	logLine("==== poc-presenter v0.18.26 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 25: 采样基底合成 q=conj(qcap)⊗qchain+换代快照; 26: probedump 每次换代落盘(诊断: PFM 恒=活跃 cube); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
