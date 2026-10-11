@@ -5401,3 +5401,36 @@ dump 结构（45 vec4）：`0x000 V`（4×4 刚体、末行 0001）、`0x040 P`�
 - 四闸：check1 / quotescan3 / verify_banner=v0.18.27 / enc（docs UTF-8 无 BOM 纯 LF）；
 - ini 有改动（ssr.debug=9）⇒ knobchk 跑；换 DLL `dllchk -After`；
 - 必做队列 #7（探针周期性重传）仍挂起；开放项：影子 far=20480 恒定性未验；行模式分支未实测。
+
+##### 29 v0.18.28 shader 产物补生成（幻影 shader 修正）：v0.18.17/20/27 三版 ssr.frag 从未编译入库，DLL 一直嵌 v0.18.16 旧 shader —— miss 无旋转总根因水落石出；debug=9 黑屏判读 = 旧 shader 无该分支、9 被 debug=8 分支吃掉
+
+**一、黑屏判读（2026-10-11 21:06 会话，用户："水面变成黑色了，而不是彩色色块"）**
+
+- 回显核过：横幅 v0.18.27、每条「SSR v1 已建」行 push dump 均带 `debug=9` ⇒ ini 读取 + main.cpp 0..9 校验生效；`knobchk -Key ssr.debug -Value 9` **PASS**（echoed line 6186）。
+- **黑屏机理 = DLL 内嵌的不是本轮改的 shader**：`vkrenderer.cpp:4184` 取 `pocb_shaders.h` 的 `kSsrFragSpv[]` 字节数组；该头与 `ssr.frag.spv` 最后入库 = `2560b31`（10-08 17:19 v0.18.16）。build.yml 只有两条 `cl` 命令、无任何 shader 工具链（make_shaders.ps1 注释自证：本机无原生编译器、CI 也无 Vulkan SDK ⇒ 本地编 SPIR-V → 字节数组头随源码入库，CI 只编 main.cpp）⇒ **ssr.frag 改动不经 make_shaders.ps1 永不进 DLL**。
+- 旧 shader 无 debug=9 分支 ⇒ 命中其 `if (pc.p3.z > 7.5)`（= debug=8 单位回补量灰度）：水面 `add8 = max(baseRGB−refl,0)·…` ≈ 0 ⇒ 近全黑；无深度像素亦走 `oColor=vec4(0)`。用户看到的就是 debug=8 图。
+
+**二、总根因：issue B 双缺陷 = shader 幻影（比「p7.w=0」更深一层）**
+
+- git 对账：ssr.frag 在 2560b31 之后还有三笔 —— `b2ac5f6`（v0.18.17 Rf 视图→世界，push 96→128B）、`9afeb88`（v0.18.20 uProbe textureLod 0 原生层 + v1det miss 回补门）、`2c9a6a3`（v0.18.27 debug=9）；pocb_shaders.h / ssr.frag.spv 三笔全缺 ⇒ **三版全是幻影提交**。
+- 旧 shader（v0.18.16）miss 路径 L394：`refl = rl > 1e-4 ? texture(uProbe, Rf / rl).rgb : baseRGB` —— **裸视图方向直查 cube，全文无 p6/p7、无视图→世界旋转**。固定屏幕像素 ⇒ 视图方向恒定（纯偏航下水面法线的视图表达 n_view 不变 ⇒ Rf_view 亦恒定）⇒ **恒采同一面** —— 缺陷 A（偏航不跟手）与缺陷 B（face5 内容类别错）一次解释。
+- 条目28「三态同果」真相 = **三轮跑的是同一个冻结 shader**（v24 / v26-A / v26-C 根本没换过 shader）；「p7.w=0 旋转块未生效」候选作废（旧 shader 不读 p7）；v0.18.25 的 C++ 合成（conj(qcap)⊗qchain → p6、D → p7.z）与 v0.18.17 的 shader 旋转块**本轮才首次真正会师**。
+- 连带重审（不改历史条目，等 debug=9 数据定）：pan_meas4「p6 链路正常」归因存疑 —— 旧 shader 下 miss 内容在纯偏航中应纹丝不动，rock/boat 平移正常更可能是 hit 带 SSR（屏内射线，与 p6 无关）贡献；mush/hole「匹配全乱」恰与静态糊斑一致。条目26/27 相关措辞以本条为准。
+
+**三、v0.18.28 改动（产物补 + 闸补）**
+
+- `tools\make_shaders.ps1` 跑通：ssr.frag.spv **33228 → 34520 B**、pocb_shaders.h 重生成（1206 行）；其余 3 个 spv 字节未变（工具链稳定 ⇒ diff 仅 2 文件）；新头含 `0x41080000`（= 8.5f，debug=9 判据）旧头无 —— 内容性核过。
+- **新增 `tools/spvsync.ps1`（第 5 闸）**：glslangValidator 重编 4 个 shader 到临时目录 + 与入库 spv 逐字节比对，源码超前产物即 FAIL —— 堵死 dllchk 盲区（dllchk 只比 DLL↔spv 文件，不比 spv 文件↔源码）。
+- 横幅 v0.18.28（版本史补 28 段）；无 C++ 行为改动；ini 不动（ssr.debug=9 保持本轮诊断）。
+
+**四、下轮协议（debug=9 方向场 —— 条目28 的两张截图，仪器这次真上线）**
+
+1. 换 DLL → `dllchk -After` → 载入站定 ~35s → 水边 A 姿态截图 → 偏航 ~30° C 姿态截图 → 报时间点；
+2. 预期画面：miss 区 = 彩色方向块（d·0.5+0.5）、hit 区照常合成、没深度 = 黑 —— 若仍无彩块，先查截图时机与 ini 回显（spv 闸已堵幻影复发路）；
+3. 判读（沿条目28 四）：d 场随姿态转 ⇒ 按面缝/极点钉轴约定 → 校准修法；d 场不转 ⇒ 查发布路径。**加第三读数：两姿态 d 场逐像素同否** —— 同 = 旋转未达 shader（幻影不可能复发，查 p6/p7 装填），不同 = 链路在跑，直接读残差出 v0.18.29。
+
+**五、闸门与交接**
+
+- 本地五闸：check1 / quotescan3 / verify_banner=v0.18.28 / enc（docs UTF-8 无 BOM 纯 LF）/ **spvsync（新）**；
+- ini 无新改动（ssr.debug=9 沿用；复位 0 时再跑 knobchk）；换 DLL `dllchk -After`；
+- 必做队列 #7（探针周期性重传）仍挂起；开放项沿条目28（影子 far=20480、行模式分支未实测）；**新开放项：v0.18.17–26 期间一切以「shader 已上线」为前提的判读需逐条重验**（本条已纠 pan_meas4 归因，其余待 debug=9）。
