@@ -123,6 +123,32 @@ static int   g_ssrWDepState = 0;   // 0=未建 1=OK 2=失败禁用 (只关自己
 static bool  g_ssrWDepLog = false; // "段后水深图就绪/失败" 只打一次
 static VkDevice g_ssrWDepDev = VK_NULL_HANDLE; // 建图用的 device (换设备整套只丢不毁)
 
+// ---- v0.18.35 T5 天空入向: 两张共享镜像的 VK 导入 (skyIn 色 / skyDepth 深度) ----
+// 建法 = ssrBaseVkBuild (NT handle) 与 ssrKmtVkBuild (老式 handle→KMT) 的并集, 与
+// ssrWDepVkBuild 同款: handle 轴按 D3D11 侧实际建成的那条走 (g_skyInColorKmt/g_skyInDepthKmt),
+// usage 只 SAMPLED (本轮**不建读回 buffer**: 零同步读回是硬约束, 跨 API 比对留给 T7),
+// 布局初转 (UNDEFINED→GENERAL) 照做 —— 按规范这次转换可能丢掉 D3D11 刚拷进来的内容,
+// 所以"建图那一帧不算数", 下一帧的拷贝才补上 (与入向/底色/水深同一口径)。
+// **失败只关自己**: 天空合成 pass 走空 (T6 的活), PoC-B 注入与 SSR 全不受影响。
+// 可搬移性 (VK 重写铺垫常设指令): 本块只吃 D3D11 侧给的共享 handle, 不依赖 main.cpp 的
+// hook 面; 原生重写时换成"自己那张共享图"即可, 触发谓词与三条拷贝的发行全在 main.cpp。
+struct SkyVkImg
+{
+	explicit SkyVkImg(const char* n) : name(n) {}
+	VkImage        img = VK_NULL_HANDLE;
+	VkDeviceMemory mem = VK_NULL_HANDLE;
+	VkImageView    view = VK_NULL_HANDLE;
+	HANDLE         srcH = nullptr;      // 导入时用的 handle (D3D11 侧换了才重建)
+	VkDevice       dev = VK_NULL_HANDLE; // 建图用的 device (换设备整套只丢不毁)
+	int            state = 0;           // 0=未建 1=OK 2=失败禁用
+	bool           logged = false;      // "就绪/失败" 各只打一次
+	const char*    name;
+};
+static SkyVkImg g_skyVkC("skyIn");   // skyIn (RGBA16F 1920x1080)
+static SkyVkImg g_skyVkD("skyDepth"); // skyDepth (D24S8 同尺寸)
+static VkCommandBuffer g_skyVkCmd = VK_NULL_HANDLE; // 布局初转命令 (分配一次; POCB_DEV_FNS 无 vkFreeCommandBuffers)
+static unsigned g_skyVkW = 0, g_skyVkH = 0;        // 合成 pass 的工作域尺寸 (T6 消费)
+
 // ---------- 原 main.cpp: PoC-B 实现 (pocbCode/pocbFail/pocbEnabled/pocbInit/2c-β/pocbInject) ----------
 static VkImage        g_ssrV1RecSrc = VK_NULL_HANDLE; // 录命令时用的入向图 (纯拷贝录制 = NULL)
 static long           g_ssrV1N = 0;                   // v1 渲染计数 (节流日志用, ssrOutVkFrame 也读)
@@ -3095,6 +3121,281 @@ void ssrKmtVkFrame(PocbCtx& c) // vkrenderer.h 有声明 (非 static), 定义必
 	logLine(b);
 }
 
+// ---- v0.18.35 T5: 天空入向镜像导入 (skyIn 色 / skyDepth 深度), 每帧幂等, 失败只关自己 ----
+// 一张图的完整流程 = 建 VkImage (外部内存, handleType 按 D3D11 侧建成的那条轴) → 导入 handle
+// (矩阵 = 内存类型 DEVICE_LOCAL/任意 × dedicated/plain, 与 ssrWDepVkBuild 同款) → 绑内存 →
+// 建 view → 布局初转 (UNDEFINED→GENERAL) 单独一条提交等完。
+static bool skyVkImport(PocbCtx& c, SkyVkImg& m, VkFormat fmt, uint32_t aspect, HANDLE h, bool kmt,
+                        unsigned w, unsigned ht, const std::string& extra)
+{
+	const std::string tag = std::string("[sky] VK ") + m.name;
+	auto fail = [&](const std::string& why) {
+		if (!m.logged)
+		{
+			m.logged = true;
+			logLine(tag + " 导入失败: " + why + " → 天空合成关自己 (D3D11 侧入向照常, PoC-B/SSR 不受影响)");
+		}
+		if (m.view)
+		{
+			c.fns.vkDestroyImageView(c.vdev, m.view, nullptr);
+			m.view = VK_NULL_HANDLE;
+		}
+		if (m.img)
+		{
+			c.fns.vkDestroyImage(c.vdev, m.img, nullptr);
+			m.img = VK_NULL_HANDLE;
+		}
+		if (m.mem)
+		{
+			c.fns.vkFreeMemory(c.vdev, m.mem, nullptr);
+			m.mem = VK_NULL_HANDLE;
+		}
+		m.state = 2;
+		return false;
+	};
+	// --- 1) VkImage: usage 只 SAMPLED (T6 的合成/云 pass 采样它; 本轮无读回) ---
+	VkExternalMemoryImageCreateInfo emi{};
+	emi.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+	emi.handleTypes = kmt ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT
+	                      : VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+	VkImageCreateInfo ici{};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.pNext = &emi;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = fmt;
+	ici.extent = VkExtent3D{w, ht, 1};
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VkResult vr = c.fns.vkCreateImage(c.vdev, &ici, nullptr, &m.img);
+	if (vr != VK_SUCCESS)
+	{
+		m.img = VK_NULL_HANDLE; // 失败时不写输出参数 ⇒ 这里置净免得后面清理拿垃圾值
+		return fail("vkCreateImage(" + std::string(kmt ? "KMT" : "NT") + ", SAMPLED) = " +
+		            pocbCode(vr));
+	}
+	// --- 2) 导入 handle: 分配即导入 (链进 VkMemoryAllocateInfo); 矩阵与水深同款 ---
+	VkMemoryRequirements req{};
+	c.fns.vkGetImageMemoryRequirements(c.vdev, m.img, &req);
+	VkPhysicalDeviceMemoryProperties mp{};
+	c.fns.vkGetPhysicalDeviceMemoryProperties(c.phys, &mp);
+	const int tDev = pocbMemType(mp, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	const int tAny = pocbMemType(mp, req.memoryTypeBits, 0);
+	if (!req.size || (tDev < 0 && tAny < 0))
+		return fail("导入无可用内存类型 (memoryTypeBits=" + std::to_string(req.memoryTypeBits) + ")");
+	VkResult ar = VK_ERROR_OUT_OF_HOST_MEMORY;
+	int tUsed = -1;
+	bool usedDed = false;
+	int ntry = 0;
+	for (int ti = 0; ti < 2 && ar != VK_SUCCESS; ++ti)
+	{
+		const int t = (ti == 0) ? tDev : tAny;
+		if (t < 0 || (ti == 1 && tAny == tDev))
+			continue;
+		for (int di = 0; di < 2 && ar != VK_SUCCESS; ++di)
+		{
+			++ntry;
+			VkImportMemoryWin32HandleInfoKHR imp{};
+			imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+			imp.handleType = kmt ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT
+			                     : VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+			imp.handle = h; // 只借用不接管 —— 归 D3D11 侧, 不 CloseHandle
+			VkMemoryDedicatedAllocateInfo dai{};
+			dai.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+			dai.pNext = &imp;
+			dai.image = m.img;
+			VkMemoryAllocateInfo mai{};
+			mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+			mai.pNext = (di == 0) ? static_cast<const void*>(&dai) : static_cast<const void*>(&imp);
+			mai.allocationSize = req.size;
+			mai.memoryTypeIndex = static_cast<uint32_t>(t);
+			ar = c.fns.vkAllocateMemory(c.vdev, &mai, nullptr, &m.mem);
+			if (ar == VK_SUCCESS)
+			{
+				tUsed = t;
+				usedDed = (di == 0);
+			}
+		}
+	}
+	if (ar != VK_SUCCESS)
+		return fail("导入矩阵 " + std::to_string(ntry) + " 次全失败 = " + pocbCode(ar) + " (VK报size=" +
+		            std::to_string((long long)req.size) + ")");
+	const VkResult br = c.fns.vkBindImageMemory(c.vdev, m.img, m.mem, 0);
+	if (br != VK_SUCCESS)
+		return fail("vkBindImageMemory = " + pocbCode(br));
+	// --- 3) 视图 (T6 采样面): 深度那张必须 DEPTH|STENCIL 两位都带 (组合格式的规范要求) ---
+	VkImageViewCreateInfo vci{};
+	vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vci.image = m.img;
+	vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vci.format = fmt;
+	vci.subresourceRange = {aspect, 0, 1, 0, 1};
+	if (c.fns.vkCreateImageView(c.vdev, &vci, nullptr, &m.view) != VK_SUCCESS)
+	{
+		m.view = VK_NULL_HANDLE;
+		return fail("vkCreateImageView 失败 (导入成立但采样面没有 ⇒ 合成 pass 无从下手, 关自己)");
+	}
+	// --- 4) 布局初转 (UNDEFINED→GENERAL) 单独一条, 建好时立即提交并等完 (与水深同口径) ---
+	if (!g_skyVkCmd)
+	{
+		VkCommandBufferAllocateInfo cbai{};
+		cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		cbai.commandPool = c.pool;
+		cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		cbai.commandBufferCount = 1;
+		if (c.fns.vkAllocateCommandBuffers(c.vdev, &cbai, &g_skyVkCmd) != VK_SUCCESS)
+		{
+			g_skyVkCmd = VK_NULL_HANDLE;
+			return fail("vkAllocateCommandBuffers(初转) 失败");
+		}
+	}
+	{
+		VkCommandBufferBeginInfo cbb{};
+		cbb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		if (c.fns.vkBeginCommandBuffer(g_skyVkCmd, &cbb) != VK_SUCCESS)
+			return fail("vkBeginCommandBuffer(初转) 失败");
+		VkImageMemoryBarrier imb{};
+		imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		imb.srcAccessMask = 0;
+		imb.dstAccessMask = 0;
+		imb.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imb.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+		imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.image = m.img;
+		imb.subresourceRange = {aspect, 0, 1, 0, 1};
+		c.fns.vkCmdPipelineBarrier(g_skyVkCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1,
+		                           &imb);
+		if (c.fns.vkEndCommandBuffer(g_skyVkCmd) != VK_SUCCESS)
+			return fail("vkEndCommandBuffer(初转) 失败");
+		c.fns.vkResetFences(c.vdev, 1, &c.fence);
+		VkSubmitInfo si{};
+		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		si.commandBufferCount = 1;
+		si.pCommandBuffers = &g_skyVkCmd;
+		vr = c.fns.vkQueueSubmit(c.queue, 1, &si, c.fence);
+		if (vr == VK_SUCCESS)
+			vr = c.fns.vkWaitForFences(c.vdev, 1, &c.fence, VK_TRUE, 5000000000ULL);
+		if (vr != VK_SUCCESS)
+			return fail("初转 vkQueueSubmit/vkWaitForFences = " + pocbCode(vr));
+	}
+	m.srcH = h;
+	m.dev = c.vdev;
+	m.state = 1;
+	if (!m.logged)
+	{
+		m.logged = true;
+		logLine(tag + " 导入OK: " + std::to_string(w) + "x" + std::to_string(ht) + " " + extra +
+		        " handle=" + hexOf(h) + " 轴=" + (kmt ? "KMT" : "NT") + " (矩阵 " + std::to_string(ntry) +
+		        " 次) alloc=" + (usedDed ? "dedicated" : "plain") + " 内存类型#" + std::to_string(tUsed) +
+		        " usage=SAMPLED — 每帧由 hook 侧 CopyResource 灌入 (零读回)");
+	}
+	return true;
+}
+
+static void skyMirrorVkBuild(PocbCtx& c)
+{
+	if (g_skyVkC.state == 2 && g_skyVkD.state == 2)
+		return;
+	if (c.state.load() != 2 || !c.vdev || !c.queue || !c.pool || !c.fence)
+		return; // PoC-B 还没就绪, 下帧再试
+	if (!g_skyOn.load(std::memory_order_relaxed))
+		return; // 总闸关 ⇒ 一行 VK 命令都不发
+	// 换设备: 旧 device 上的句柄**不能**拿来 destroy (同 ssrBaseVkBuild) ⇒ 整套只丢不毁
+	auto dropDev = [&](SkyVkImg& m) {
+		if (m.dev && c.vdev && m.dev != c.vdev)
+		{
+			m.img = VK_NULL_HANDLE;
+			m.mem = VK_NULL_HANDLE;
+			m.view = VK_NULL_HANDLE;
+			m.srcH = nullptr;
+			m.state = 0;
+			m.logged = false;
+			m.dev = VK_NULL_HANDLE;
+		}
+	};
+	dropDev(g_skyVkC);
+	dropDev(g_skyVkD);
+	// D3D11 侧换了 handle (源 desc 变 → 镜像重建) ⇒ 退掉旧图重新导入 (与水深同一条自愈路径)
+	auto dropH = [&](SkyVkImg& m, HANDLE cur, const char* tag) {
+		if (m.img == VK_NULL_HANDLE || !cur || m.srcH == cur)
+			return;
+		c.fns.vkDeviceWaitIdle(c.vdev);
+		c.fns.vkDestroyImageView(c.vdev, m.view, nullptr);
+		c.fns.vkDestroyImage(c.vdev, m.img, nullptr);
+		c.fns.vkFreeMemory(c.vdev, m.mem, nullptr);
+		m.img = VK_NULL_HANDLE;
+		m.mem = VK_NULL_HANDLE;
+		m.view = VK_NULL_HANDLE;
+		m.srcH = nullptr;
+		m.state = 0;
+		m.logged = false;
+		m.dev = VK_NULL_HANDLE;
+		logLine(std::string("[sky] VK ") + tag + " D3D11 侧镜像换了 handle → 退掉旧图重建");
+	};
+	dropH(g_skyVkC, g_skyInHC, "skyIn");
+	dropH(g_skyVkD, g_skyInHD, "skyDepth");
+	if (g_skyVkC.state == 1 && g_skyVkD.state == 1)
+		return; // 两张都已就绪
+	// ---- skyIn (色): RGBA16F 1920x1080, desc 照抄 321 ----
+	if (g_skyVkC.state == 0 && g_skyInTexC && g_skyInHC)
+	{
+		D3D11_TEXTURE2D_DESC cd{};
+		g_skyInTexC->GetDesc(&cd);
+		if (cd.Format != DXGI_FORMAT_R16G16B16A16_FLOAT || cd.MipLevels != 1 ||
+		    cd.ArraySize != 1 || cd.SampleDesc.Count != 1)
+		{
+			if (!g_skyVkC.logged)
+			{
+				g_skyVkC.logged = true;
+				logLine("[sky] VK skyIn 镜像格式/规格不在导入映射表内 (" + ssrFmtName(cd.Format) +
+				        " mips" + std::to_string(cd.MipLevels) + " arr" + std::to_string(cd.ArraySize) +
+				        " msaa" + std::to_string(cd.SampleDesc.Count) + ") → 天空合成关自己");
+			}
+			g_skyVkC.state = 2;
+		}
+		else if (skyVkImport(c, g_skyVkC, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT,
+		                     g_skyInHC, g_skyInColorKmt, cd.Width, cd.Height,
+		                     "RGBA16F (入向色 = 段7 末 321)"))
+		{
+			g_skyVkW = cd.Width;
+			g_skyVkH = cd.Height;
+		}
+	}
+	// ---- skyDepth (深度): D24 家族, 与 skyIn 同尺寸 (掩码源, docs/07 §3.4) ----
+	if (g_skyVkD.state == 0 && g_skyInTexD && g_skyInHD)
+	{
+		D3D11_TEXTURE2D_DESC dd{};
+		g_skyInTexD->GetDesc(&dd);
+		const bool d24 = (dd.Format == DXGI_FORMAT_R24G8_TYPELESS ||
+		                  dd.Format == DXGI_FORMAT_D24_UNORM_S8_UINT ||
+		                  dd.Format == DXGI_FORMAT_R24_UNORM_X8_TYPELESS ||
+		                  dd.Format == DXGI_FORMAT_X24_TYPELESS_G8_UINT);
+		if (!d24 || dd.MipLevels != 1 || dd.ArraySize != 1 || dd.SampleDesc.Count != 1)
+		{
+			if (!g_skyVkD.logged)
+			{
+				g_skyVkD.logged = true;
+				logLine("[sky] VK skyDepth 镜像不在 D24 家族映射表内 (" + ssrFmtName(dd.Format) +
+				        " mips" + std::to_string(dd.MipLevels) + " arr" + std::to_string(dd.ArraySize) +
+				        " msaa" + std::to_string(dd.SampleDesc.Count) + ") → 天空合成关自己");
+			}
+			g_skyVkD.state = 2;
+		}
+		else
+			skyVkImport(c, g_skyVkD, VK_FORMAT_D24_UNORM_S8_UINT,
+			            VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, g_skyInHD,
+			            g_skyInDepthKmt, dd.Width, dd.Height,
+			            "D24S8 (掩码源 = 520 快照 ≡ 段7 末 461, 判据 D24 == 0xFFFFFF)");
+	}
+}
+
 // ---- O-1 正式修法 (v0.18.4, docs/02 §14.20 / docs/05 O-1): 2c 入向 EVENT 闸 ----
 // 入向 CopyResource 是异步排队的: 只有阻塞读回帧 (前3次+每600次的 Map) 才等得到它, 非读回帧
 // 走到 Present 时可能还没进 GPU ⇒ VK 读到上一帧那份入向, 12e 恒差一帧 (v0.18.3 实测 8 行里
@@ -4638,4 +4939,8 @@ void pocbInject(PocbCtx& c, IDXGISwapChain* sc)
 	// 等完 (EVENT 闸与 handleType 无关, KMT 分支直接继承), 又与 2c-β/2d 出向共用 c.fence 顺序提交;
 	// 它只在 D3D11 侧做过深度读回的那几帧干活 (前3次+每600次), 单独计时, 不进 c.accMs。
 	ssrKmtVkFrame(c);
+	// v0.18.35 T5 天空入向镜像导入 (skyIn/skyDepth) —— 每帧幂等, 只在 g_skyOn=1 时发命令,
+	// 排在最后: 它自己的建图/初转各自一条提交等完, 不与上面几条共用 fence, 也不进 c.accMs。
+	// 本轮**只建不采样** (零读回); T6 在这里接合成 pass + EVENT 闸 (计划 T6「同步」节)。
+	skyMirrorVkBuild(c);
 }

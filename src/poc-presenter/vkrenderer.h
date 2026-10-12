@@ -251,4 +251,16 @@ namespace pocmain
 	extern std::atomic<bool>       g_ssrBaseOn;       // ini ssr.base585 底色镜像独立门 (默认 1)
 	extern ID3D11Texture2D*        g_ssrBaseTex;      // 底色 SHARED 镜像 (585 段16 后 = 含水画面)
 	extern HANDLE                  g_ssrBaseH;        // 底色镜像 NT handle (VK 导入源)
+	// ---- v0.18.35 T5 天空入向: 两张共享镜像 (skyIn ← 321 / skyDepth ← 520) ----
+	// 建在 hook 面 (main.cpp: skyMakeShared/skyInBuild), 导入在 renderer 侧
+	// (vkrenderer.cpp skyMirrorVkBuild) —— 与 2c 入向完全同法: desc 照抄源 + 共享 handle +
+	// 外部内存导入, **零每帧同步读回**。skyDepth 走的是与 2c 入向深度同一条 handle 轴
+	// (D24 家族 SHARED_NTHANDLE 不让共享 ⇒ 老式 SHARED + KMT handleType, v0.18.5 路线1′)。
+	extern std::atomic<bool>       g_skyOn;           // ini sky (总闸; 本组镜像的一切都以它为前提)
+	extern ID3D11Texture2D*        g_skyInTexC;       // skyIn 共享镜像 (RGBA16F, desc 照抄 321)
+	extern HANDLE                  g_skyInHC;         // skyIn 共享 handle (VK 导入源)
+	extern ID3D11Texture2D*        g_skyInTexD;       // skyDepth 共享镜像 (D24 家族, desc 照抄 520)
+	extern HANDLE                  g_skyInHD;         // skyDepth 共享 handle (KMT 或 NT)
+	extern bool                    g_skyInColorKmt;   // skyIn 走老式 SHARED ⇒ 用 KMT handleType
+	extern bool                    g_skyInDepthKmt;   // skyDepth 走老式 SHARED ⇒ 用 KMT handleType
 }
