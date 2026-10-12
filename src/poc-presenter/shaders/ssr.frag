@@ -178,6 +178,13 @@ layout(push_constant) uniform PC
 // 边界处与命中带无缝续接, 往深处再渐变成天空。走 spec constant (id0), 不扩 128B
 // push constant 规范下限; 管线建时烘焙 = ini 重启生效。仅 miss/edge=2 采 uProbe 前生效。
 layout(constant_id = 0) const float kCubeElev = 0.0;
+// v0.18.32: miss 屏幕钳带宽 (度; ini ssr.missfade, 默认 10, 0=关=逐位 v0.18.31)。
+// 起因 (条目33, Screenshot_104 纵扫定量): 探针原点不在反射点处 ⇒ cube 在本方位装的是
+// **开放湖岸远景** (草坡+低像素远树), 而此处真反射 = 峡湾**近景崖壁**; cubeelev 只能把
+// 错内容上下滑, 换不出近景。修法: 反射仰角 δ<22° (探针 A 方位实测天际线 +19~22°) 的 miss
+// 像素改采 Rf 无穷远投影 **clamp 回屏内** 的 uColor (真近景只有屏幕里有; 崖壁近竖直 ⇒
+// 顶边钳取样误差小); δ≥22+W° 全权交 cube (其内容=天空, 天空与原点无关=恒对)。
+layout(constant_id = 1) const float kMissFade = 10.0;
 
 layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 oColor;
@@ -478,6 +485,8 @@ void main()
 	}
 
 	vec3 refl;
+	// v0.18.32: miss 钳带权重 (1 = cube 全权 = v0.18.31 逐位; 命中/旋钮关/未旋姿态恒 1)。
+	float gCube = 1.0;
 	if (pc.p3.y > 0.5)
 	{
 		// ssr.blur: 按与法线同一个半径 R 做 5tap 十字平均 —— 命中判定在深度跳变处会一跳一断,
@@ -537,6 +546,16 @@ void main()
 					oColor = vec4(d * 0.5 + 0.5, 1.0);
 					return;
 				}
+				// v0.18.32: 真实反射仰角 δ (未压前的原生值) → 钳带权重 gCube。
+				if (pc.p7.w > 0.5)
+				{
+					float hl0 = length(d.xy);
+					float el0 = (hl0 > 1e-6) ? atan(d.z, hl0)
+					                         : ((d.z >= 0.0) ? 1.5707964 : -1.5707964);
+					gCube = (kMissFade > 0.5)
+					        ? smoothstep(radians(22.0), radians(22.0 + kMissFade), el0)
+					        : 1.0;
+				}
 				// v0.18.31: 视差仰角补偿 —— 只压**采样**仰角 (方位角不变), 不动行进/命中判定,
 				// 也不进上面的 debug=9 调试图 (那张恒 = 纯方向链, 旋钮拧到天边也不变)。
 				// p7.w=0 (未旋, v0.18.16d 路径) 时 d 是视图空间方向, 仰角无世界语义 ⇒ 不压。
@@ -553,6 +572,14 @@ void main()
 				// 顶格采到最高层 mip, 等于在游戏原生内容上又叠一层糊 (实拍: 地形色块在、草树影像无);
 				// uProbe 本来就是 1024² 原生抓取层 ⇒ 显式 LOD 0 直接用原生分辨率。
 				refl = textureLod(uProbe, d, 0.0).rgb;
+				// v0.18.32 钳带: gCube<1 的像素把源换成 Rf 无穷远投影 clamp 回屏内的 uColor。
+				// projectUV 齐次 ⇒ 方向直接代入 = 无穷远投影; 前向分量 (−Rf.z) 太小时不可投影
+				// (射线回头) ⇒ 保持 cube。uColor = 段16 前场景快照 = 无水面的真画面 (与命中带同源)。
+				if (gCube < 0.999 && (-Rf.z) > 1e-4)
+				{
+					vec2 duv = clamp(projectUV(Rf), vec2(0.0), vec2(1.0));
+					refl = mix(texture(uColor, duv).rgb, refl, gCube);
+				}
 			}
 			else
 				refl = baseRGB;
@@ -586,7 +613,7 @@ void main()
 	if (pc.p3.z > 7.5 && pc.p3.z < 8.5)
 	{
 		float k8 = clamp(pc.p1.z, 0.0, 1.0);
-		float w8 = hit ? (k8 * bf) : ((pc.p4.w > 1.5) ? k8 : 0.0); // v0.18.20: 与 wSsr 新式逐项同式 (miss 回补只在 edge=2 进), edge<=1 逐位旧式
+		float w8 = hit ? (k8 * bf) : ((pc.p4.w > 1.5) ? k8 * gCube : 0.0); // v0.18.20: 与 wSsr 新式逐项同式 (miss 回补只在 edge=2 进), edge<=1 逐位旧式; v0.18.32: miss 项乘 gCube (钳带内 base 远景不回补, gCube=1 处逐位旧式)
 		vec3 add8 = vec3(0.0);
 		if (w8 > 0.0001)
 		{
@@ -638,7 +665,7 @@ void main()
 	// 585 层里游戏现算的 specular (白亮斑) 也顶掉了, 回补门却没开 ⇒ miss 区高光丢失 (实拍坐实)。
 	// edge=2 时 miss 也给回补权重: max(baseRGB-refl,0) 只在 base 更亮处生效 (高光处差值大,
 	// cube 更亮处为 0) ⇒ 天然只补不压; edge<=1 时 miss 仍 0 ⇒ 逐位 v0.18.19, v1det=0 也逐位不动。
-	float wSsr = hit ? (k * bf) : ((pc.p4.w > 1.5) ? k : 0.0);
+	float wSsr = hit ? (k * bf) : ((pc.p4.w > 1.5) ? k * gCube : 0.0); // v0.18.32: miss 项乘 gCube —— 钳带内源=真屏幕内容, base 远景不属于被顶掉的高光, 不回补; gCube=1 处逐位 v0.18.20
 	vec3 outRGB = mix(baseRGB, refl, k);
 	if (v1det > 0.001 && wSsr > 0.0001)
 	{

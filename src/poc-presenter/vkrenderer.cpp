@@ -4196,15 +4196,20 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		// v0.18.31: ssr.cubeelev 走 spec constant (constant_id=0), 不扩 128B push constant
 		// 规范下限。管线惰建于首次录制 = ini 已解析完毕 ⇒ 值在此定格; 改 ini 重启生效
 		// (与其余旋钮同口径)。值恒由 ini 读出后 clamp, 不进 ssrV1Sig (管线不重建, 掺了白重录)。
-		VkSpecializationMapEntry ssrSme{};
-		ssrSme.constantID = 0;
-		ssrSme.offset = 0;
-		ssrSme.size = sizeof(float);
+		// v0.18.32: 加 constant_id=1 = ssr.missfade (钳带宽), 同口径烘焙 (2 条目 = 8B 数据块)。
+		VkSpecializationMapEntry ssrSme[2]{};
+		ssrSme[0].constantID = 0;
+		ssrSme[0].offset = 0;
+		ssrSme[0].size = sizeof(float);
+		ssrSme[1].constantID = 1;
+		ssrSme[1].offset = sizeof(float);
+		ssrSme[1].size = sizeof(float);
+		float ssrSpecData[2] = { g_ssrV1CubeElev, g_ssrV1MissFade };
 		VkSpecializationInfo ssrSpi{};
-		ssrSpi.mapEntryCount = 1;
-		ssrSpi.pMapEntries = &ssrSme;
-		ssrSpi.dataSize = sizeof(float);
-		ssrSpi.pData = &g_ssrV1CubeElev;
+		ssrSpi.mapEntryCount = 2;
+		ssrSpi.pMapEntries = ssrSme;
+		ssrSpi.dataSize = sizeof(ssrSpecData);
+		ssrSpi.pData = ssrSpecData;
 		st[1].pSpecializationInfo = &ssrSpi;
 		VkPipelineVertexInputStateCreateInfo vi{};
 		vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;

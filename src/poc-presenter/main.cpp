@@ -1372,6 +1372,11 @@ float g_ssrV1CamFlip[3] = {1.0f, 1.0f, 1.0f};    // (±1,±1,±1) cube 轴符号
 // (Screenshot_103 纵扫实测: cube 天际线 +19°, 边界 δ≈24.5 处真实仍是坡面)。走 spec
 // constant (不扩 128B push constant 规范下限), 管线惰建时烘焙 ⇒ 与其余旋钮同口径。
 float g_ssrV1CubeElev = 7.0f;
+// v0.18.32: miss 屏幕钳带宽 (度, ini ssr.missfade, 默认 10, clamp 0..30, 0=关=逐位 v0.18.31)。
+// 探针原点不在反射点处 ⇒ cube 该方位装的是开放湖岸远景 (草坡/低像素树), 而此处真反射 =
+// 峡湾近景崖壁 (Screenshot_104 纵扫坐实, docs/02 条目33)。δ<22° 的 miss 像素改采 Rf
+// 无穷远投影 clamp 回屏内 的 uColor (真近景源), 深处渐交 cube (内容=天空, 与原点无关=恒对)。
+float g_ssrV1MissFade = 10.0f;
 int   g_ssrV1CamOn = 1;                          // ini ssr.camrot 0=关 1=开 (默认开; 读不到 q 自动无效)
 // v0.18.25: 探针捕获基底快照 (cube 上传换代时刻的 g_ssrV1CamQ 副本, 全 0 = 未快照)。
 // 采样合成 conj(qcap)⊗qchain 在 vkrenderer.cpp 侧做; 详见 vkrenderer.h 注释与 chain_verify.ps1。
@@ -3887,11 +3892,19 @@ void installProbeOn(ID3D11Device* dev)
 				if (ce > 30.0) ce = 30.0;
 				g_ssrV1CubeElev = static_cast<float>(ce);
 			}
+			// ---- v0.18.32: miss 屏幕钳带宽 (度; spec constant, 管线建时烘焙; 0=关=逐位 v0.18.31) ----
+			{
+				double mf = iniNum("ssr.missfade", 10.0);
+				if (mf < 0.0) mf = 0.0;
+				if (mf > 30.0) mf = 30.0;
+				g_ssrV1MissFade = static_cast<float>(mf);
+			}
 			logLine("SSR侦察: [cam] ini camrot=" + std::to_string(g_ssrV1CamOn) + " camslot=" +
 			        std::to_string(g_ssrCamSlot) + " camidx=" + std::to_string(g_ssrCamIdx) +
 			        " camconj=" + std::to_string(g_ssrCamConj) + " cubeflip=" +
 			        std::to_string(fm) + " cubeelev=" +
-			        std::to_string(g_ssrV1CubeElev) +
+			        std::to_string(g_ssrV1CubeElev) + " missfade=" +
+			        std::to_string(g_ssrV1MissFade) +
 			        (g_ssrV1CamOn ? " — P3 相机朝向读回 (槽0..13 全扫) 开"
 			                      : " — P3 关 (p7.w 恒 0 = v0.18.16d 行为)"));
 		}
@@ -6228,7 +6241,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.31 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 25: 采样基底合成 q=conj(qcap)⊗qchain+换代快照; 26: probedump 每次换代落盘(诊断: PFM 恒=活跃 cube); 27: debug=9 采样方向场定标 + 恒等q守卫(复位占位不发布) + 第2发布点也落盘; 28: shader 产物补生成 —— make_shaders 此前未跑致 v17/v20/v27 ssr.frag 幻影, DLL 一直嵌 v16 旧 shader(miss 无旋转总根因, 修法=tools/spvsync 闸); 29: 撤销25基底合成(cube 世界轴对齐, 直发 q 即真世界方向) + debug 8/7 闸收窄(debug=9 的 hit 走正常合成); 30: P1 读回跟踪期(ssr.probeint 默认2s — 两拍定C1后周期重读探针, FNV 签名有变即换代重传, 修 miss 区外景冻结/队列#7); 31: miss 采样仰角视差补偿 ssr.cubeelev(spec constant 默认7° — 探针原点比真实反射点Q远, cube天际线低6-7°致 miss 区顶部过早切天空, 下压采样仰角对齐真实天际线, 修『从天空变成山峰』倒置/条目32); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
+	logLine("==== poc-presenter v0.18.32 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 25: 采样基底合成 q=conj(qcap)⊗qchain+换代快照; 26: probedump 每次换代落盘(诊断: PFM 恒=活跃 cube); 27: debug=9 采样方向场定标 + 恒等q守卫(复位占位不发布) + 第2发布点也落盘; 28: shader 产物补生成 —— make_shaders 此前未跑致 v17/v20/v27 ssr.frag 幻影, DLL 一直嵌 v16 旧 shader(miss 无旋转总根因, 修法=tools/spvsync 闸); 29: 撤销25基底合成(cube 世界轴对齐, 直发 q 即真世界方向) + debug 8/7 闸收窄(debug=9 的 hit 走正常合成); 30: P1 读回跟踪期(ssr.probeint 默认2s — 两拍定C1后周期重读探针, FNV 签名有变即换代重传, 修 miss 区外景冻结/队列#7); 31: miss 采样仰角视差补偿 ssr.cubeelev(spec constant 默认7° — 探针原点比真实反射点Q远, cube天际线低6-7°致 miss 区顶部过早切天空, 下压采样仰角对齐真实天际线, 修『从天空变成山峰』倒置/条目32); 32: miss 屏幕钳带交叉淡入 ssr.missfade(spec constant 默认10° — 探针不在反射点: cube 该方位=开放湖岸远景非本处近景, δ<22° miss 改采 Rf 无穷远投影钳回屏内 uColor 真近景+回补同乘权重, 深处渐交 cube 天空, 修『远景当近景』/条目33); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
