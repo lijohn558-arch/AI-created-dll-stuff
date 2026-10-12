@@ -4941,7 +4941,7 @@ void pocbInject(PocbCtx& c, IDXGISwapChain* sc)
 	ssrKmtVkFrame(c);
 	// v0.18.35 T5 天空入向镜像导入 (skyIn/skyDepth) —— 每帧幂等, 只在 g_skyOn=1 时发命令,
 	// 排在最后: 建图/初转各自一条提交 + 等 fence, **复用同一个 c.fence** —— 上面每一个用它的
-> // 函数都是 Reset→Submit→WaitForFences 等到完成的串行用法, 顺序安全; 也不进 c.accMs。
+// 函数都是 Reset→Submit→WaitForFences 等到完成的串行用法, 顺序安全; 也不进 c.accMs。
 	// 本轮**只建不采样** (零读回); T6 在这里接合成 pass + EVENT 闸 (计划 T6「同步」节)。
 	skyMirrorVkBuild(c);
 }
