@@ -1,0 +1,960 @@
+# pass8-sky scene=S1 stride=1 elapsed=48.9 errors=0
+## seg7
+ev 34760..47976 draws=788 RT=[R16G16B16A16_FLOAT|R16G16_FLOAT|R8G8B8A8_UNORM] DS=D24S8_TYPELESS
+PS(39): 1567,1632,1635,1636,3923,4024,5592,5636,5639,5642,5655,5820,5856,5858,6410,6413,6449,7909,8293,9052,9845,9851,10281,10283,10749,10757,10785,10793,10805,11777,11778,11779,12140,12141,12294,12295,12496,12499,12503
+
+## 段7 逐 draw (eventId ps vs idx inst depthE depthW depthC blendE wm vp srv)
+ev34760   ps=3923    vs=1984    idx=477    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19932
+ev34787   ps=4024    vs=1984    idx=168    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19734,1:19636
+ev34802   ps=4024    vs=1984    idx=168    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19734,1:19636
+ev34817   ps=4024    vs=1984    idx=168    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19734,1:19636
+ev34846   ps=5636    vs=5465    idx=2916   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19498,1:19512,2:366
+ev34855   ps=5636    vs=5465    idx=2916   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19498,1:19512,2:366
+ev34864   ps=5636    vs=5465    idx=2916   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19498,1:19512,2:366
+ev34881   ps=5636    vs=5465    idx=3      inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev34911   ps=5636    vs=5465    idx=84     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19488,1:19516,2:366
+ev34920   ps=5636    vs=5465    idx=84     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19488,1:19516,2:366
+ev34929   ps=5636    vs=5465    idx=84     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19488,1:19516,2:366
+ev34959   ps=5636    vs=5466    idx=843    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev34976   ps=5636    vs=5466    idx=504    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19604,1:19600,2:366
+ev34993   ps=5636    vs=5466    idx=294    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20406,1:20270,2:366
+ev35010   ps=5636    vs=5466    idx=996    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20340,1:20360,2:366
+ev35027   ps=5636    vs=5466    idx=186    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20410,1:20352,2:366
+ev35044   ps=5636    vs=5466    idx=6162   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35053   ps=5636    vs=5466    idx=3900   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35070   ps=5636    vs=5466    idx=624    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev35087   ps=5636    vs=5466    idx=7245   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev35104   ps=5636    vs=5466    idx=306    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev35121   ps=5636    vs=5466    idx=4986   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35138   ps=5636    vs=5466    idx=117    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20410,1:20352,2:366
+ev35155   ps=5636    vs=5466    idx=141    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20406,1:20270,2:366
+ev35172   ps=5636    vs=5466    idx=624    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev35189   ps=5636    vs=5466    idx=348    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35206   ps=5636    vs=5466    idx=624    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev35215   ps=5636    vs=5466    idx=624    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev35224   ps=5636    vs=5466    idx=216    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev35241   ps=5636    vs=5466    idx=1827   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18542,2:366
+ev35258   ps=5636    vs=5466    idx=8673   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev35273   ps=5636    vs=5466    idx=1713   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev35290   ps=5636    vs=5466    idx=201    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18584,1:18586,2:366
+ev35307   ps=5636    vs=5466    idx=642    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev35324   ps=5636    vs=5466    idx=336    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35333   ps=5636    vs=5466    idx=168    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35342   ps=5636    vs=5466    idx=324    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35359   ps=5636    vs=5466    idx=192    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20594,1:20592,2:366
+ev35376   ps=5636    vs=5466    idx=141    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20406,1:20270,2:366
+ev35393   ps=5636    vs=5466    idx=312    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35410   ps=5636    vs=5466    idx=1416   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev35439   ps=5636    vs=5466    idx=720    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20368,1:20300,2:366
+ev35456   ps=5636    vs=5466    idx=168    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20246,1:20252,2:366
+ev35486   ps=5636    vs=5466    idx=600    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19540,1:19510,2:366
+ev35495   ps=5636    vs=5466    idx=600    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19540,1:19510,2:366
+ev35504   ps=5636    vs=5466    idx=600    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19540,1:19510,2:366
+ev35513   ps=5636    vs=5466    idx=600    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19540,1:19510,2:366
+ev35543   ps=5636    vs=5465    idx=951    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev35552   ps=5636    vs=5465    idx=1467   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev35569   ps=5636    vs=5465    idx=24     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20336,1:20380,2:366
+ev35586   ps=5636    vs=5465    idx=36     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20406,1:20270,2:366
+ev35615   ps=5636    vs=5465    idx=1161   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20396,1:20264,2:366
+ev35644   ps=5636    vs=5466    idx=324    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35653   ps=5636    vs=5466    idx=348    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35670   ps=5636    vs=5466    idx=225    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20336,1:20380,2:366
+ev35687   ps=5636    vs=5466    idx=228    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35696   ps=5636    vs=5466    idx=2583   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35705   ps=5636    vs=5466    idx=324    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35722   ps=5636    vs=5466    idx=165    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20336,1:20380,2:366
+ev35739   ps=5636    vs=5466    idx=882    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20406,1:20270,2:366
+ev35756   ps=5636    vs=5466    idx=588    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev35773   ps=5636    vs=5466    idx=585    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20406,1:20270,2:366
+ev35790   ps=5636    vs=5466    idx=3624   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35807   ps=5636    vs=5466    idx=1713   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev35824   ps=5636    vs=5466    idx=201    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18584,1:18586,2:366
+ev35841   ps=5636    vs=5466    idx=642    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev35858   ps=5636    vs=5466    idx=348    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35867   ps=5636    vs=5466    idx=168    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35884   ps=5636    vs=5466    idx=150    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20336,1:20380,2:366
+ev35901   ps=5636    vs=5466    idx=1692   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20268,1:20382,2:366
+ev35918   ps=5636    vs=5466    idx=216    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20336,1:20380,2:366
+ev35935   ps=5636    vs=5466    idx=312    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35952   ps=5636    vs=5466    idx=624    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev35969   ps=5636    vs=5466    idx=684    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev35986   ps=5636    vs=5466    idx=1305   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev36003   ps=5636    vs=5466    idx=4947   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev36020   ps=5636    vs=5466    idx=624    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev36037   ps=5636    vs=5466    idx=11694  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev36054   ps=5636    vs=5466    idx=2070   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20340,1:20360,2:366
+ev36081   ps=5636    vs=5465    idx=1791   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev36098   ps=5636    vs=5465    idx=2136   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev36125   ps=5636    vs=5466    idx=750    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev36142   ps=5636    vs=5466    idx=150    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20260,1:20366,2:366
+ev36159   ps=5636    vs=5466    idx=8082   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev36176   ps=5636    vs=5466    idx=384    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20336,1:20380,2:366
+ev36193   ps=5636    vs=5466    idx=843    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev36210   ps=5636    vs=5466    idx=504    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19604,1:19600,2:366
+ev36227   ps=5636    vs=5466    idx=6897   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev36244   ps=5636    vs=5466    idx=132    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev36261   ps=5636    vs=5466    idx=1533   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20406,1:20270,2:366
+ev36278   ps=5636    vs=5466    idx=5781   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev36295   ps=5636    vs=5466    idx=210    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20406,1:20270,2:366
+ev36312   ps=5636    vs=5466    idx=180    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20410,1:20352,2:366
+ev36329   ps=5636    vs=5466    idx=9894   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20408,1:20350,2:366
+ev36346   ps=5636    vs=5466    idx=774    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev36375   ps=5636    vs=5466    idx=1248   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20348,1:20278,2:366
+ev36390   ps=5636    vs=5466    idx=1032   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20348,1:20278,2:366
+ev36399   ps=5636    vs=5466    idx=840    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20348,1:20278,2:366
+ev36428   ps=5636    vs=5465    idx=1050   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev36453   ps=5636    vs=5466    idx=4491   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev36462   ps=5636    vs=5466    idx=756    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev36471   ps=5636    vs=5466    idx=903    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev36488   ps=5636    vs=5466    idx=5253   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev36505   ps=5636    vs=5466    idx=3579   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev36514   ps=5636    vs=5466    idx=483    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev36531   ps=5636    vs=5466    idx=684    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20284,1:20414,2:366
+ev36560   ps=5636    vs=5466    idx=348    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20246,1:20252,2:366
+ev36589   ps=5636    vs=5466    idx=825    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev36614   ps=5636    vs=5466    idx=837    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev36641   ps=5639    vs=5473    idx=1188   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19758,1:19768,2:366
+ev36658   ps=5639    vs=5473    idx=546    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20402,1:20398,2:366
+ev36675   ps=5639    vs=5473    idx=1188   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19758,1:19768,2:366
+ev36692   ps=5639    vs=5473    idx=84     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19946,1:19940,2:366
+ev36709   ps=5639    vs=5473    idx=1188   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19758,1:19768,2:366
+ev36726   ps=5639    vs=5473    idx=51     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20432,1:20344,2:366
+ev36743   ps=5639    vs=5473    idx=654    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19918,1:19920,2:366
+ev36760   ps=5639    vs=5473    idx=984    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19916,1:19914,2:366
+ev36777   ps=5639    vs=5473    idx=240    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19946,1:19940,2:366
+ev36794   ps=5639    vs=5473    idx=624    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19944,1:19938,2:366
+ev36811   ps=5639    vs=5473    idx=1188   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19758,1:19768,2:366
+ev36828   ps=5639    vs=5473    idx=174    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19944,1:19938,2:366
+ev36837   ps=5639    vs=5473    idx=708    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19944,1:19938,2:366
+ev36854   ps=5639    vs=5473    idx=1188   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19760,1:19770,2:366
+ev36883   ps=5639    vs=5473    idx=696    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20280,1:20328,2:366
+ev36892   ps=5639    vs=5473    idx=696    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20280,1:20328,2:366
+ev36921   ps=5639    vs=5474    idx=1068   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19500,1:22407,2:366
+ev36938   ps=5639    vs=5474    idx=1284   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19772,1:19784,2:366
+ev36955   ps=5639    vs=5474    idx=504    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19894,1:19888,2:366
+ev36972   ps=5639    vs=5474    idx=1278   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19904,1:19886,2:366
+ev36989   ps=5639    vs=5474    idx=144    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20336,1:20380,2:366
+ev37006   ps=5639    vs=5474    idx=492    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20404,1:20400,2:366
+ev37023   ps=5639    vs=5474    idx=168    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev37040   ps=5639    vs=5474    idx=6054   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev37057   ps=5639    vs=5474    idx=1137   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18542,2:366
+ev37074   ps=5639    vs=5474    idx=7278   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20420,1:20388,2:366
+ev37091   ps=5639    vs=5474    idx=1008   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev37108   ps=5639    vs=5474    idx=594    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20290,1:20256,2:366
+ev37125   ps=5639    vs=5474    idx=624    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev37142   ps=5639    vs=5474    idx=984    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20420,1:20388,2:366
+ev37159   ps=5639    vs=5474    idx=18     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev37168   ps=5639    vs=5474    idx=18     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev37185   ps=5639    vs=5474    idx=1584   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev37202   ps=5639    vs=5474    idx=1137   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev37219   ps=5639    vs=5474    idx=615    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev37236   ps=5639    vs=5474    idx=2928   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev37253   ps=5639    vs=5474    idx=9231   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev37270   ps=5639    vs=5474    idx=1128   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19610,1:19614,2:366
+ev37287   ps=5639    vs=5474    idx=3972   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18542,2:366
+ev37304   ps=5639    vs=5474    idx=3225   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19610,1:19614,2:366
+ev37321   ps=5639    vs=5474    idx=6567   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18542,2:366
+ev37338   ps=5639    vs=5474    idx=135    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev37355   ps=5639    vs=5474    idx=4164   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20420,1:20388,2:366
+ev37372   ps=5639    vs=5474    idx=462    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev37389   ps=5639    vs=5474    idx=1788   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev37406   ps=5639    vs=5474    idx=1068   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19500,1:22407,2:366
+ev37415   ps=5639    vs=5474    idx=1068   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19500,1:22407,2:366
+ev37432   ps=5639    vs=5474    idx=1656   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19772,1:19784,2:366
+ev37449   ps=5639    vs=5474    idx=345    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19924,1:19922,2:366
+ev37466   ps=5639    vs=5474    idx=3225   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19610,1:19614,2:366
+ev37483   ps=5639    vs=5474    idx=6567   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18542,2:366
+ev37500   ps=5639    vs=5474    idx=5076   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev37517   ps=5639    vs=5474    idx=1560   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18544,1:18546,2:366
+ev37534   ps=5639    vs=5474    idx=216    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev37551   ps=5639    vs=5474    idx=645    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev37568   ps=5639    vs=5474    idx=75     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18542,2:366
+ev37585   ps=5639    vs=5474    idx=1596   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev37602   ps=5639    vs=5474    idx=1068   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19500,1:22407,2:366
+ev37611   ps=5639    vs=5474    idx=1068   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19500,1:22407,2:366
+ev37628   ps=5639    vs=5474    idx=1596   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev37645   ps=5639    vs=5474    idx=867    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev37662   ps=5639    vs=5474    idx=156    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev37679   ps=5639    vs=5474    idx=216    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev37696   ps=5639    vs=5474    idx=432    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20404,1:20400,2:366
+ev37713   ps=5639    vs=5474    idx=2724   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev37730   ps=5639    vs=5474    idx=5076   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev37747   ps=5639    vs=5474    idx=1560   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18542,2:366
+ev37764   ps=5639    vs=5474    idx=3318   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19786,1:19790,2:366
+ev37781   ps=5639    vs=5474    idx=378    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19974,1:19972,2:366
+ev37790   ps=5639    vs=5474    idx=288    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19974,1:19972,2:366
+ev37799   ps=5639    vs=5474    idx=60     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19974,1:19972,2:366
+ev37816   ps=5639    vs=5474    idx=156    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev37833   ps=5639    vs=5474    idx=12     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev37850   ps=5639    vs=5474    idx=1068   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19500,1:22407,2:366
+ev37867   ps=5639    vs=5474    idx=132    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev37876   ps=5639    vs=5474    idx=84     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev37885   ps=5639    vs=5474    idx=144    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev37902   ps=5639    vs=5474    idx=2040   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19912,1:19886,2:366
+ev37919   ps=5639    vs=5474    idx=156    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev37936   ps=5639    vs=5474    idx=12     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev37953   ps=5639    vs=5474    idx=135    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev37970   ps=5639    vs=5474    idx=1068   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19500,1:22407,2:366
+ev37987   ps=5639    vs=5474    idx=132    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev38004   ps=5639    vs=5474    idx=624    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev38021   ps=5639    vs=5474    idx=4956   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20420,1:20388,2:366
+ev38050   ps=5639    vs=5474    idx=504    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20396,1:20264,2:366
+ev38067   ps=5639    vs=5474    idx=594    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20426,1:20378,2:366
+ev38076   ps=5639    vs=5474    idx=594    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20426,1:20378,2:366
+ev38085   ps=5639    vs=5474    idx=318    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20426,1:20378,2:366
+ev38102   ps=5639    vs=5474    idx=1896   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20396,1:20264,2:366
+ev38121   ps=5639    vs=5474    idx=18     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20364,1:20248,2:366
+ev38140   ps=5639    vs=5474    idx=72     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20412,1:20354,2:366
+ev38157   ps=5639    vs=5474    idx=360    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20282,1:20330,2:366
+ev38166   ps=5639    vs=5474    idx=474    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20282,1:20330,2:366
+ev38183   ps=5639    vs=5474    idx=534    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20280,1:20328,2:366
+ev38192   ps=5639    vs=5474    idx=585    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20280,1:20328,2:366
+ev38201   ps=5639    vs=5474    idx=558    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20280,1:20328,2:366
+ev38210   ps=5639    vs=5474    idx=585    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20280,1:20328,2:366
+ev38227   ps=5639    vs=5474    idx=1284   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20412,1:20354,2:366
+ev38246   ps=5639    vs=5474    idx=741    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20364,1:20248,2:366
+ev38265   ps=5639    vs=5474    idx=1008   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20306,1:20244,2:366
+ev38282   ps=5639    vs=5474    idx=474    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20412,1:20354,2:366
+ev38291   ps=5639    vs=5474    idx=474    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20412,1:20354,2:366
+ev38326   ps=5639    vs=5475    idx=288    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19788,1:19792,2:366
+ev38355   ps=5639    vs=5473    idx=774    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20402,1:20398,2:366
+ev38372   ps=5639    vs=5473    idx=1188   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19758,1:19768,2:366
+ev38389   ps=5639    vs=5473    idx=744    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20404,1:20400,2:366
+ev38398   ps=5639    vs=5473    idx=210    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20404,1:20400,2:366
+ev38415   ps=5639    vs=5473    idx=777    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20334,1:20288,2:366
+ev38424   ps=5639    vs=5473    idx=567    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20334,1:20288,2:366
+ev38441   ps=5639    vs=5473    idx=1188   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19758,1:19768,2:366
+ev38458   ps=5639    vs=5473    idx=2520   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20320,1:20342,2:366
+ev38487   ps=5639    vs=5473    idx=975    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20332,1:20286,2:366
+ev38496   ps=5639    vs=5473    idx=642    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20332,1:20286,2:366
+ev38525   ps=5639    vs=5474    idx=144    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev38542   ps=5639    vs=5474    idx=3546   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20274,1:20266,2:366
+ev38559   ps=5639    vs=5474    idx=156    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev38576   ps=5639    vs=5474    idx=348    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev38585   ps=5639    vs=5474    idx=603    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev38602   ps=5639    vs=5474    idx=1554   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20404,1:20400,2:366
+ev38619   ps=5639    vs=5474    idx=705    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20402,1:20398,2:366
+ev38636   ps=5639    vs=5474    idx=3075   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev38653   ps=5639    vs=5474    idx=48     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20404,1:20400,2:366
+ev38670   ps=5639    vs=5474    idx=192    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev38687   ps=5639    vs=5474    idx=780    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev38704   ps=5639    vs=5474    idx=1722   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev38721   ps=5639    vs=5474    idx=5883   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev38738   ps=5639    vs=5474    idx=216    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20434,1:20346,2:366
+ev38755   ps=5639    vs=5474    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20420,1:20388,2:366
+ev38772   ps=5639    vs=5474    idx=144    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev38789   ps=5639    vs=5474    idx=1359   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev38806   ps=5639    vs=5474    idx=1677   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20404,1:20400,2:366
+ev38823   ps=5639    vs=5474    idx=5076   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev38840   ps=5639    vs=5474    idx=1560   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18544,1:18546,2:366
+ev38857   ps=5639    vs=5474    idx=1395   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev38866   ps=5639    vs=5474    idx=156    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev38875   ps=5639    vs=5474    idx=84     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev38892   ps=5639    vs=5474    idx=348    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev38909   ps=5639    vs=5474    idx=4956   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20420,1:20388,2:366
+ev38926   ps=5639    vs=5474    idx=8082   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev38943   ps=5639    vs=5474    idx=1041   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18552,1:18554,2:366
+ev38960   ps=5639    vs=5474    idx=948    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20404,1:20400,2:366
+ev38977   ps=5639    vs=5474    idx=867    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev38994   ps=5639    vs=5474    idx=444    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev39011   ps=5639    vs=5474    idx=120    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19932,1:19930,2:366
+ev39028   ps=5639    vs=5474    idx=132    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev39045   ps=5639    vs=5474    idx=180    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev39054   ps=5639    vs=5474    idx=48     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev39071   ps=5639    vs=5474    idx=2328   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20274,1:20266,2:366
+ev39088   ps=5639    vs=5474    idx=18     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev39105   ps=5639    vs=5474    idx=423    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20404,1:20400,2:366
+ev39122   ps=5639    vs=5474    idx=546    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20434,1:20346,2:366
+ev39139   ps=5639    vs=5474    idx=2148   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev39156   ps=5639    vs=5474    idx=3084   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev39173   ps=5639    vs=5474    idx=153    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20290,1:20256,2:366
+ev39190   ps=5639    vs=5474    idx=9918   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19604,1:19600,2:366
+ev39207   ps=5639    vs=5474    idx=321    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20294,1:20304,2:366
+ev39224   ps=5639    vs=5474    idx=3654   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev39241   ps=5639    vs=5474    idx=579    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev39258   ps=5639    vs=5474    idx=2160   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20420,1:20388,2:366
+ev39275   ps=5639    vs=5474    idx=18     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev39292   ps=5639    vs=5474    idx=1050   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19604,1:19600,2:366
+ev39309   ps=5639    vs=5474    idx=444    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev39326   ps=5639    vs=5474    idx=120    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19932,1:19930,2:366
+ev39343   ps=5639    vs=5474    idx=462    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev39360   ps=5639    vs=5474    idx=1788   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev39377   ps=5639    vs=5474    idx=1968   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev39394   ps=5639    vs=5474    idx=8904   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev39423   ps=5639    vs=5474    idx=312    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20306,1:20244,2:366
+ev39440   ps=5639    vs=5474    idx=18     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20282,1:20330,2:366
+ev39457   ps=5639    vs=5474    idx=1440   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20396,1:20264,2:366
+ev39474   ps=5639    vs=5474    idx=90     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20412,1:20354,2:366
+ev39491   ps=5639    vs=5474    idx=1158   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20396,1:20264,2:366
+ev39508   ps=5639    vs=5474    idx=1080   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19742,1:19804,2:366
+ev39525   ps=5639    vs=5474    idx=360    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20282,1:20330,2:366
+ev39534   ps=5639    vs=5474    idx=474    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20282,1:20330,2:366
+ev39553   ps=5639    vs=5474    idx=255    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20364,1:20248,2:366
+ev39572   ps=5639    vs=5474    idx=534    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20280,1:20328,2:366
+ev39591   ps=5639    vs=5474    idx=984    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20364,1:20248,2:366
+ev39620   ps=5639    vs=5473    idx=702    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20334,1:20288,2:366
+ev39637   ps=5639    vs=5473    idx=615    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20434,1:20346,2:366
+ev39654   ps=5639    vs=5473    idx=228    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20334,1:20288,2:366
+ev39671   ps=5639    vs=5473    idx=1056   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20402,1:20398,2:366
+ev39680   ps=5639    vs=5473    idx=942    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20402,1:20398,2:366
+ev39697   ps=5639    vs=5473    idx=306    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20434,1:20346,2:366
+ev39714   ps=5639    vs=5473    idx=432    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev39731   ps=5639    vs=5473    idx=1152   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev39760   ps=5639    vs=5473    idx=1314   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20332,1:20286,2:366
+ev39769   ps=5639    vs=5473    idx=1575   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20332,1:20286,2:366
+ev39786   ps=5639    vs=5473    idx=756    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20396,1:20264,2:366
+ev39803   ps=5639    vs=5473    idx=450    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20332,1:20286,2:366
+ev39812   ps=5639    vs=5473    idx=540    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20332,1:20286,2:366
+ev39841   ps=5639    vs=5474    idx=12105  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20376,1:20296,2:366
+ev39858   ps=5639    vs=5474    idx=312    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20422,1:20324,2:366
+ev39875   ps=5639    vs=5474    idx=390    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20294,1:20304,2:366
+ev39892   ps=5639    vs=5474    idx=738    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19932,1:19930,2:366
+ev39909   ps=5639    vs=5474    idx=1092   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20334,1:20288,2:366
+ev39926   ps=5639    vs=5474    idx=1386   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20402,1:20398,2:366
+ev39943   ps=5639    vs=5474    idx=4134   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev39960   ps=5639    vs=5474    idx=11004  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev39977   ps=5639    vs=5474    idx=369    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev39994   ps=5639    vs=5474    idx=1095   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20404,1:20400,2:366
+ev40011   ps=5639    vs=5474    idx=5418   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev40028   ps=5639    vs=5474    idx=1050   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev40045   ps=5639    vs=5474    idx=780    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20434,1:20346,2:366
+ev40062   ps=5639    vs=5474    idx=345    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev40079   ps=5639    vs=5474    idx=255    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20334,1:20288,2:366
+ev40096   ps=5639    vs=5474    idx=354    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20294,1:20304,2:366
+ev40113   ps=5639    vs=5474    idx=4359   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev40130   ps=5639    vs=5474    idx=810    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev40147   ps=5639    vs=5474    idx=3705   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev40164   ps=5639    vs=5474    idx=1278   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev40181   ps=5639    vs=5474    idx=1596   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:366
+ev40198   ps=5639    vs=5474    idx=867    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev40215   ps=5639    vs=5474    idx=2328   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20274,1:20266,2:366
+ev40232   ps=5639    vs=5474    idx=2454   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20420,1:20388,2:366
+ev40249   ps=5639    vs=5474    idx=1161   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev40266   ps=5639    vs=5474    idx=5337   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev40283   ps=5639    vs=5474    idx=2262   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev40300   ps=5639    vs=5474    idx=3837   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20404,1:20400,2:366
+ev40317   ps=5639    vs=5474    idx=840    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20434,1:20346,2:366
+ev40346   ps=5639    vs=5474    idx=501    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19932,1:19930,2:366
+ev40365   ps=5639    vs=5474    idx=444    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20364,1:20248,2:366
+ev40384   ps=5639    vs=5474    idx=561    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20332,1:20286,2:366
+ev40401   ps=5639    vs=5474    idx=6519   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20396,1:20264,2:366
+ev40418   ps=5639    vs=5474    idx=903    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20412,1:20354,2:366
+ev40437   ps=5639    vs=5474    idx=408    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20364,1:20248,2:366
+ev40456   ps=5639    vs=5474    idx=1944   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20396,1:20264,2:366
+ev40475   ps=5639    vs=5474    idx=4941   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20364,1:20248,2:366
+ev40504   ps=5639    vs=5473    idx=1533   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20434,1:20346,2:366
+ev40513   ps=5639    vs=5473    idx=705    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20434,1:20346,2:366
+ev40522   ps=5639    vs=5473    idx=1095   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20434,1:20346,2:366
+ev40549   ps=5639    vs=5474    idx=903    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20404,1:20400,2:366
+ev40566   ps=5639    vs=5474    idx=1089   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20434,1:20346,2:366
+ev40575   ps=5639    vs=5474    idx=441    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20434,1:20346,2:366
+ev40592   ps=5639    vs=5474    idx=1137   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20334,1:20288,2:366
+ev40601   ps=5639    vs=5474    idx=582    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20334,1:20288,2:366
+ev40618   ps=5639    vs=5474    idx=909    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20434,1:20346,2:366
+ev40635   ps=5639    vs=5474    idx=22353  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20312,1:20384,2:366
+ev40652   ps=5639    vs=5474    idx=9894   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20272,1:20436,2:366
+ev40669   ps=5639    vs=5474    idx=768    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev40698   ps=5639    vs=5474    idx=813    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20332,1:20286,2:366
+ev40717   ps=5639    vs=5474    idx=1122   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20262,1:20248,2:366
+ev40746   ps=5639    vs=5474    idx=1761   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20326,1:20322,2:366
+ev40763   ps=5639    vs=5474    idx=2478   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20404,1:20400,2:366
+ev40780   ps=5639    vs=5474    idx=678    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20334,1:20288,2:366
+ev40797   ps=5639    vs=5474    idx=4482   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20402,1:20398,2:366
+ev40814   ps=5639    vs=5474    idx=963    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20434,1:20346,2:366
+ev40843   ps=5639    vs=5474    idx=1356   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20332,1:20286,2:366
+ev40875   ps=5642    vs=5465    idx=420    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19528,1:19538,2:19528,3:366
+ev40884   ps=5642    vs=5465    idx=420    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19528,1:19538,2:19528,3:366
+ev40893   ps=5642    vs=5465    idx=420    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19528,1:19538,2:19528,3:366
+ev40902   ps=5642    vs=5465    idx=420    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19528,1:19538,2:19528,3:366
+ev40911   ps=5642    vs=5465    idx=420    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19528,1:19538,2:19528,3:366
+ev40920   ps=5642    vs=5465    idx=420    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19528,1:19538,2:19528,3:366
+ev40950   ps=5642    vs=5466    idx=477    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19560,1:19548,2:19560,3:366
+ev40959   ps=5642    vs=5466    idx=477    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19560,1:19548,2:19560,3:366
+ev40984   ps=5642    vs=5466    idx=477    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19560,1:19548,2:19560,3:366
+ev40993   ps=5642    vs=5466    idx=477    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19560,1:19548,2:19560,3:366
+ev41002   ps=5642    vs=5466    idx=669    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19560,1:19548,2:19560,3:366
+ev41011   ps=5642    vs=5466    idx=477    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19560,1:19548,2:19560,3:366
+ev41020   ps=5642    vs=5466    idx=477    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19560,1:19548,2:19560,3:366
+ev41029   ps=5642    vs=5466    idx=669    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19560,1:19548,2:19560,3:366
+ev41038   ps=5642    vs=5466    idx=477    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19560,1:19548,2:19560,3:366
+ev41047   ps=5642    vs=5466    idx=477    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19560,1:19548,2:19560,3:366
+ev41080   ps=5655    vs=5474    idx=708    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19846,1:19820,2:20594,3:20594,4:366
+ev41089   ps=5655    vs=5474    idx=708    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19846,1:19820,2:20594,3:20594,4:366
+ev41098   ps=5655    vs=5474    idx=708    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19846,1:19820,2:20594,3:20594,4:366
+ev41107   ps=5655    vs=5474    idx=708    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19846,1:19820,2:20594,3:20594,4:366
+ev41116   ps=5655    vs=5474    idx=708    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19846,1:19820,2:20594,3:20594,4:366
+ev41125   ps=5655    vs=5474    idx=708    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19846,1:19820,2:20594,3:20594,4:366
+ev41134   ps=5655    vs=5474    idx=708    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19846,1:19820,2:20594,3:20594,4:366
+ev41167   ps=6410    vs=5467    idx=6762   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20148,1:20150,2:552,3:366
+ev41188   ps=6410    vs=5467    idx=1266   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20168,1:20170,2:552,3:366
+ev41209   ps=6410    vs=5467    idx=504    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20076,1:20078,2:552,3:366
+ev41212   ps=6410    vs=5467    idx=714    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20076,1:20078,2:552,3:366
+ev41243   ps=6410    vs=5467    idx=912    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20098,1:20096,2:552,3:366
+ev41274   ps=6410    vs=5468    idx=4206   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20094,1:20100,2:552,3:366
+ev41301   ps=6413    vs=5473    idx=558    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19460,1:19452,2:552,3:366
+ev41310   ps=6413    vs=5473    idx=558    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19460,1:19452,2:552,3:366
+ev41327   ps=6413    vs=5473    idx=2136   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20202,1:20216,2:552,3:366
+ev41344   ps=6413    vs=5473    idx=528    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19470,1:19468,2:552,3:366
+ev41361   ps=6413    vs=5473    idx=1626   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19474,1:19472,2:552,3:366
+ev41390   ps=6413    vs=5473    idx=6      inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20222,1:20216,2:552,3:366
+ev41425   ps=6413    vs=5475    idx=1608   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19862,1:19868,2:552,3:366
+ev41448   ps=6413    vs=5475    idx=4197   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20172,1:20174,2:552,3:366
+ev41451   ps=6413    vs=5475    idx=1011   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20172,1:20174,2:552,3:366
+ev41474   ps=6413    vs=5475    idx=294    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20218,1:20208,2:552,3:366
+ev41477   ps=6413    vs=5475    idx=498    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20218,1:20208,2:552,3:366
+ev41500   ps=6413    vs=5475    idx=2202   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20224,1:20200,2:552,3:366
+ev41535   ps=6413    vs=5475    idx=6648   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19866,1:19864,2:552,3:366
+ev41538   ps=6413    vs=5475    idx=240    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19866,1:19864,2:552,3:366
+ev41541   ps=6413    vs=5475    idx=420    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19866,1:19864,2:552,3:366
+ev41564   ps=6413    vs=5475    idx=3276   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20080,1:20082,2:552,3:366
+ev41579   ps=6413    vs=5475    idx=684    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20080,1:20082,2:552,3:366
+ev41602   ps=6413    vs=5475    idx=2802   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20210,1:20204,2:552,3:366
+ev41631   ps=6413    vs=5473    idx=558    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19460,1:19452,2:552,3:366
+ev41664   ps=6413    vs=5475    idx=1188   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20020,1:20026,2:552,3:366
+ev41687   ps=6413    vs=5475    idx=3780   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20018,1:20024,2:552,3:366
+ev41690   ps=6413    vs=5475    idx=666    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20018,1:20024,2:552,3:366
+ev41713   ps=6413    vs=5475    idx=1998   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20016,1:20022,2:552,3:366
+ev41716   ps=6413    vs=5475    idx=1386   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20016,1:20022,2:552,3:366
+ev41753   ps=6413    vs=5475    idx=564    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20622,1:20624,2:552,3:366
+ev41786   ps=6449    vs=5475    idx=564    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20622,1:20624,2:552,3:366
+ev41809   ps=6449    vs=5475    idx=564    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20622,1:20624,2:552,3:366
+ev41832   ps=6449    vs=5475    idx=564    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20622,1:20624,2:552,3:366
+ev41865   ps=6449    vs=5475    idx=564    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20622,1:20624,2:552,3:366
+ev41898   ps=7909    vs=5490    idx=144    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20318,1:20358,2:20038,3:20276,4:366
+ev41927   ps=8293    vs=5489    idx=1248   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19434,1:19458,2:20042,3:19450,4:552,5:366
+ev41936   ps=8293    vs=5489    idx=1248   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19434,1:19458,2:20042,3:19450,4:552,5:366
+ev41961   ps=8293    vs=5489    idx=1248   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19434,1:19458,2:20042,3:19450,4:552,5:366
+ev41990   ps=9052    vs=5498    idx=1032   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20318,1:20358,2:20356,3:366
+ev42008   ps=9052    vs=5498    idx=246    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20246,1:20252,2:20250,3:366
+ev42026   ps=9052    vs=5498    idx=390    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20318,1:20358,2:20356,3:366
+ev42044   ps=9052    vs=5498    idx=195    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20246,1:20252,2:20250,3:366
+ev42072   ps=9052    vs=5498    idx=99     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20318,1:20358,2:20356,3:366
+ev42090   ps=9052    vs=5498    idx=24     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20246,1:20252,2:20250,3:366
+ev42108   ps=9052    vs=5498    idx=198    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20318,1:20358,2:20356,3:366
+ev42126   ps=9052    vs=5498    idx=117    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20246,1:20252,2:20250,3:366
+ev42141   ps=9052    vs=5498    idx=732    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20246,1:20252,2:20250,3:366
+ev42166   ps=9052    vs=5498    idx=294    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20246,1:20252,2:20250,3:366
+ev42181   ps=9052    vs=5498    idx=261    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20246,1:20252,2:20250,3:366
+ev42199   ps=9052    vs=5498    idx=198    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20318,1:20358,2:20356,3:366
+ev42224   ps=9052    vs=5498    idx=13146  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20318,1:20358,2:20356,3:366
+ev42263   ps=9845    vs=5518    idx=6306   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20606,1:20616,2:19332,3:19400,4:552,5:366
+ev42266   ps=9845    vs=5518    idx=576    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20606,1:20616,2:19332,3:19400,4:552,5:366
+ev42305   ps=9851    vs=5522    idx=462    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:17791,1:17793,2:17795,3:26189,4:19400,5:552,6:17769,7:366
+ev42308   ps=9851    vs=5522    idx=4398   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:17791,1:17793,2:17795,3:26189,4:19400,5:552,6:17769,7:366
+ev42311   ps=9851    vs=5522    idx=222    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:17791,1:17793,2:17795,3:26189,4:19400,5:552,6:17769,7:366
+ev42339   ps=9851    vs=5522    idx=480    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:17805,1:20508,2:20512,3:19352,4:19400,5:552,6:17751,7:366
+ev42342   ps=9851    vs=5522    idx=4524   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:17805,1:20508,2:20512,3:19352,4:19400,5:552,6:17751,7:366
+ev42345   ps=9851    vs=5522    idx=114    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:17805,1:20508,2:20512,3:19352,4:19400,5:552,6:17751,7:366
+ev42370   ps=9851    vs=5522    idx=480    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:17805,1:19364,2:20512,3:19370,4:19400,5:552,6:17751,7:366
+ev42373   ps=9851    vs=5522    idx=4524   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:17805,1:19364,2:20512,3:19370,4:19400,5:552,6:17751,7:366
+ev42376   ps=9851    vs=5522    idx=114    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:17805,1:19364,2:20512,3:19370,4:19400,5:552,6:17751,7:366
+ev42412   ps=9851    vs=5522    idx=480    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:17805,1:20508,2:20512,3:19330,4:20504,5:552,6:17751,7:366
+ev42415   ps=9851    vs=5522    idx=4524   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:17805,1:20508,2:20512,3:19330,4:20504,5:552,6:17751,7:366
+ev42450   ps=10283   vs=5533    idx=216    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20566,1:20564,2:20554,3:552,4:20552,5:366
+ev42475   ps=10283   vs=5533    idx=24     inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20510,1:20498,2:20496,3:552,4:20500,5:366
+ev42496   ps=10283   vs=5533    idx=1866   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20510,1:20498,2:20496,3:552,4:20500,5:366
+ev42499   ps=10283   vs=5533    idx=120    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20510,1:20498,2:20496,3:552,4:20500,5:366
+ev42520   ps=10283   vs=5533    idx=792    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20510,1:20498,2:20496,3:552,4:20500,5:366
+ev42523   ps=10283   vs=5533    idx=120    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20510,1:20498,2:20496,3:552,4:20500,5:366
+ev42548   ps=10283   vs=5533    idx=1350   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20568,1:20574,2:20556,3:552,4:20560,5:366
+ev42551   ps=10283   vs=5533    idx=120    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20568,1:20574,2:20556,3:552,4:20560,5:366
+ev42582   ps=10283   vs=5534    idx=534    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20568,1:20574,2:20556,3:552,4:20560,5:366
+ev42585   ps=10283   vs=5534    idx=120    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20568,1:20574,2:20556,3:552,4:20560,5:366
+ev42610   ps=10283   vs=5534    idx=4344   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20514,1:20494,2:21899,3:552,4:20502,5:366
+ev42631   ps=10283   vs=5534    idx=4344   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20514,1:20494,2:21899,3:552,4:20502,5:366
+ev42656   ps=10283   vs=5534    idx=4212   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20566,1:20564,2:20554,3:552,4:20552,5:366
+ev42690   ps=10281   vs=5530    idx=576    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20520,1:20602,2:552,3:20612,4:366
+ev42714   ps=10281   vs=5530    idx=6000   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20608,1:20614,2:552,3:20618,4:366
+ev42738   ps=10281   vs=5530    idx=330    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20520,1:20602,2:552,3:20612,4:366
+ev42773   ps=10283   vs=5534    idx=4344   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20514,1:20494,2:21899,3:552,4:20502,5:366
+ev42798   ps=10283   vs=5534    idx=414    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20510,1:20498,2:20496,3:552,4:20500,5:366
+ev42835   ps=10749   vs=5542    idx=3180   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20546,1:20550,2:552,3:366
+ev42838   ps=10749   vs=5542    idx=453    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20546,1:20550,2:552,3:366
+ev42861   ps=10749   vs=5542    idx=3603   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20546,1:20550,2:552,3:366
+ev42864   ps=10749   vs=5542    idx=1065   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20546,1:20550,2:552,3:366
+ev42899   ps=10749   vs=5542    idx=1884   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20546,1:20550,2:552,3:366
+ev42902   ps=10749   vs=5542    idx=348    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20546,1:20550,2:552,3:366
+ev42937   ps=10757   vs=5542    idx=3858   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20546,1:20550,2:552,3:366
+ev42940   ps=10757   vs=5542    idx=636    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:20546,1:20550,2:552,3:366
+ev42989   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18540,2:18584,3:1547,4:1547,5:1547,6:18542,7:18542,8:18586,9:1547,10:1547,11:1547,12:19122,13:366,14:19284
+ev43004   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18540,2:18584,3:1547,4:1547,5:1547,6:18542,7:18542,8:18586,9:1547,10:1547,11:1547,12:19122,13:366,14:19284
+ev43030   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18560,1:18656,2:18540,3:18544,4:18540,5:1547,6:18562,7:18658,8:18542,9:18546,10:18542,11:1547,12:19162,13:366,14:19284
+ev43057   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18560,2:18604,3:18548,4:18544,5:18552,6:18542,7:18562,8:18606,9:18550,10:18546,11:18554,12:19162,13:366,14:19284
+ev43083   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18544,2:18548,3:18552,4:18552,5:18584,6:18542,7:18546,8:18550,9:18554,10:18554,11:18586,12:19170,13:366,14:19284
+ev43110   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18560,1:18540,2:18544,3:18604,4:18584,5:18552,6:18562,7:18542,8:18546,9:18606,10:18586,11:18554,12:19170,13:366,14:19284
+ev43134   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18560,1:18540,2:18548,3:18584,4:18544,5:18540,6:18562,7:18542,8:18550,9:18586,10:18546,11:18542,12:19162,13:366,14:19284
+ev43157   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18560,2:18544,3:18584,4:18540,5:18540,6:18542,7:18562,8:18546,9:18586,10:18542,11:18542,12:19162,13:366,14:19284
+ev43183   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18552,1:18544,2:18560,3:18540,4:18540,5:18548,6:18554,7:18546,8:18562,9:18542,10:18542,11:18550,12:19170,13:366,14:19284
+ev43207   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18540,2:18584,3:18544,4:18540,5:18548,6:18542,7:18542,8:18586,9:18546,10:18542,11:18550,12:19122,13:366,14:19284
+ev43223   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18540,2:18584,3:18544,4:18540,5:18548,6:18542,7:18542,8:18586,9:18546,10:18542,11:18550,12:19162,13:366,14:19284
+ev43245   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18544,2:18560,3:18584,4:18540,5:18548,6:18542,7:18546,8:18562,9:18586,10:18542,11:18550,12:19170,13:366,14:19284
+ev43270   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18552,1:18544,2:18540,3:18560,4:18548,5:18540,6:18554,7:18546,8:18542,9:18562,10:18550,11:18542,12:19170,13:366,14:19284
+ev43294   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18540,2:18544,3:18560,4:18584,5:18540,6:18542,7:18542,8:18546,9:18562,10:18586,11:18542,12:19162,13:366,14:19284
+ev43317   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18656,2:18560,3:18584,4:18544,5:18540,6:18542,7:18658,8:18562,9:18586,10:18546,11:18542,12:19162,13:366,14:19284
+ev43343   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18560,1:18584,2:18540,3:18604,4:18544,5:18548,6:18562,7:18586,8:18542,9:18606,10:18546,11:18550,12:19170,13:366,14:19284
+ev43367   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18560,1:18540,2:18604,3:18544,4:18540,5:18548,6:18562,7:18542,8:18606,9:18546,10:18542,11:18550,12:19162,13:366,14:19284
+ev43391   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18544,1:18540,2:18548,3:18560,4:18540,5:18552,6:18546,7:18542,8:18550,9:18562,10:18542,11:18554,12:19170,13:366,14:19284
+ev43433   ps=12503   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18540,2:1547,3:1547,4:1547,5:1547,6:18542,7:18542,8:1547,9:1547,10:1547,11:1547,12:19162,13:366,14:19284
+ev43464   ps=11777   vs=5560    idx=2742   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19550,1:19552,2:366
+ev43473   ps=11777   vs=5560    idx=2742   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19550,1:19552,2:366
+ev43498   ps=11777   vs=5560    idx=2742   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19550,1:19552,2:366
+ev43528   ps=11778   vs=5558    idx=459    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19502,1:19486,2:19502,3:366
+ev43546   ps=11778   vs=5558    idx=2076   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19546,1:19522,2:19546,3:366
+ev43564   ps=11778   vs=5558    idx=459    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19502,1:19486,2:19502,3:366
+ev43582   ps=11778   vs=5558    idx=519    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev43591   ps=11778   vs=5558    idx=2076   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev43609   ps=11778   vs=5558    idx=459    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19502,1:19486,2:19502,3:366
+ev43618   ps=11778   vs=5558    idx=459    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19502,1:19486,2:19502,3:366
+ev43636   ps=11778   vs=5558    idx=2076   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19546,1:19522,2:19546,3:366
+ev43654   ps=11778   vs=5558    idx=2808   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19496,1:19534,2:19496,3:366
+ev43672   ps=11778   vs=5558    idx=519    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev43690   ps=11778   vs=5558    idx=459    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19502,1:19486,2:19502,3:366
+ev43708   ps=11778   vs=5558    idx=360    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19480,1:19524,2:19480,3:366
+ev43726   ps=11778   vs=5558    idx=2076   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19546,1:19522,2:19546,3:366
+ev43744   ps=11778   vs=5558    idx=2808   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19496,1:19534,2:19496,3:366
+ev43762   ps=11778   vs=5558    idx=519    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev43780   ps=11778   vs=5558    idx=459    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19502,1:19486,2:19502,3:366
+ev43789   ps=11778   vs=5558    idx=459    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19502,1:19486,2:19502,3:366
+ev43817   ps=11778   vs=5558    idx=519    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev43826   ps=11778   vs=5558    idx=2076   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev43844   ps=11778   vs=5558    idx=360    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19480,1:19524,2:19480,3:366
+ev43862   ps=11778   vs=5558    idx=459    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19502,1:19486,2:19502,3:366
+ev43880   ps=11778   vs=5558    idx=2076   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19546,1:19522,2:19546,3:366
+ev43898   ps=11778   vs=5558    idx=519    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev43907   ps=11778   vs=5558    idx=519    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev43925   ps=11778   vs=5558    idx=2808   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19496,1:19534,2:19496,3:366
+ev43943   ps=11778   vs=5558    idx=519    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev43961   ps=11778   vs=5558    idx=459    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19502,1:19486,2:19502,3:366
+ev43979   ps=11778   vs=5558    idx=519    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev43997   ps=11778   vs=5558    idx=459    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19502,1:19486,2:19502,3:366
+ev44006   ps=11778   vs=5558    idx=459    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19502,1:19486,2:19502,3:366
+ev44015   ps=11778   vs=5558    idx=459    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19502,1:19486,2:19502,3:366
+ev44033   ps=11778   vs=5558    idx=2076   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19546,1:19522,2:19546,3:366
+ev44051   ps=11778   vs=5558    idx=2076   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev44060   ps=11778   vs=5558    idx=519    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev44085   ps=11778   vs=5558    idx=519    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev44103   ps=11778   vs=5558    idx=519    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19546,1:19522,2:19546,3:366
+ev44121   ps=11778   vs=5558    idx=519    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev44130   ps=11778   vs=5558    idx=2076   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev44139   ps=11778   vs=5558    idx=519    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev44157   ps=11778   vs=5558    idx=459    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19502,1:19486,2:19502,3:366
+ev44175   ps=11778   vs=5558    idx=519    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19494,1:19482,2:19494,3:366
+ev44205   ps=11779   vs=5560    idx=1836   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44225   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44245   ps=11779   vs=5560    idx=771    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44254   ps=11779   vs=5560    idx=1836   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44263   ps=11779   vs=5560    idx=771    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44272   ps=11779   vs=5560    idx=1836   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44281   ps=11779   vs=5560    idx=1836   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44298   ps=11779   vs=5560    idx=2652   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19508,1:19518,2:19508,3:366
+ev44315   ps=11779   vs=5560    idx=771    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44324   ps=11779   vs=5560    idx=771    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44333   ps=11779   vs=5560    idx=771    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44353   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44373   ps=11779   vs=5560    idx=1251   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19490,1:19476,2:19490,3:366
+ev44393   ps=11779   vs=5560    idx=12444  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44413   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44433   ps=11779   vs=5560    idx=1251   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19490,1:19476,2:19490,3:366
+ev44453   ps=11779   vs=5560    idx=867    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19508,1:19518,2:19508,3:366
+ev44473   ps=11779   vs=5560    idx=1251   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19490,1:19476,2:19490,3:366
+ev44493   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44513   ps=11779   vs=5560    idx=1836   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44522   ps=11779   vs=5560    idx=1836   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44542   ps=11779   vs=5560    idx=1407   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19490,1:19476,2:19490,3:366
+ev44562   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44571   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44580   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44589   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44609   ps=11779   vs=5560    idx=1836   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44629   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44638   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44647   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44672   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44692   ps=11779   vs=5560    idx=2652   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19508,1:19518,2:19508,3:366
+ev44712   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44732   ps=11779   vs=5560    idx=2877   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44752   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44761   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44781   ps=11779   vs=5560    idx=1407   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19490,1:19476,2:19490,3:366
+ev44801   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44821   ps=11779   vs=5560    idx=1251   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19490,1:19476,2:19490,3:366
+ev44830   ps=11779   vs=5560    idx=4065   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19490,1:19476,2:19490,3:366
+ev44850   ps=11779   vs=5560    idx=771    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44870   ps=11779   vs=5560    idx=1251   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19490,1:19476,2:19490,3:366
+ev44879   ps=11779   vs=5560    idx=1407   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19490,1:19476,2:19490,3:366
+ev44899   ps=11779   vs=5560    idx=771    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19506,1:19518,2:19506,3:366
+ev44929   ps=11779   vs=5560    idx=1089   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19586,1:19598,2:19586,3:366
+ev44949   ps=11779   vs=5560    idx=648    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19590,1:19596,2:19590,3:366
+ev44969   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44978   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44987   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev44996   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev45005   ps=11779   vs=5560    idx=552    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19520,1:19492,2:19520,3:366
+ev45035   ps=5592    vs=5466    idx=5940   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602
+ev45052   ps=5592    vs=5466    idx=3225   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19610,1:19614
+ev45069   ps=5592    vs=5466    idx=4551   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19604,1:19600
+ev45086   ps=5592    vs=5466    idx=6567   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18542
+ev45115   ps=5592    vs=5466    idx=498    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19612,1:19616
+ev45159   ps=12499   vs=5591    idx=1536   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18540,1:18552,2:18544,3:18548,4:18540,5:1547,6:18542,7:18554,8:18546,9:18550,10:18542,11:1547,12:19130,13:19284
+ev45190   ps=12140   vs=5564    idx=879    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45199   ps=12140   vs=5564    idx=3642   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45208   ps=12140   vs=5564    idx=1626   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45217   ps=12140   vs=5564    idx=2169   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45226   ps=12140   vs=5564    idx=1302   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45235   ps=12140   vs=5564    idx=6669   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45244   ps=12140   vs=5564    idx=159    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45253   ps=12140   vs=5564    idx=4077   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45262   ps=12140   vs=5564    idx=957    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45271   ps=12140   vs=5564    idx=9426   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45280   ps=12140   vs=5564    idx=13932  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45289   ps=12140   vs=5564    idx=18156  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45298   ps=12140   vs=5564    idx=38853  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45307   ps=12140   vs=5564    idx=4800   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45316   ps=12140   vs=5564    idx=4659   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45325   ps=12140   vs=5564    idx=2331   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45334   ps=12140   vs=5564    idx=9723   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45343   ps=12140   vs=5564    idx=29799  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45352   ps=12140   vs=5564    idx=5037   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45361   ps=12140   vs=5564    idx=62589  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45370   ps=12140   vs=5564    idx=21813  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45379   ps=12140   vs=5564    idx=285    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268
+ev45411   ps=12141   vs=5566    idx=23940  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268,2:17611,3:17613,4:17615,5:17609
+ev45420   ps=12141   vs=5566    idx=42624  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268,2:17611,3:17613,4:17615,5:17609
+ev45429   ps=12141   vs=5566    idx=31200  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268,2:17611,3:17613,4:17615,5:17609
+ev45438   ps=12141   vs=5566    idx=24714  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268,2:17611,3:17613,4:17615,5:17609
+ev45447   ps=12141   vs=5566    idx=849    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268,2:17611,3:17613,4:17615,5:17609
+ev45456   ps=12141   vs=5566    idx=831    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268,2:17611,3:17613,4:17615,5:17609
+ev45465   ps=12141   vs=5566    idx=10935  inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268,2:17611,3:17613,4:17615,5:17609
+ev45474   ps=12141   vs=5566    idx=2886   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268,2:17611,3:17613,4:17615,5:17609
+ev45483   ps=12141   vs=5566    idx=3510   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268,2:17611,3:17613,4:17615,5:17609
+ev45492   ps=12141   vs=5566    idx=717    inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19270,1:19268,2:17611,3:17613,4:17615,5:17609
+ev45520   ps=12294   vs=5577    idx=8439   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602
+ev45529   ps=12294   vs=5577    idx=4050   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602
+ev45538   ps=12294   vs=5577    idx=5439   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602
+ev45562   ps=12295   vs=5579    idx=3930   inst=0   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19606,1:19602,2:17611,3:17613,4:17615,5:17609
+ev45583   ps=1567    vs=1563    idx=12     inst=4   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45592   ps=1567    vs=1563    idx=12     inst=4   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45601   ps=1567    vs=1563    idx=12     inst=1   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45610   ps=1567    vs=1563    idx=12     inst=14  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45619   ps=1567    vs=1563    idx=12     inst=6   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45628   ps=1567    vs=1563    idx=12     inst=17  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45637   ps=1567    vs=1563    idx=12     inst=4   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45646   ps=1567    vs=1563    idx=12     inst=18  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45655   ps=1567    vs=1563    idx=12     inst=3   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45664   ps=1567    vs=1563    idx=12     inst=13  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45673   ps=1567    vs=1563    idx=12     inst=4   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45682   ps=1567    vs=1563    idx=12     inst=1   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45691   ps=1567    vs=1563    idx=12     inst=1   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45700   ps=1567    vs=1563    idx=12     inst=1   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45709   ps=1567    vs=1563    idx=12     inst=5   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45718   ps=1567    vs=1563    idx=12     inst=7   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45727   ps=1567    vs=1563    idx=12     inst=1   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45736   ps=1567    vs=1563    idx=12     inst=3   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45745   ps=1567    vs=1563    idx=12     inst=2   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45754   ps=1567    vs=1563    idx=12     inst=3   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45763   ps=1567    vs=1563    idx=12     inst=10  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45772   ps=1567    vs=1563    idx=12     inst=10  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45781   ps=1567    vs=1563    idx=12     inst=8   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45790   ps=1567    vs=1563    idx=12     inst=2   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45799   ps=1567    vs=1563    idx=12     inst=3   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45808   ps=1567    vs=1563    idx=12     inst=35  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45817   ps=1567    vs=1563    idx=12     inst=56  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45826   ps=1567    vs=1563    idx=12     inst=4   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45835   ps=1567    vs=1563    idx=12     inst=14  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45844   ps=1567    vs=1563    idx=12     inst=12  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45853   ps=1567    vs=1563    idx=12     inst=6   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45862   ps=1567    vs=1563    idx=12     inst=3   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45871   ps=1567    vs=1563    idx=12     inst=7   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45880   ps=1567    vs=1563    idx=12     inst=12  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45889   ps=1567    vs=1563    idx=12     inst=1   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45898   ps=1567    vs=1563    idx=12     inst=2   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45907   ps=1567    vs=1563    idx=12     inst=3   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45916   ps=1567    vs=1563    idx=12     inst=5   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45925   ps=1567    vs=1563    idx=12     inst=10  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45934   ps=1567    vs=1563    idx=12     inst=2   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45943   ps=1567    vs=1563    idx=12     inst=27  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45952   ps=1567    vs=1563    idx=12     inst=69  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45961   ps=1567    vs=1563    idx=12     inst=1   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45970   ps=1567    vs=1563    idx=12     inst=7   de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45979   ps=1567    vs=1563    idx=12     inst=13  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev45988   ps=1567    vs=1563    idx=12     inst=10  de=True  dw=False dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:18411
+ev46020   ps=12496   vs=5588    idx=6189   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19170,1:19168,2:19284
+ev46038   ps=12496   vs=5588    idx=6120   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19162,1:19160,2:19284
+ev46056   ps=12496   vs=5588    idx=6171   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19130,1:19128,2:19284
+ev46074   ps=12496   vs=5588    idx=6177   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19126,1:19124,2:19284
+ev46092   ps=12496   vs=5588    idx=6198   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19122,1:19120,2:19284
+ev46110   ps=12496   vs=5588    idx=6225   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19118,1:19116,2:19284
+ev46128   ps=12496   vs=5588    idx=6222   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19226,1:19224,2:19284
+ev46146   ps=12496   vs=5588    idx=6234   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19218,1:19216,2:19284
+ev46164   ps=12496   vs=5588    idx=6162   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19202,1:19200,2:19284
+ev46182   ps=12496   vs=5588    idx=6189   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19198,1:19196,2:19284
+ev46200   ps=12496   vs=5588    idx=6219   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19194,1:19192,2:19284
+ev46218   ps=12496   vs=5588    idx=6195   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19190,1:19188,2:19284
+ev46236   ps=12496   vs=5588    idx=6204   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19114,1:19112,2:19284
+ev46254   ps=12496   vs=5588    idx=6258   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19238,1:19236,2:19284
+ev46272   ps=12496   vs=5588    idx=6246   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19210,1:19208,2:19284
+ev46290   ps=12496   vs=5588    idx=6246   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19206,1:19204,2:19284
+ev46308   ps=12496   vs=5588    idx=6432   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19282,1:19280,2:19284
+ev46326   ps=12496   vs=5588    idx=6105   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19274,1:19272,2:19284
+ev46344   ps=12496   vs=5588    idx=7494   inst=0   de=True  dw=True  dc=?         bl=False wm=7    vp=1920x1080@0,0      srv=0:19266,1:19264,2:19284
+ev46364   ps=1636    vs=1627    idx=1872   inst=0   de=True  dw=False dc=?         bl=True  wm=7    vp=1920x1080@0,0      srv=0:1543
+ev46382   ps=1635    vs=1626    idx=6      inst=0   de=True  dw=False dc=?         bl=True  wm=7    vp=1920x1080@0,0      srv=0:18497
+ev46399   ps=1632    vs=1623    idx=96     inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:25736
+ev46408   ps=1632    vs=1623    idx=30     inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:25736
+ev46417   ps=1632    vs=1623    idx=30     inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:25736
+ev46427   ps=1632    vs=1623    idx=261    inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:25738
+ev46436   ps=1632    vs=1623    idx=126    inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:25738
+ev46445   ps=1632    vs=1623    idx=60     inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:25738
+ev46455   ps=1632    vs=1623    idx=228    inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:25740
+ev46464   ps=1632    vs=1623    idx=108    inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:25740
+ev46474   ps=1632    vs=1623    idx=198    inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:18515
+ev46483   ps=1632    vs=1623    idx=30     inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:18515
+ev46492   ps=1632    vs=1623    idx=54     inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:18515
+ev46502   ps=1632    vs=1623    idx=174    inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:18517
+ev46536   ps=5820    vs=5466    idx=1707   inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:18540,1:18542
+ev46566   ps=5856    vs=5465    idx=120    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20396,1:20264,2:366
+ev46595   ps=5856    vs=5466    idx=600    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:18544,1:18546,2:366
+ev46614   ps=5856    vs=5466    idx=528    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20394,1:20390,2:366
+ev46623   ps=5856    vs=5466    idx=528    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20394,1:20390,2:366
+ev46640   ps=5856    vs=5466    idx=105    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20418,1:20308,2:366
+ev46657   ps=5856    vs=5466    idx=168    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20394,1:20390,2:366
+ev46676   ps=5856    vs=5466    idx=441    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:18544,1:18546,2:366
+ev46691   ps=5856    vs=5466    idx=441    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:18544,1:18546,2:366
+ev46710   ps=5856    vs=5466    idx=528    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20394,1:20390,2:366
+ev46719   ps=5856    vs=5466    idx=528    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20394,1:20390,2:366
+ev46736   ps=5856    vs=5466    idx=105    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20418,1:20308,2:366
+ev46753   ps=5856    vs=5466    idx=780    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20394,1:20390,2:366
+ev46770   ps=5856    vs=5466    idx=48     inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20396,1:20264,2:366
+ev46789   ps=5856    vs=5466    idx=1236   inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:18544,1:18546,2:366
+ev46808   ps=5856    vs=5466    idx=555    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20394,1:20390,2:366
+ev46825   ps=5856    vs=5466    idx=60     inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20396,1:20264,2:366
+ev46844   ps=5856    vs=5466    idx=258    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:18584,1:18586,2:366
+ev46863   ps=5856    vs=5466    idx=528    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20394,1:20390,2:366
+ev46872   ps=5856    vs=5466    idx=528    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20394,1:20390,2:366
+ev46897   ps=5856    vs=5466    idx=1446   inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20394,1:20390,2:366
+ev46914   ps=5856    vs=5466    idx=216    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev46933   ps=5856    vs=5466    idx=858    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:18584,1:18586,2:366
+ev46952   ps=5856    vs=5466    idx=105    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20418,1:20308,2:366
+ev46971   ps=5856    vs=5466    idx=258    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:18584,1:18586,2:366
+ev46986   ps=5856    vs=5466    idx=702    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:18584,1:18586,2:366
+ev47005   ps=5856    vs=5466    idx=546    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev47022   ps=5856    vs=5466    idx=528    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20394,1:20390,2:366
+ev47039   ps=5856    vs=5466    idx=105    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20418,1:20308,2:366
+ev47066   ps=5856    vs=5466    idx=429    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev47075   ps=5856    vs=5466    idx=780    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev47094   ps=5856    vs=5466    idx=441    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:18544,1:18546,2:366
+ev47113   ps=5856    vs=5466    idx=303    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev47122   ps=5856    vs=5466    idx=840    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev47147   ps=5856    vs=5466    idx=714    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev47156   ps=5856    vs=5466    idx=705    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev47165   ps=5856    vs=5466    idx=792    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev47174   ps=5856    vs=5466    idx=1026   inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev47183   ps=5856    vs=5466    idx=603    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev47192   ps=5856    vs=5466    idx=264    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev47211   ps=5856    vs=5466    idx=936    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:18584,1:18586,2:366
+ev47230   ps=5856    vs=5466    idx=696    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev47255   ps=5856    vs=5466    idx=939    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20258,1:20362,2:366
+ev47282   ps=5858    vs=5474    idx=30     inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:26090,1:26092,2:366
+ev47299   ps=5858    vs=5474    idx=105    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20418,1:20308,2:366
+ev47316   ps=5858    vs=5474    idx=9      inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:26090,1:26092,2:366
+ev47331   ps=5858    vs=5474    idx=27     inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:26090,1:26092,2:366
+ev47346   ps=5858    vs=5474    idx=9      inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:26090,1:26092,2:366
+ev47361   ps=5858    vs=5474    idx=18     inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:26090,1:26092,2:366
+ev47378   ps=5858    vs=5474    idx=129    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20418,1:20308,2:366
+ev47395   ps=5858    vs=5474    idx=21     inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:26090,1:26092,2:366
+ev47410   ps=5858    vs=5474    idx=18     inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:26090,1:26092,2:366
+ev47425   ps=5858    vs=5474    idx=18     inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:26090,1:26092,2:366
+ev47444   ps=5858    vs=5474    idx=579    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:18540,1:18542,2:366
+ev47459   ps=5858    vs=5474    idx=1707   inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:18540,1:18542,2:366
+ev47478   ps=5858    vs=5474    idx=225    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:19924,1:19922,2:366
+ev47497   ps=5858    vs=5474    idx=1707   inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:18540,1:18542,2:366
+ev47516   ps=5858    vs=5474    idx=48     inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20396,1:20264,2:366
+ev47525   ps=5858    vs=5474    idx=48     inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20396,1:20264,2:366
+ev47542   ps=5858    vs=5474    idx=108    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20418,1:20308,2:366
+ev47569   ps=5858    vs=5474    idx=9      inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:26129,1:26131,2:366
+ev47584   ps=5858    vs=5474    idx=24     inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:26129,1:26131,2:366
+ev47601   ps=5858    vs=5474    idx=150    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20418,1:20308,2:366
+ev47618   ps=5858    vs=5474    idx=12     inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:26199,1:26201,2:366
+ev47635   ps=5858    vs=5474    idx=18     inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:26119,1:26092,2:366
+ev47650   ps=5858    vs=5474    idx=24     inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:26119,1:26092,2:366
+ev47677   ps=5858    vs=5474    idx=276    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20374,1:20372,2:366
+ev47694   ps=5858    vs=5474    idx=639    inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20418,1:20308,2:366
+ev47719   ps=5858    vs=5474    idx=1311   inst=0   de=True  dw=True  dc=?         bl=False wm=15   vp=1920x1080@0,0      srv=0:20418,1:20308,2:366
+ev47762   ps=10785   vs=5542    idx=384    inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:20600,1:20598,2:552,3:366
+ev47787   ps=10785   vs=5542    idx=1176   inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:20576,1:20584,2:552,3:366
+ev47790   ps=10785   vs=5542    idx=48     inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:20576,1:20584,2:552,3:366
+ev47815   ps=10785   vs=5542    idx=474    inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:19348,1:20518,2:552,3:366
+ev47839   ps=10785   vs=5542    idx=474    inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:19366,1:20518,2:552,3:366
+ev47873   ps=10785   vs=5542    idx=474    inst=0   de=True  dw=False dc=?         bl=True  wm=15   vp=1920x1080@0,0      srv=0:19328,1:20518,2:552,3:366
+ev47909   ps=10793   vs=5546    idx=360    inst=0   de=True  dw=False dc=?         bl=True  wm=7    vp=1920x1080@0,0      srv=0:20546,1:20550,2:552,3:366
+ev47912   ps=10793   vs=5546    idx=702    inst=0   de=True  dw=False dc=?         bl=True  wm=7    vp=1920x1080@0,0      srv=0:20546,1:20550,2:552,3:366
+ev47936   ps=10793   vs=5546    idx=849    inst=0   de=True  dw=False dc=?         bl=True  wm=7    vp=1920x1080@0,0      srv=0:20546,1:20550,2:552,3:366
+ev47939   ps=10793   vs=5546    idx=285    inst=0   de=True  dw=False dc=?         bl=True  wm=7    vp=1920x1080@0,0      srv=0:20546,1:20550,2:552,3:366
+ev47973   ps=10805   vs=5546    idx=573    inst=0   de=True  dw=False dc=?         bl=True  wm=7    vp=1920x1080@0,0      srv=0:20546,1:20550,2:552,3:366
+ev47976   ps=10805   vs=5546    idx=249    inst=0   de=True  dw=False dc=?         bl=True  wm=7    vp=1920x1080@0,0      srv=0:20546,1:20550,2:552,3:366
+
+## 固定点回读 (461 深度 D24 / RT0 颜色 RGBA16F)
+== depth-clear-after @ev27674 ==
+   fixed-upper-third-mid    ( 960, 180) depth=0.9999999    (d24-u32)  rgba=[0.86279, 0.87451, 0.83789, 1.0]
+   fixed-top-center         ( 960,  60) depth=0.9999999    (d24-u32)  rgba=[0.68945, 0.68555, 0.61719, 1.0]
+   fixed-upper-left         ( 480, 270) depth=0.9999999    (d24-u32)  rgba=[0.1665, 0.20068, 0.19897, 1.0]
+   fixed-upper-right        (1440, 270) depth=0.9999999    (d24-u32)  rgba=[0.41357, 0.47095, 0.48535, 0.0]
+   fixed-upper-left-corner  (  60,  90) depth=0.9999999    (d24-u32)  rgba=[0.61426, 0.73047, 0.82666, 1.0]
+   ctrl-lower-center        ( 960, 900) depth=0.9999999    (d24-u32)  rgba=[0.35962, 0.36279, 0.3667, 1.0]
+   ctrl-lower-left          ( 200,1000) depth=0.9999999    (d24-u32)  rgba=[0.11072, 0.13513, 0.13538, 1.0]
+   ctrl-right-mid           (1800, 540) depth=0.9999999    (d24-u32)  rgba=[0.17163, 0.22205, 0.22925, 1.0]
+   ctrl-top-right-corner    (1880,  40) depth=0.9999999    (d24-u32)  rgba=[0.22815, 0.27808, 0.29565, 1.0]
+== prepass-last-draw @ev34688 ==
+   fixed-upper-third-mid    ( 960, 180) depth=0.9870784    (d24-u32)  rgba=[0.86279, 0.87451, 0.83789, 1.0]
+   fixed-top-center         ( 960,  60) depth=0.9866614    (d24-u32)  rgba=[0.68945, 0.68555, 0.61719, 1.0]
+   fixed-upper-left         ( 480, 270) depth=0.9720925    (d24-u32)  rgba=[0.1665, 0.20068, 0.19897, 1.0]
+   fixed-upper-right        (1440, 270) depth=0.9852511    (d24-u32)  rgba=[0.41357, 0.47095, 0.48535, 0.0]
+   fixed-upper-left-corner  (  60,  90) depth=0.9999999    (d24-u32)  rgba=[0.61426, 0.73047, 0.82666, 1.0]
+   ctrl-lower-center        ( 960, 900) depth=0.9447308    (d24-u32)  rgba=[0.35962, 0.36279, 0.3667, 1.0]
+   ctrl-lower-left          ( 200,1000) depth=0.9326612    (d24-u32)  rgba=[0.11072, 0.13513, 0.13538, 1.0]
+   ctrl-right-mid           (1800, 540) depth=0.9748702    (d24-u32)  rgba=[0.17163, 0.22205, 0.22925, 1.0]
+   ctrl-top-right-corner    (1880,  40) depth=0.9882025    (d24-u32)  rgba=[0.22815, 0.27808, 0.29565, 1.0]
+== seg7-first-draw @ev34760 ==
+   fixed-upper-third-mid    ( 960, 180) depth=0.9870784    (d24-u32)  rgba=[0.27124, 0.46118, 0.60596, 1.0]
+   fixed-top-center         ( 960,  60) depth=0.9866614    (d24-u32)  rgba=[0.27124, 0.46118, 0.60596, 1.0]
+   fixed-upper-left         ( 480, 270) depth=0.9720925    (d24-u32)  rgba=[0.27124, 0.46118, 0.60596, 1.0]
+   fixed-upper-right        (1440, 270) depth=0.9852511    (d24-u32)  rgba=[0.27124, 0.46118, 0.60596, 1.0]
+   fixed-upper-left-corner  (  60,  90) depth=0.9999999    (d24-u32)  rgba=[0.27124, 0.46118, 0.60596, 1.0]
+   ctrl-lower-center        ( 960, 900) depth=0.9447308    (d24-u32)  rgba=[0.27124, 0.46118, 0.60596, 1.0]
+   ctrl-lower-left          ( 200,1000) depth=0.9326612    (d24-u32)  rgba=[0.27124, 0.46118, 0.60596, 1.0]
+   ctrl-right-mid           (1800, 540) depth=0.9748702    (d24-u32)  rgba=[0.27124, 0.46118, 0.60596, 1.0]
+   ctrl-top-right-corner    (1880,  40) depth=0.9882025    (d24-u32)  rgba=[0.27124, 0.46118, 0.60596, 1.0]
+== seg7-last-draw @ev47976 ==
+   fixed-upper-third-mid    ( 960, 180) depth=0.9870784    (d24-u32)  rgba=[1.05762, 1.03125, 0.96729, 1.0]
+   fixed-top-center         ( 960,  60) depth=0.9866614    (d24-u32)  rgba=[0.7959, 0.75342, 0.62695, 1.0]
+   fixed-upper-left         ( 480, 270) depth=0.9720925    (d24-u32)  rgba=[0.11115, 0.13477, 0.11578, 1.0]
+   fixed-upper-right        (1440, 270) depth=0.9852511    (d24-u32)  rgba=[0.40137, 0.4541, 0.48267, 1.0]
+   fixed-upper-left-corner  (  60,  90) depth=0.9999999    (d24-u32)  rgba=[0.3833, 0.52148, 0.61475, 0.91211]
+   ctrl-lower-center        ( 960, 900) depth=0.9447308    (d24-u32)  rgba=[0.47363, 0.45459, 0.44556, 1.0]
+   ctrl-lower-left          ( 200,1000) depth=0.9326612    (d24-u32)  rgba=[0.11572, 0.12744, 0.11523, 1.0]
+   ctrl-right-mid           (1800, 540) depth=0.9748702    (d24-u32)  rgba=[0.13562, 0.1814, 0.17493, 1.0]
+   ctrl-top-right-corner    (1880,  40) depth=0.9882025    (d24-u32)  rgba=[0.10364, 0.14319, 0.14563, 1.0]
+
+## 全屏远平面 (D24 >= 0.9999) 像素统计
+== prepass-last-draw @ev34688 ==  far_total=44463 (2.1442%)  上1/3=44463  色统计={'n': 44463, 'r_mean': 0.58301, 'r_p10': 0.54834, 'r_p50': 0.58447, 'r_p90': 0.61768, 'g_mean': 0.70488, 'g_p10': 0.68262, 'g_p50': 0.70605, 'g_p90': 0.73047, 'b_mean': 0.79706, 'b_p10': 0.78857, 'b_p50': 0.79736, 'b_p90': 0.81543, 'a_mean': 1.0, 'a_p10': 1.0, 'a_p50': 1.0, 'a_p90': 1.0}
+   按 60 行带: 0:19725 60:16695 120:7684 180:359 240:0 300:0 360:0 420:0 480:0 540:0 600:0 660:0 720:0 780:0 840:0 900:0 960:0 1020:0
+== seg7-first-draw @ev34760 ==  far_total=44463 (2.1442%)  上1/3=44463  色统计={'n': 44463, 'r_mean': 0.27124, 'r_p10': 0.27124, 'r_p50': 0.27124, 'r_p90': 0.27124, 'g_mean': 0.46118, 'g_p10': 0.46118, 'g_p50': 0.46118, 'g_p90': 0.46118, 'b_mean': 0.60596, 'b_p10': 0.60596, 'b_p50': 0.60596, 'b_p90': 0.60596, 'a_mean': 1.0, 'a_p10': 1.0, 'a_p50': 1.0, 'a_p90': 1.0}
+   按 60 行带: 0:19725 60:16695 120:7684 180:359 240:0 300:0 360:0 420:0 480:0 540:0 600:0 660:0 720:0 780:0 840:0 900:0 960:0 1020:0
+== seg7-last-draw @ev47976 ==  far_total=44463 (2.1442%)  上1/3=44463  色统计={'n': 44463, 'r_mean': 0.4319, 'r_p10': 0.35107, 'r_p50': 0.37842, 'r_p90': 0.68848, 'g_mean': 0.55344, 'g_p10': 0.50244, 'g_p50': 0.51855, 'g_p90': 0.7417, 'b_mean': 0.6425, 'b_p10': 0.61377, 'b_p50': 0.61914, 'b_p90': 0.80566, 'a_mean': 0.90309, 'a_p10': 0.76318, 'a_p50': 0.9375, 'a_p90': 1.0}
+   按 60 行带: 0:19725 60:16695 120:7684 180:359 240:0 300:0 360:0 420:0 480:0 540:0 600:0 660:0 720:0 780:0 840:0 900:0 960:0 1020:0
+
+## 天空像素写入者追踪 (段7 内, 判据=末次写入者)
+探针点: [{'x': 0, 'y': 0}, {'x': 0, 'y': 120}, {'x': 43, 'y': 180}, {'x': 0, 'y': 60}]
+段7 起点底色: [[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+段7 末 末色  : [[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+末次写入: idx=705 ev=46492 命中末色=4/4
+写入 draw: {"eventId": 46492, "ps": "1632", "vs": "1623", "numIndices": 54, "numInstances": 0, "viewport": "1920x1080@0,0", "depthEnable": true, "depthWrites": false, "blendEnabled": true, "srvPS": [{"slot": 0, "id": "18515", "info": "1024x1024 BC3_UNORM", "type": "Image"}]}
+-- trace (只打变化前后的窗口) --
+   idx=0    ev=34760   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 1..15 略)
+   idx=16   ev=35044   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 17..31 略)
+   idx=32   ev=35290   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 33..47 略)
+   idx=48   ev=35552   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 49..63 略)
+   idx=64   ev=35824   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 65..79 略)
+   idx=80   ev=36098   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 81..95 略)
+   idx=96   ev=36390   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 97..111 略)
+   idx=112  ev=36692   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 113..127 略)
+   idx=128  ev=36972   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 129..143 略)
+   idx=144  ev=37236   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 145..159 略)
+   idx=160  ev=37500   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 161..175 略)
+   idx=176  ev=37764   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 177..191 略)
+   idx=192  ev=38004   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 193..207 略)
+   idx=208  ev=38246   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 209..223 略)
+   idx=224  ev=38542   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 225..239 略)
+   idx=240  ev=38806   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 241..255 略)
+   idx=256  ev=39054   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 257..271 略)
+   idx=272  ev=39326   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 273..287 略)
+   idx=288  ev=39620   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 289..303 略)
+   idx=304  ev=39892   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 305..319 略)
+   idx=320  ev=40164   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 321..335 略)
+   idx=336  ev=40456   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 337..351 略)
+   idx=352  ev=40746   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 353..367 略)
+   idx=368  ev=41002   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 369..383 略)
+   idx=384  ev=41212   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 385..399 略)
+   idx=400  ev=41538   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 401..415 略)
+   idx=416  ev=41898   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 417..431 略)
+   idx=432  ev=42224   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 433..447 略)
+   idx=448  ev=42496   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 449..463 略)
+   idx=464  ev=42835   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 465..479 略)
+   idx=480  ev=43183   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 481..495 略)
+   idx=496  ev=43564   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 497..511 略)
+   idx=512  ev=43826   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 513..527 略)
+   idx=528  ev=44085   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 529..543 略)
+   idx=544  ev=44324   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 545..559 略)
+   idx=560  ev=44589   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 561..575 略)
+   idx=576  ev=44870   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 577..591 略)
+   idx=592  ev=45190   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 593..607 略)
+   idx=608  ev=45334   matchFinal=0 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 609..623 略)
+   idx=624  ev=45520   matchFinal=1 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.46069, 0.4856, 0.46777, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 625..639 略)
+   idx=640  ev=45691   matchFinal=1 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.46069, 0.4856, 0.46777, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 641..655 略)
+   idx=656  ev=45835   matchFinal=1 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.46069, 0.4856, 0.46777, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 657..671 略)
+   idx=672  ev=45979   matchFinal=1 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.46069, 0.4856, 0.46777, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 673..687 略)
+   idx=688  ev=46272   matchFinal=1 colors=[[0.27124, 0.46118, 0.60596, 1.0], [0.27124, 0.46118, 0.60596, 1.0], [0.46069, 0.4856, 0.46777, 1.0], [0.27124, 0.46118, 0.60596, 1.0]]
+   ... (idx 689..703 略)
+   idx=704  ev=46483   matchFinal=2 colors=[[0.34229, 0.49854, 0.61523, 1.0], [0.39648, 0.52881, 0.61328, 0.97461], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 1.0]]
+   idx=705  ev=46492   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=706  ev=46502   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=707  ev=46536   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=708  ev=46566   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=709  ev=46595   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=710  ev=46614   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=711  ev=46623   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=712  ev=46640   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=713  ev=46657   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=714  ev=46676   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=715  ev=46691   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=716  ev=46710   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=717  ev=46719   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=718  ev=46736   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=719  ev=46753   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+   idx=720  ev=46770   matchFinal=4 colors=[[0.34302, 0.49854, 0.61475, 0.97803], [0.39844, 0.52832, 0.61279, 0.80273], [0.46069, 0.4856, 0.46777, 1.0], [0.36987, 0.51416, 0.61426, 0.99951]]
+
+## 段7 边界
+{"before_last": {"i": 3498, "ev": 34720, "rts": ["366", "0", "0", "0"], "rt0": "366", "rt1": "0", "rt2": "0", "dsv": "0", "rt0f": "R8G8B8A8_UNORM", "rt1f": "?", "rt2f": "?", "dsvf": "?", "ps": "12945", "vs": "12702"}, "after_first": {"i": 4287, "ev": 48001, "rts": ["342", "349", "0", "0"], "rt0": "342", "rt1": "349", "rt2": "0", "dsv": "461", "rt0f": "R8G8B8A8_UNORM", "rt1f": "R16G16_FLOAT", "rt2f": "?", "dsvf": "D24S8_TYPELESS", "ps": "17356", "vs": "15184"}, "seg7_signature_used": ["R16G16B16A16_FLOAT", "R16G16_FLOAT", "R8G8B8A8_UNORM", "D24S8_TYPELESS"]}
