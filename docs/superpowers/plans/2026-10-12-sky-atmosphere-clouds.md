@@ -25,6 +25,7 @@
   - **5% 闸**（docs/00 L167-168/L246-247）：新增 pass 增量帧时 (注入−基线)/基线 ≤5%（16.67ms 预算的 5% ≈0.83ms，约束「别花超」不约束「必须变快」）；基线 = ssr=0 会话同机位采、候选注入局同机位采，每 600 帧『帧时基线 CPU/GPU』行、字段口径 docs/02 §14.14。
   - **10 锚点**：`tools/rdc_compare.py` + `.ps1` 把 docs/03 §3 锚点表落成 10 条 PASS/DIFF/SKIP（id-free 签名）；「锚点全绿」分级口径 = A 类逐帧确定**硬门槛**全绿 + F 类注入指纹**必现** + B 类会话敏感项按 docs/02 §12.6 看图**归因后无注入不可解释项**（docs/03 L91；字面 10/10 仅同帧自比成立）；`errors=[]` = 本轮成功（docs/03 L83）。
 - 新增节点约束：大气/体积云必须是**纯增量**，既有 9 CS 字节码/调度/资源链零改动（docs/03 L135）；R2 = ResourceId 抓帧局部量，跨抓帧对齐用 (绑定槽, 尺寸, 格式, 哈希)（docs/03 L110）。
+- VK 重写铺垫（用户 2026-10-12 常设指令）：本计划渲染侧新增件按「可整体抬起复用于 VK 原生重写」组织 —— pass 代码/参数/触发谓词/事件闸全部收在 `vkrenderer.cpp`+`vkrenderer.h` 内可独立搬移的块（不散入 main.cpp hook 面），证据文档（Sky-recon、docs/07 设计条目、抓帧提取）按未来重写直接消费的标准成文：谓词只用结构化字段不用抓帧 event id，接口处明列 I/O 与依赖。
 - 单变量轮：每轮只动一个视觉变量再复拍判读（本仓惯例）。
 - 质量优先（用户 2026-10-12）：闸内选效果最好的技术路线；分档用于暴露取舍而非降低上限。
 - 性能分档（用户 2026-10-12）：`sky.preset=0..3`（低/中/高/极致，缺省 2）主控；子旋钮独立可覆盖（微调不换档、换档不覆盖微调）；档位表编入 DLL ⇒ **换档 = 改 ini 不重编**；启动回显 + knobchk 可验。
@@ -35,7 +36,7 @@
 （规格暗示、但没有任务天然覆盖的失败面；每条已回填所属任务测试。）
 
 1. **A/F 锚点回归** → T7：新天空 pass 扰动硬锚点（RT 格式 / CS 调度 / CS 字节码 / clear / copy 结构）或 F 类注入指纹缺失 ⇒ 配对报废。测试：S1 + S3 注入前后 `rdc_compare -Strict`（A 全绿 + F 必现 + B 按 §12.6 归因）。
-2. **室内场景污染** → T3 + T7：室内帧无天空（户外条件节点口径 5 常驻 + 4 户外条件，docs/analysis S3 L88）⇒ 室内不得产生段7-end 触发/新增节点。测试：T3 日志断言 S2 会话触发计数=0；T7 S2 配对 + 出门/入门复拍。
+2. **室内场景污染** → T3 + T7：室内帧无天空（户外条件节点口径 5 常驻 + 4 户外条件，docs/analysis S3 L88）⇒ 室内不得产生天空回写/新增可见节点。**T2 更正**：S2 室内**存在同构的主 MRT[321+349+339]/461 段**（`docs/analysis/S2-interior.md` L78）⇒ 结构谓词在室内也会命中，早退靠**掩码为空 ⇒ 合成零工作**。测试：T3 日志断言 S2 会话 **`[sky] 回写#K` 计数 = 0**（不要求触发 = 0）；T7 S2 配对 + 出门/入门复拍。
 3. **档位回显与回退** → T4 + T7：preset 解析错/回显缺失 ⇒ 整轮作废；0 档必须是可用回退。测试：knobchk 逐键 + 档位切换重启回显全键值。
 4. **天空→反射耦合** → T7（Plan 2 收口）：501 探针内容 = 天空 + 场景（docs/03 §2.3），本计划不动段1 ⇒ 反射里暂时仍是原版天空（与升级后实天空不一致的中间态，声明为已知项）。测试：S4 水面复拍不劣化；一致性由 Plan 2 dynamic cubemap 统一。
 5. **预算** → T7：preset=2 在 GTX 1660 Ti 增量 >5% ⇒ 闸不过（本路线两次全帧拷贝 + 事件闸 CPU 停顿是主要嫌疑，docs/07 §4 钉预案）。测试：S1/S3/S5 同机位基线/注入对比，逐档回填档位表。
@@ -112,10 +113,31 @@
 
 **Interfaces:**
 
+> **参数节已由 T2 回填（2026-10-12，依据 `docs/07` §3.2/§3.5/§3.6 + `docs/analysis/Sky-recon.md` §4.2）。以下为准。**
+
 - `g_skyOn`（`std::atomic<bool>`，ini 键 `sky`，0/1，本任务缺省 0，T7 改 1）
 - 挂载门 → `pocbEnabled() && (g_probeOn || g_ssrOn || g_skyOn)`；C-5 失败日志加 `sky=` 字段，逃生链文案 → `ssr=0 → probe=0 → sky=0 → vulkan=0`
-- 新段类：主不透明 MRT3（RT0=321 RGBA16F + 349 R16G16 + 339 RGBA8 + DSV461 @1080p，逐段 entry 计数）；首次换绑离场 = 段7-end → `g_skySeg7EndPending` 每帧一次性（`ssrReconPresent` 复位）
-- 触发计数走 60 帧心跳节流日志 `[sky] 段7-end 触发`；挂载打印 `天空: sky=1 → 挂 ctx 槽33/47/50`
+- **新段类（触发谓词 = 六字段，全部是 `ssrReconOm` 现成可见量，不新增 hook）**：
+
+  | # | 字段 | 来源 | 用途 |
+  |---|---|---|---|
+  | 1 | `n`（非空视图数） | 函数参数 | 判 MRT×3（段7 内 = 3） |
+  | 2 | 每视图 RTV 的 `desc.Width`/`Height`/`Format` | `GetDesc` | 判 RT0 = 1920×1080 RGBA16F |
+  | 3 | 每视图 RTV 的资源指针 | `GetResource` | 记住 RT0 身份、判换绑 |
+  | 4 | DSV 的 `desc.Width`/`Height`/`Format` | `GetDesc` | 判 1920×1080 D24 家族 |
+  | 5 | DSV 的资源指针 | `GetResource` | 记深度目标（T5 搭车 461→520 要用） |
+  | 6 | 本帧 RT0 身份表 + 连续绑定段计数 | 既有 `g_ssrRtN`（`main.cpp` L1592-1618） | 段计数 / 每帧一次性旗标 |
+
+  判定式：`段7 = (NumViews==3) && (RT0.desc==1920×1080 RGBA16F) && (RT1非空) && (RT2非空) && (DSV.desc==1920×1080 D24 家族)`，其**第一次不满足 = 段7-end**。
+  ⚠️ **更正旧 sketch**：**DSV461 不可用于离场判据**（段7 前后恒为 461、desc 不变，只能用于「进入」确认）；**RT1=349 同样不可用于离场**（前后都在）。离场靠 `NumViews` 3→2 + RT0 资源指针换绑 + RT0 desc RGBA16F→RGBA8 + RT2 消失。依据 `Sky-recon.md` §4.1（实测 S1/S3/S5）。
+  ⚠️ **RT2 资源身份逐场景不同**（S1=342，S3/S5=339）⇒ 谓词只判「RT2 非空」，**不判其身份**；RT1/RT2 身份不学不比。
+- **arm 时机**：段7-end 那一次 `OMSetRenderTargets` 的 hook 内、**`real()` 之后**（与 2b/2c/2d 同位，`main.cpp` L2800 之后的 pending 消费段）。置位与消费分离：`g_skyInSeg7`（段7 内，**每帧一次性、不复位**）→ 首次不满足时置 `g_skySeg7EndPending`（**本帧一次性**）→ hook 内消费 → `ssrReconPresent` 每帧复位两个旗标。
+  ⚠️ **禁用「进入次数 == 1」或「持续处于段7 内」计数**：段18 透明段（MRT×3 `[321,582,336]` / 461）与段7 **同签名**，会二次命中 ⇒ 必须按「首次离场即置位的一次性旗标」实现（`Sky-recon.md` §4.2 已知误触发面）。
+- **日志文案（定名）**：
+  - 启动回显（总闸）：`天空: ini sky=1 → 挂 ctx 槽33/47/50 (段7-end 结构触发)`
+  - 触发心跳：`[sky] 段7-end 触发#K 帧=F`（前 8 次全打，之后每 60 帧节流）
+  - **静默承诺**：`sky=1` 且 `ssr=0`/`probe=0` 时 `SSR侦察:` 前缀**零出现**、探针与普查 logLine 零出现（T7 grep 断言）
+- **ini 键名（定名，T4/T6/T7 照此实现）**：`sky`（0/1，缺省 0，T7 改 1）、`sky.preset`（0..3，低/中/高/极致，缺省 **2**）、`sky.cloudscale`、`sky.cloudsteps`、`sky.cloudtemporal`、`sky.lutscale`（四子键缺省值见 Spec 表；档位表 `constexpr` 编入 DLL ⇒ 换档只改 ini）。全部键进 `天空: sky=1 preset=… cloudscale=… cloudsteps=… cloudtemporal=… lutscale=…` 启动回显行（knobchk 逐键可验）。
 
 **Steps:**
 
@@ -123,9 +145,10 @@
 - [ ] `tools/check1.ps1` RESULT OK + `tools/gates4.ps1` 全 PASS。
 - [ ] commit → push → ci_once → SUCCESS → artifact_fetch。
 - [ ] 换 DLL：dllchk -After；ini 加 `sky=1`；knobchk -Key sky -Value 1；启动回显见 `天空:` 行。
-- [ ] （需用户重启游戏）日志断言：`段7-end 触发` 心跳计数 ≈ 户外帧数；**`SSR侦察:` 等旧日志不出现**；S2 室内会话触发计数 = 0。
+- [ ] （需用户重启游戏）日志断言：`[sky] 段7-end 触发` 心跳计数 ≈ 户外帧数且**每帧 ≤ 1**；**`SSR侦察:` 等旧日志不出现**；S2 室内会话 **`[sky] 回写#K` 计数 = 0**。
+  ⚠️ **更正旧判据**：S2 室内**存在同构的主 MRT[321+349+339]/461 段**（`docs/analysis/S2-interior.md` L78，541 draw）⇒ **结构谓词在室内也会命中**，故室内早退**不能**断言「触发计数 = 0」，只断言**零回写 / 零视觉改动**；依据 `docs/07` §6 R3。
 
-**完成判据：** 户外每帧恰一次触发、室内零触发、ssr/probe 日志不复活，CI 绿 + knobchk 过。
+**完成判据：** 户外每帧恰一次触发（且 ≤1）、室内零回写、ssr/probe 日志不复活，CI 绿 + knobchk 过。
 
 ### Task 4: sky.preset 分档系统（独立任务）
 
@@ -135,6 +158,7 @@
 
 - `sky.preset` ∈ {0,1,2,3} 缺省 2；解析次序 = 先 preset 展开子键缺省表（DLL 内 constexpr ⇒ 换档不重编），后逐键读显式 ini 覆盖
 - 子键：`sky.cloudscale` / `sky.cloudsteps` / `sky.cloudtemporal` / `sky.lutscale`；全部键（含 preset 与最终解析值）进启动回显行（与 ssr.* 同格式）
+- **回显行文案（定名，`docs/07` §3.5）**：`天空: sky=1 preset=2 cloudscale=0.75 cloudsteps=64 cloudtemporal=1 lutscale=1`（键名与本表逐字一致，T3 的总闸回显行 `天空: ini sky=1 → 挂 ctx 槽33/47/50 (段7-end 结构触发)` 同块打印）
 
 **Steps:**
 
@@ -151,10 +175,21 @@
 
 **Interfaces:**
 
-- 段7-end 触发 → 发行 `CopyResource(321 → skyIn)`（自发行先例：哨兵 copy main.cpp L2812-2831；自 copy 用既有排除标记，不污染 `copy.sequence` 锚点）
-- 深度：游戏 `461→520` copy（ev21505）处搭车 → `skyDepth` 镜像（在 `ssrReconCopy` L1797 结构内新增分支，`ssr=0` 时按 `g_skyOn` 门控）
+> **参数节已由 T2 回填（2026-10-12，依据 `docs/07` §3.3/§3.4/§3.5）。以下为准。**
+
+- **arm 点（发行时机）**：T3 置位的 `g_skySeg7EndPending`，在 `hookedOMSetRenderTargets` 的 **`real()` 之后**消费（与 2b/2c/2d 同位，`main.cpp` L2800 之后的 pending 消费段）。此刻 321 恰好已解绑（新 RT0 = 339/342），拷未绑定资源最干净。
+- 段7-end 触发 → 发行 `CopyResource(skyIn ← 321)`（自发行先例：哨兵 copy main.cpp L2812-2831；自 copy 用既有 `g_ssrSelfCopy` 排除标记，不污染我方 `copy.sequence` 锚点计数）
+- **回写 API（出向，T6 落地）**：`CopyResource(321 ← skyOut)`，出向共享镜像 → 321；与 2d 出向（`main.cpp` L2868-2876）同法 —— **desc 预检** + `[desc一致]` / `[desc不一致!]` 分叉日志（`CopyResource` 返回 void，desc 不一致时**静默丢弃但日志照打**，2b 已踩过）。`CopySubresourceRegion` **只用于超阈值预案**（`docs/07` §4.3 预案 A，掩码包围盒实测 100% 在上 1/3）。
+- 深度：游戏 `461→520` copy（S4 口径 ev21505 / **S1 口径 ev34689**）处搭车 → `skyDepth` 镜像（在 `ssrReconCopy` 结构内新增分支，`ssr=0` 时按 `g_skyOn` 门控）。
+  ⚠️ **T1 已证搭车成立且无额外同步点**：520 是深度预通道之后、段7 之前的快照；因**段7 零有效深度写入**（`Sky-recon.md` §2 硬事实一），**520 内容 == 段7 末的 461 内容，逐位相同** ⇒ 不必等段7 结束、不必加闸。
+- **掩码（天空判定，`docs/07` §3.4）**：掩码源 = skyDepth；判据 = **D24 精确等于 0xFFFFFF（深度 == 1.0）**，写死，**不用 0.999 之类近似**。掩码全空 ⇒ 合成 pass 零工作（室内早退的实现方式）。
 - 镜像 = 共享 NT handle（skyIn: RGBA16F 1920×1080；skyDepth: 同尺寸深度）；入向拷贝走既有 fence 闸
-- 60 帧心跳日志：镜像就绪（尺寸/格式）、触发计数与拷贝计数**配平**（比值 = 1）
+- **日志文案（定名，`docs/07` §3.5）**：
+  - 镜像就绪：`[sky] 入向就绪 skyIn=1920x1080 RGBA16F skyDepth=1920x1080 D24S8`
+  - 配平汇总：`[sky] 配平 触发=K1 入向拷贝=K2 skyOut回写=K3 比值=1`（每 600 帧）
+  - 回写 desc 预检：`[sky] 回写#K [desc一致]` / `[sky] 回写#K [desc不一致!] skyOut=… 321=…`
+  - **静默承诺**：`sky=1` 且 `ssr=0`/`probe=0` 时 `SSR侦察:` 前缀**零出现**
+- **60 帧心跳日志**：镜像就绪（尺寸/格式）、触发计数与拷贝计数**配平**（比值 = 1）
 
 **Steps:**
 
@@ -171,9 +206,19 @@
 **Interfaces:**
 
 - Pass 序（`g_skyOn` 且段7-end 触发）：① **LUT pass** —— 大气散射预计算（Bruneton/Hillaire 思路自写，GPL 红线见 Global Constraints），小 RT、按太阳方向变化阈值低频重算；太阳方向取 per-frame CB（既有入向）② **云 pass** —— 分辨率 = 原尺寸×`cloudscale`、raymarch 步数 = `cloudsteps`、3D 噪声纹理、`cloudtemporal=1` 时 ping-pong 时域复用；以 skyDepth 远深掩码限定工作域 ③ **合成 pass** —— 全屏三角：天空色 = 散射 LUT(viewray) + 云，掩码内替换 skyIn 原色；push constant ≤128B（相机/太阳/时间/参数，上限既有 :4268）；档位数值经 `VkSpecializationInfo` 烘焙（仿 kMissFade 模式）
-- 出向：VK → 出向共享镜像 → `CopyResource(out → 321)`，发行点 = 段7-end 触发钩子链内；完成窗口 ev38661→ev38816（docs/07 §4 钉死）
-- 同步：事件闸 + `vkWaitForFences`（copyQ 闸模板 main.cpp L2446-2464）；超阈值预案按 docs/07 §4（子矩形回写）
-- 早退：`sky=0` 不挂门（T3）；`vulkan=0` 全灭（PoC-B 语义天然）；掩码全空时合成 pass 零工作（可选优化）
+> **参数节已由 T2 回填（2026-10-12，依据 `docs/07` §3.4/§3.5/§4）。以下为准。**
+
+- **出向回写 API**：`CopyResource(321 ← skyOut)`（出向共享镜像 → 321），发行点 = 段7-end 触发钩子链内、`real()` 之后（T5 定义）；**desc 预检必须做**（`CopyResource` 返回 void，desc 不一致时静默丢弃但日志照打）；子矩形 `CopySubresourceRegion` 只在超阈值预案启用。
+- **完成窗口（`docs/07` §4.2 钉死）**：arm 点 = 段7-end 那一次换绑（**S4 离线参考 ev38661**；三场景对照值 S1 ev48001 / S3 ev31458 / S5 ev40367）；窗口终点 = **段9 降采样消费 321**（**S4 离线参考 ev38816**）。
+  ⚠️ **event id 是每抓帧离线参考（R2），代码里不得出现**，真机一律用 T3 的六字段结构谓词；**S1/S3/S5 的窗口终点待 T6 实测**（抓帧 pass5 段表按各场景口径取「段7-end → 下一个读 321 的事件」）。
+- **同步（事件闸模板 = 既有 SSR 入向 EVENT 闸，`docs/07` §4.1）**：`vkWaitForFences` 范式照 `ssrInGateWait`（`vkrenderer.cpp` L3109-3157）：`GetData(..., D3D11_ASYNC_GETDATA_DONOTFLUSH)` + `Sleep(0)` 自旋 + **2000 ms 超时放行**（绝不卡死帧）；D3D11 侧发行照 `ssrInQueue`（`main.cpp` L2538-2593：拷贝后 `End(EVENT)` 再 `Flush()`）；接线位照 `pocbInject`（`vkrenderer.cpp` L4629，排在任何读入向镜像的 VK 命令之前）。
+  ⚠️ **行号勘误**：旧稿写的「copyQ 闸模板 main.cpp L2446-2464」是行号漂移前的位置（现落在 `ssrInBuild` 的 KMT 分支里），**以 L2538-2593 + L3109-3157 为准**。
+  ⚠️ **闸等待有实测代价**：累计均值 **1.783 ms**（`v0.18.4`）→ **1.420 ms**（`v0.18.6` 回归），已单列登记为 R3 观测项；本计划 5% 预算 ≈0.83 ms ⇒ 闸是头号嫌疑（`docs/07` §6 R6）。
+- **超阈值预案（`docs/07` §4.3，顺序执行）**：**A** 子矩形回写（掩码包围盒；实测掩码 100% 在上 1/3 ⇒ 面积降到 ~1/3；需节流读回，禁每帧同步读回）→ **B** 降档 `sky.preset=0` → **C** `sky.cloudtemporal=0` → **D** 只算不写。
+  ⚠️ **多缓冲（延迟一帧）不可行 —— 相机依赖**：321 在**同帧**段9 就被消费，写晚一帧 ⇒ 消费者读到上一帧的天空，而天空方向/太阳/云运动由**本帧相机**决定 ⇒ 镜头一动就是错位一帧 + 时域鬼影。帧间缓冲在本路线语义上不成立（唯一可缓冲的只有按太阳阈值低频重算的 LUT，但它不是最终输出）。
+- 早退：`sky=0` 不挂门（T3）；`vulkan=0` 全灭（PoC-B 语义天然）；**掩码全空 ⇒ 合成 pass 零工作**（这是室内早退的实际实现方式，S2 室内结构谓词仍会命中，见 `docs/07` §6 R3）
+- **键名（定名，T4 已定，此处照此读）**：`sky.cloudscale` / `sky.cloudsteps` / `sky.cloudtemporal` / `sky.lutscale`；档位数值经 `VkSpecializationInfo` 烘焙
+- **日志文案（定名，`docs/07` §3.5）**：`[sky] 段7-end 触发#K 帧=F`（心跳，前 8 + 每 60）、`[sky] 入向就绪 …`、`[sky] 回写#K [desc一致]` / `[desc不一致!]`、`[sky] 配平 触发=K1 入向拷贝=K2 skyOut回写=K3 比值=1`
 - make_shaders：新增 frag 条目、L71 注释同步；新 spv 入库过 spvsync
 
 **Steps:**
@@ -191,8 +236,8 @@
 
 **Steps:**
 
-- [ ] 跑闸前把 B 类预期项写入 declared-diff 清单（docs/02 §13.3 口径，含新 PSO/纹理/拷贝计数逐条归因）。
-- [ ] S1/S3 注入抓帧 → 同套提取链 → `rdc_compare.ps1 -Strict`：A 全绿 + F 必现 + B 归因、`errors=[]`；S2 室内配对同判（触发=0 侧证）。
+- [ ] 跑闸前把 B 类预期项写入 declared-diff 清单（docs/02 §13.3 口径，含新 PSO/纹理/拷贝计数逐条归因）—— **逐条照抄 `docs/07` §5.1/§5.2/§5.3 三张表**（A 全绿 / F 必现 / B 逐条声明），跑完按声明逐条归因。
+- [ ] S1/S3 注入抓帧 → 同套提取链 → `rdc_compare.ps1 -Strict`：A 全绿 + F 必现 + B 归因、`errors=[]`；S2 室内配对同判（**零回写侧证，不是「触发=0」** —— S2 存在同构主 MRT 段，见 `docs/07` §6 R3）。
 - [ ] 5% 闸：S1/S3/S5 同机位 ssr=0 基线 vs 注入（docs/02 §14.14 口径，每 600 帧帧时行）；`sky.preset` 0..3 逐档实测回填档位表。
 - [ ] knobchk 全键（sky + preset + 4 子键）+ 同存档同机位截图（R6：视觉无自动判据 → 截图 + `px_*` 区域统计对照）+ S4 水面复拍（耦合项）。
 - [ ] `sky` 缺省 0→1（改码）→ 再一轮 CI + 换 DLL + 复验逃生门：`sky=0` 即时回到原版天空（一键回退承诺）。
