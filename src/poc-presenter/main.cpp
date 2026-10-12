@@ -1428,6 +1428,10 @@ int                  g_probeLayers    = 0;
 unsigned long long   g_probeCpuTick   = 0;       // 内容代数, 变了才重传
 // v0.18.21 观测: cube 6 面 PFM 落盘 (默认关 = v0.18.20 逐位; 只写文件不改画面); v0.18.26 起每次换代都落盘
 static int                  g_probeDumpOn = 0;
+// v0.18.30 队列#7: P1 读回跟踪期 —— 两拍定 C1 后每 g_probeTrackSec 秒重读游戏探针,
+// FNV 签名有变即换代重传 (0 = 两拍冻结 = v0.18.29 及以前行为)。
+static int                  g_probeTrackSec = 2;
+static unsigned long long   g_probeTrackT   = 0; // 上次跟踪读回时刻
 
 // ---- v0.18.7 B 水色保留 (docs/05 D4 补遗): 585 在被出向回写覆盖**之前**抢一份当合成底色 ----
 // 为什么必须有它: 合成底色原先 = 324 快照 = 段16 (水体 pass) **之前**的画面, 里面没画水;
@@ -3880,6 +3884,12 @@ void installProbeOn(ID3D11Device* dev)
 		}
 		// ---- v0.18.21 观测两旋钮 (默认 0 = 关 = v0.18.20 逐位; 只写文件不改画面) ----
 		g_probeDumpOn = (static_cast<int>(iniNum("ssr.probedump", 0.0)) != 0) ? 1 : 0;
+		// v0.18.30 队列#7: P1 跟踪重读间隔秒 (0 = 两拍后冻结 = v0.18.29 及以前行为)
+		g_probeTrackSec = static_cast<int>(iniNum("ssr.probeint", 2.0));
+		if (g_probeTrackSec < 0) g_probeTrackSec = 0;
+		if (g_probeTrackSec > 60) g_probeTrackSec = 60;
+		logLine("SSR侦察: ini ssr.probeint=" + std::to_string(g_probeTrackSec) +
+		        " (0=两拍冻结旧行为; >0=P1 跟踪重读间隔秒, 签名有变即换代重传)");
 		// v0.18.22: camdump 扩到 2 = 全槽普查 (每个(槽,条目)首次读回原始字节, 不做正交过滤)
 		const int camDumpV = static_cast<int>(iniNum("ssr.camdump", 0.0));
 		g_ssrCamDumpOn = (camDumpV < 0 || camDumpV > 2) ? 0 : camDumpV;
@@ -4563,8 +4573,21 @@ static void probePfmWrite(unsigned W, unsigned H)
 
 static void probeDumpTick()
 {
+	bool track = false;
 	if (g_probeDumpN >= 2)
-		return;
+	{
+		// v0.18.30 队列#7: 两拍定 C1 之后进入跟踪期 —— 每 ssr.probeint 秒重读一次游戏探针,
+		// FNV 签名有变就换代重传 (原「跑满 2 次即冻结」= 2026-10-11 会话残差根因: 盘上第 2
+		// 代冻结在过加载屏窗口, miss 区整片显示外景 (雪山岩壁贴脸+土黄天, 与实景零配准);
+		// 方向链本身经 16 假设秩相关判别 + 零位移判决正确, 无轴可翻, 无行序可修)。
+		if (g_probeTrackSec <= 0 || !g_probeCpu)
+			return;
+		const unsigned long long tn = GetTickCount64();
+		if (g_probeTrackT && tn - g_probeTrackT < (unsigned long long)g_probeTrackSec * 1000)
+			return;
+		g_probeTrackT = tn;
+		track = true;
+	}
 	ID3D11Texture2D* cube = g_probeCube.load(std::memory_order_acquire);
 	if (!cube)
 		return;
@@ -4742,21 +4765,29 @@ static void probeDumpTick()
 		// 无信号 (60s 兜底直读) ⇒ 游戏压根没画过 (a)。
 		++g_probeDumpZeroN;
 		g_probeDumpTryT = now;
-		logLine("P1探针: 第 " + std::to_string(g_probeDumpZeroN) +
-		        " 次读回六面全 0 (首渲信号=" + (g_probeCubeRenderT ? std::string("有") : std::string("无")) +
-		        ") ⇒ " + (g_probeCubeRenderT ? "有信号仍全0, 指向拷贝没落地" : "没画过, 指向时机") +
-		        ", 1s 后重试; 面统计 nz/量级max " + fstat);
+		if (!track || g_probeDumpZeroN % 15 == 1) // 跟踪期 15 拍一报, 不刷屏
+			logLine("P1探针: 第 " + std::to_string(g_probeDumpZeroN) +
+			        " 次读回六面全 0 (首渲信号=" + (g_probeCubeRenderT ? std::string("有") : std::string("无")) +
+			        ") ⇒ " + (g_probeCubeRenderT ? "有信号仍全0, 指向拷贝没落地" : "没画过, 指向时机") +
+			        (track ? std::string(", 下一跟踪间隔再试 (旧代继续用); 面统计 nz/量级max ") + fstat
+			               : std::string(", 1s 后重试; 面统计 nz/量级max ") + fstat));
 		if (g_probeDumpZeroN >= 15)
 		{
-			logLine("P1探针: 连续 15 次读回全 0 ⇒ 放弃 (C1 判失败, 转 Plan B (C5 假环境)); 面统计 " + fstat);
-			g_probeDumpN = 2; // 停止重试
+			if (track)
+				g_probeDumpZeroN = 0; // 跟踪期不放弃: 计数循环, 旧代继续可用
+			else
+			{
+				logLine("P1探针: 连续 15 次读回全 0 ⇒ 放弃 (C1 判失败, 转 Plan B (C5 假环境)); 面统计 " + fstat);
+				g_probeDumpN = 2; // 停止重试
+			}
 		}
 		ctx->Release();
 		if (dev)
 			dev->Release();
 		return;
 	}
-	logLine("P1探针: 面统计 nz/量级max " + fstat);
+	if (!track)
+		logLine("P1探针: 面统计 nz/量级max " + fstat);
 
 	// ---- 阶段2: 全 6 面 FNV 签名 + 收进 CPU 缓冲 (原有逻辑, 只在有内容时才跑) ----
 	unsigned long long acc = 14695981039346656037ULL;
@@ -4803,6 +4834,14 @@ static void probeDumpTick()
 
 	if (!allOk)
 	{
+		if (track)
+		{
+			logLine("P1探针: 跟踪读回 Map 失败 ⇒ 保留旧代继续用, 下一跟踪间隔重试");
+			ctx->Release();
+			if (dev)
+				dev->Release();
+			return;
+		}
 		logLine("P1探针: 读回失败 ⇒ C1 不可行, 转 Plan B (C5 假环境)");
 		g_probeDumpN = 2;
 		if (g_probeCpu) { free(g_probeCpu); g_probeCpu = nullptr; }
@@ -4813,6 +4852,25 @@ static void probeDumpTick()
 		return;
 	}
 
+	if (track)
+	{
+		// v0.18.30 跟踪读回: 以「最后发布签名」为基准 —— 有变才换代 (memcpy 已在循环里落进
+		// g_probeCpu, tick 一变 VK 侧 ssrV1Sig 自动重录), 同签名静默; 换代日志带面统计做新鲜度旁证。
+		if (acc != g_probeDumpH0 && g_probeCpu)
+		{
+			g_probeDumpH0 = acc;
+			++g_probeCpuTick;
+			logLine("P1探针: 跟踪读回 sig=" + std::to_string(acc) +
+			        " 与上次发布不同 ⇒ 换代重传, 第 " + std::to_string(g_probeCpuTick) +
+			        " 代 (面统计 nz/量级max " + fstat + ")");
+			if (g_probeDumpOn)
+				probePfmWrite(d.Width, d.Height);
+		}
+		ctx->Release();
+		if (dev)
+			dev->Release();
+		return;
+	}
 	++g_probeDumpN;
 	if (g_probeDumpN == 1)
 	{
@@ -4838,9 +4896,14 @@ static void probeDumpTick()
 		const bool same = (acc == g_probeDumpH0);
 		logLine("P1探针: 第2次读回 ok  sig=" + std::to_string(acc) + " 与第1次相隔 " +
 		        std::to_string((unsigned long long)((now - g_probeDumpT) / 1000)) + "s ⇒ " +
-		        (same ? "内容静态 (一次上传即可, C1 成立)" : "内容有变 (需按代重传, ssrV1Sig 已兜住)"));
+		        (same ? "内容静态 (一次上传即可, C1 成立)" : "内容有变 (需按代重传, ssrV1Sig 已兜住)") +
+		        (g_probeTrackSec > 0
+		             ? std::string("; 已转入跟踪期 (每 ") + std::to_string(g_probeTrackSec) +
+		                   "s 重读, 有变即换代)"
+		             : std::string("; ssr.probeint=0 冻结在本代")));
 		if (!same && g_probeCpu)
 		{
+			g_probeDumpH0 = acc; // v0.18.30: 跟踪期以「最后发布签名」为基准
 			++g_probeCpuTick; // 用新内容覆盖 CPU 缓冲 (循环里已经 memcpy 过了)
 			logLine("P1探针: 已发布 CPU 镜像 " + std::to_string(g_probeW) + "² × 6 面, 第 " +
 			        std::to_string(g_probeCpuTick) + " 代 (读回内容有变)");
@@ -6152,7 +6215,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.29 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 25: 采样基底合成 q=conj(qcap)⊗qchain+换代快照; 26: probedump 每次换代落盘(诊断: PFM 恒=活跃 cube); 27: debug=9 采样方向场定标 + 恒等q守卫(复位占位不发布) + 第2发布点也落盘; 28: shader 产物补生成 —— make_shaders 此前未跑致 v17/v20/v27 ssr.frag 幻影, DLL 一直嵌 v16 旧 shader(miss 无旋转总根因, 修法=tools/spvsync 闸); 29: 撤销25基底合成(cube 世界轴对齐, 直发 q 即真世界方向) + debug 8/7 闸收窄(debug=9 的 hit 走正常合成); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
+	logLine("==== poc-presenter v0.18.30 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 25: 采样基底合成 q=conj(qcap)⊗qchain+换代快照; 26: probedump 每次换代落盘(诊断: PFM 恒=活跃 cube); 27: debug=9 采样方向场定标 + 恒等q守卫(复位占位不发布) + 第2发布点也落盘; 28: shader 产物补生成 —— make_shaders 此前未跑致 v17/v20/v27 ssr.frag 幻影, DLL 一直嵌 v16 旧 shader(miss 无旋转总根因, 修法=tools/spvsync 闸); 29: 撤销25基底合成(cube 世界轴对齐, 直发 q 即真世界方向) + debug 8/7 闸收窄(debug=9 的 hit 走正常合成); 30: P1 读回跟踪期(ssr.probeint 默认2s — 两拍定C1后周期重读探针, FNV 签名有变即换代重传, 修 miss 区外景冻结/队列#7); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
