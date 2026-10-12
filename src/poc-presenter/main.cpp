@@ -477,6 +477,32 @@
  *     SSR侦察: [2c-β] 槽1(LINEAR) 建图+导入OK: 1920x1080 → 本帧只建不比 … 下次交叉校验出对比值
  *     SSR侦察: [异常] [2c-β] 槽N(名字) 读回提交 DEVICE_LOST (-4) → 2c-β 停用 (PoC-B 可能已被连坐)
  *
+ * ---- v0.18.33 T3: 天空 (sky) 总闸 + 段7-end 结构触发 (docs/07 §3.2/§3.3/§3.5) ----
+ *   设计: docs/07-天空节点替换实施设计.md §3 (I/O 与触发谓词); 证据: docs/analysis/Sky-recon.md §4.2。
+ *   ini 键 `sky` (0/1, **缺省 0**; T7 才改 1) —— 逃生门链新增一级: ssr=0 → probe=0 → sky=0 →
+ *   vulkan=0。sky 与 ssr/probe/vulkan **各自独立**: sky=1 时即使 ssr=0/probe=0 也照挂 ctx
+ *   槽33/47/50, 因为段7-end 触发只需要槽33 的入参, 与 SSR 侦察/介入链路毫无关系。
+ *   触发谓词 (**六字段, 全部是 hookedOMSetRenderTargets 现成的入参, 不新增 hook**):
+ *       段7 = (NumViews==3) && (RT0.desc==1920x1080 RGBA16F) && (RT1 非空) && (RT2 非空)
+ *             && (DSV.desc==1920x1080 D24 家族)
+ *       其**第一次不满足 = 段7-end**。
+ *     ⚠️ 离场靠 NumViews 3→2 + RT0 换绑 + RT0 desc RGBA16F→RGBA8 + RT2 消失 (Sky-recon §4.1);
+ *        **DSV461 与 RT1(349) 在段7 前后不变 ⇒ 不可用于离场判定**, 只当"进入"的必要条件。
+ *     ⚠️ RT2 只判非空, 不判身份 (逐场景不同: S1=342 / S3,S5=339; docs/07 §6 R8)。
+ *     ⚠️ **代码里绝不出现抓帧 event id** (R2: 那是每抓帧局部量, 跨帧不可比)。
+ *     ⚠️ 段18 透明段与段7 同签名 ⇒ 按"首次离场即置位 + 本帧一次性 + Present 复位"实现 (R9),
+ *        禁用"进入次数==1"计数。
+ *     ⚠️ **室内 (S2 段6) 结构同构 ⇒ 谓词室内同样命中, 这是设计行为** (docs/07 §6 R3):
+ *        室内早退靠"掩码为空 ⇒ 合成零工作"(T5/T6), 不靠结构不触发; 故此处不加户外过滤。
+ *   arm 时机: skySeg7End() 在 OMSetRenderTargets 钩子内**只读解析并置位**; 消费在同钩子的
+ *     **real() 之后** (与 2b/2c/2d 同位, docs/07 §3.3)。本轮只消费 + 记心跳; 三条 CopyResource
+ *     (skyIn←321 / skyDepth←520 / 321←skyOut) 分别是 T5/T6 的活。
+ *   静默承诺 (docs/07 §3.5 / 计划 T7 Review Focus 7): sky=1 且 ssr=0 时 `SSR侦察:` 前缀
+ *     **零出现**、探针与普查 logLine 零出现。实现口径 = ssrReconLogOn() (sky=0 ⇒ 恒 true ⇒
+ *     既有行为逐字节不变; ssr=1 ⇒ 恒 true ⇒ SSR 会话不受影响), 安装期那几行则按需换前缀。
+ *   日志定名: `天空: ini sky=1 → 挂 ctx 槽33/47/50 (段7-end 结构触发)` (启动回显) /
+ *     `[sky] 段7-end 触发#K 帧=F` (心跳, 前 8 条 + 每 60 条)。
+ *
  * 构建: GitHub Actions (build.yml job "poc-presenter"), 本地不编译
  * 安装: poc-presenter.dll 放入 <游戏>/Data/SKSE/Plugins/
  */
@@ -1182,6 +1208,42 @@ static SsrCtxEntry g_ssrCtx[4];
 static int         g_ssrCtxN = 0;
 static std::atomic<bool> g_ssrOn{false}; // ini ssr (D5 默认 0)
 static bool        g_ssrWatchAll = false; // 指针身份失配后转按 vtbl 观察全部上下文 (见 ssrWatch)
+
+// ---- v0.18.33 T3 天空 (sky): 总闸 + 段7-end 结构触发的本帧一次性旗标 ----
+// 逃生门链 ssr=0 → probe=0 → **sky=0** → vulkan=0 (sky 是自己的一级, 不依赖 ssr/probe)。
+// 三个旗标的关系 (docs/07 §3.2 的伪码 + §6 R9 的三重约束):
+//   g_skyInSeg7         段7 内 (谓词命中即置, **段内不复位**, 只在 Present 清)
+//   g_skySeg7EndPending 段7-end 已判 (首次离场置位) → hook 里 real() 之后消费
+//   g_skySeg7Fired      本帧已触发过 → 段18 与段7 同签名, 不封闸会二次命中 (R9)
+// 段计数 (字段 6) 与 RT0/DSV 身份 (字段 3/5) 由 skySeg7End 自持, 供 T5 用; 本任务只记不用。
+static std::atomic<bool> g_skyOn{false}; // ini sky (0/1, 缺省 0; T7 才改 1)
+static bool  g_skyInSeg7 = false;
+static bool  g_skySeg7EndPending = false;
+static bool  g_skySeg7Fired = false;
+static long  g_skySeg7N = 0;      // 累计段7-end 触发 (心跳计数 K)
+static void* g_skyRt0Obj = nullptr; // 本帧最近一次段7 的 RT0 资源身份 (QI 指针值, 只比对不解引用)
+static long  g_skyRt0Runs = 0;      // 本帧 RT0 换绑段数 (连续绑定段计数)
+static void* g_skySeg7Rt0 = nullptr; // 段7 内记住的 RT0 身份 (T5 入向拷贝目标)
+static void* g_skySeg7Dsv = nullptr; // 段7 内记住的 DSV 身份 (T5 搭车 461→520 用)
+
+// 静默承诺 (docs/07 §3.5 / 计划 T7 Review Focus 7): sky=1 且 ssr=0 时 `SSR侦察:` 前缀
+// **零出现**、探针/普查 logLine 零出现。sky=0 ⇒ 恒 true ⇒ 既有行为逐字节不变;
+// ssr=1 ⇒ 恒 true ⇒ SSR 会话完全不受影响。
+static bool ssrReconLogOn()
+{
+	return g_ssrOn.load(std::memory_order_relaxed) || !g_skyOn.load(std::memory_order_relaxed);
+}
+
+// ini 解析块里那一整片 `SSR侦察:` / `探针升质:` / `ssr.edge` 回显与告警统一走它
+// (静默承诺的落地点): sky=1 且 ssr=0 时整片静默 —— 否则 T7 的 grep 断言
+// 「`SSR侦察:` 零出现」会被启动期的 ini 回显打破 (camrot / probeint / probe=0 那几行
+// 在 ini 用默认值时是**无条件**打印的)。sky=0 ⇒ ssrReconLogOn() 恒 true ⇒ 逐字节不变;
+// ssr=1 ⇒ 同。sky 会话里这几行的信息由 `天空:` 回显承担, 不丢判读能力。
+static void ssrIniEcho(const std::string& msg)
+{
+	if (ssrReconLogOn())
+		logLine(msg);
+}
 // 本帧状态 (Present 时清零; 观察只发生在 immediate context 上 = 渲染线程)
 static std::atomic<long> g_ssrFOm{0}, g_ssrFCand{0}, g_ssrFStr{0}, g_ssrFA{0}, g_ssrFB{0};
 static void* g_ssrFObj[4];           // 本帧强特征对象身份 (判 distinct 唯一性)
@@ -1531,6 +1593,91 @@ std::string ssrFmtName(DXGI_FORMAT f)
 	}
 }
 
+// =============================================================================
+// v0.18.33 T3: 天空段7-end 结构触发 (sky master gate + segment-7-end predicate)
+// -----------------------------------------------------------------------------
+// 判定式 (VERBATIM 自 docs/analysis/Sky-recon.md §4.2 / docs/07 §3.2):
+//   段7 = (NumViews == 3) && (RT0.desc == 1920x1080 RGBA16F) && (RT1 非空) && (RT2 非空)
+//         && (DSV.desc == 1920x1080 D24 家族)
+//   其**第一次不满足 = 段7-end**。
+//
+// 六字段 (全部是 hookedOMSetRenderTargets 的入参, **不需要新增 hook**):
+//   1 n (非空视图数)              = 本函数自数
+//   2 每视图 RTV desc             = ID3D11RenderTargetView::GetDesc (经 ssrViewDesc)
+//   3 每视图 RTV 资源指针         = ID3D11RenderTargetView::GetResource (经 ssrViewDesc 的 QI)
+//   4 DSV desc                    = ID3D11DepthStencilView::GetDesc
+//   5 DSV 资源指针                = ID3D11DepthStencilView::GetResource
+//   6 本帧 RT0 身份表 + 连续绑定段计数 = g_skyRt0Obj / g_skyRt0Runs (sky 自持, 与 g_ssrRtN
+//     同口径但**独立**: ssr=0 时 g_ssrRtN 不会被 ssrReconOm 维护, 而 sky 必须能单独工作)
+//
+// ⚠️ 离场判据只用 NumViews 3→2 + RT0 换绑 + RT0 desc RGBA16F→RGBA8 + RT2 消失
+//    (Sky-recon §4.1 实测)。**DSV461 与 RT1(349) 在段7 前后不变, 不可用于离场判定** ——
+//    它们只在本判定式里当"进入"的必要条件 (DSV 那一项), 离场由"谓词第一次不满足"承担。
+// ⚠️ RT2 只判"非空", **不判身份** (逐场景不同: S1=342, S3/S5=339; docs/07 §6 R8)。
+// ⚠️ **代码里绝不出现抓帧 event id** (R2: ResourceId/event 都是每抓帧局部量, 跨帧不可比)。
+// ⚠️ **室内 (S2 段6) 与户外段7 结构同构 ⇒ 本谓词室内同样命中, 这是设计行为**
+//    (docs/07 §6 R3): 室内早退靠"掩码为空 ⇒ 合成零工作"(T5/T6), **不靠结构不触发**。
+//    故此处刻意**不加任何户外过滤**。
+// ⚠️ R9 (段18 透明段与段7 同签名): 禁用"进入次数==1"或"持续处于段7 内"计数, 一律按
+//    "首次离场即置位 + 本帧一次性 + Present 复位"实现 ⇒ 帧内绝不二次触发。
+//
+// 置位 (pending) 与消费 (hook 内 real() 之后) 分离: 本函数只**读** OMSetRenderTargets 的
+// 入参、不动任何渲染状态; 消费点在 hookedOMSetRenderTargets 的 real() 之后 (同 2b/2c/2d 位)。
+// 本轮 (T3) 消费只做心跳计数与日志; 入向/出向三条 CopyResource 是 T5/T6 的活。
+static void skySeg7End(UINT n, ID3D11RenderTargetView* const* ppRTV, ID3D11DepthStencilView* pDSV)
+{
+	if (!g_skyOn.load(std::memory_order_relaxed))
+		return;
+	// ---- 字段 1: 非空视图数 (按非空计, 防 NumViews=8 带 null), 并取首/次/第三个非空视图 ----
+	UINT nonNull = 0;
+	ID3D11RenderTargetView* rt[3] = {nullptr, nullptr, nullptr};
+	if (ppRTV && n > 0 && n <= 8)
+		for (UINT i = 0; i < n; ++i)
+			if (ppRTV[i])
+			{
+				if (nonNull < 3)
+					rt[nonNull] = ppRTV[i];
+				++nonNull;
+			}
+	bool inSeg7 = false;
+	void* robj = nullptr; // 字段 3: RT0 资源身份
+	void* dobj = nullptr; // 字段 5: DSV 资源身份
+	if (nonNull == 3 && rt[0] && rt[1] && rt[2])
+	{
+		// 字段 2/3: RT0 desc + 资源身份 (RT1/RT2 只判非空, 不取 desc 也不比身份)
+		D3D11_TEXTURE2D_DESC rd{};
+		if (ssrViewDesc(rt[0], &rd, &robj))
+		{
+			// 字段 4/5: DSV desc + 资源身份 (判 1920x1080 D24 家族)
+			D3D11_TEXTURE2D_DESC dd{};
+			if (pDSV && ssrViewDesc(pDSV, &dd, &dobj))
+				inSeg7 = rd.Width == 1920 && rd.Height == 1080 &&
+				         rd.Format == DXGI_FORMAT_R16G16B16A16_FLOAT &&
+				         dd.Width == 1920 && dd.Height == 1080 && ssrIsD24(dd.Format);
+		}
+	}
+	// ---- 字段 6: 本帧 RT0 身份 + 连续绑定段计数 (sky 自持; RT0 换对象 = 换段) ----
+	if (robj && robj != g_skyRt0Obj)
+	{
+		g_skyRt0Obj = robj;
+		++g_skyRt0Runs;
+	}
+	if (inSeg7)
+	{
+		// 段7 内: 一次性置位, **段内不复位** (段7 有 788 个 draw, 每次都命中)
+		g_skyInSeg7 = true;
+		g_skySeg7Rt0 = robj; // 记住 RT0 身份 (T5 入向拷贝 321 用)
+		g_skySeg7Dsv = dobj; // 记住深度目标 (T5 搭车 461→520 用)
+		return;
+	}
+	// ---- 段7-end: 第一次不满足谓词且本帧进过段7 且本帧还没触发过 ⇒ 置位一次 ----
+	if (g_skyInSeg7 && !g_skySeg7Fired)
+	{
+		g_skySeg7Fired = true;       // 本帧封闸 (R9: 段18 同签名不会二次触发)
+		g_skySeg7EndPending = true;  // hook 内 real() 之后消费
+	}
+}
+
 // 上下文身份核对: 安装时抓的 immediate 指针若与调用方不一致 (RenderDoc 包装/重取等),
 // 不能就此哑掉 —— 告警一次后转为按 vtbl 观察全部上下文 (g_ssrWatchAll), 宁可多记不漏记
 static bool ssrWatch(SsrCtxEntry* e, ID3D11DeviceContext* ctx)
@@ -1542,8 +1689,10 @@ static bool ssrWatch(SsrCtxEntry* e, ID3D11DeviceContext* ctx)
 	if (g_ssrWatchAll)
 		return true;
 	g_ssrWatchAll = true;
-	logLine("SSR侦察: 上下文指针与安装时不同 (imm=" + hexOf(e->imm) + " 调用方=" + hexOf(ctx) +
-	        ") → 转为按 vtbl 观察全部上下文 (宁多记不漏记)");
+	// 静默承诺 (docs/07 §3.5): sky=1 且 ssr=0 时 `SSR侦察:` 前缀零出现 ⇒ 这条告警也归它管
+	if (ssrReconLogOn())
+		logLine("SSR侦察: 上下文指针与安装时不同 (imm=" + hexOf(e->imm) + " 调用方=" + hexOf(ctx) +
+		        ") → 转为按 vtbl 观察全部上下文 (宁多记不漏记)");
 	return true;
 }
 
@@ -2797,6 +2946,9 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 	// 延迟上下文与 immediate 共享 vtable —— 身份核对只观察 immediate (失配则转全观察)
 	if (ssrWatch(e, ctx) && g_ssrOn.load(std::memory_order_relaxed))
 		ssrReconOm(n, ppRTV, pDSV);
+	// ---- T3 天空段7-end 结构谓词 (sky=1 时独立于 ssr/probe 生效; 只读入参, 不动渲染) ----
+	if (g_skyOn.load(std::memory_order_relaxed))
+		skySeg7End(n, ppRTV, pDSV);
 	real(ctx, n, ppRTV, pDSV);
 	// ---- 帧时基线 (v0.16.2): 顺手在这条每帧必经的 ctx 钩上拿到 immediate context ----
 	// 只认 e->imm == ctx (安装时记下的 immediate 指针), 延迟上下文不拿来建查询;
@@ -2913,6 +3065,18 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 		if (g_ssrSharedOn.load(std::memory_order_relaxed) &&
 		    g_ssrOn.load(std::memory_order_relaxed))
 			ssrInQueue(ctx);
+	}
+	// ---- T3 天空段7-end 触发消费 (docs/07 §3.3: 与 2b/2c/2d 同位, real() 之后) ----
+	// 此刻段7 已换绑、321 恰好解绑, 正是入向拷贝最干净的时点; 本轮 (T3) 只消费 + 记心跳,
+	// 入向 skyIn / 搭车 skyDepth / 出向 skyOut 三条 CopyResource 分别是 T5/T6 的活。
+	if (g_skySeg7EndPending)
+	{
+		g_skySeg7EndPending = false;
+		const long k = ++g_skySeg7N;
+		// 前 8 次全打, 之后每 60 帧节流 (与既有 2b/2c/2d 节流同款)
+		if (k <= 8 || (k % 60) == 0)
+			logLine("[sky] 段7-end 触发#" + std::to_string(k) + " 帧=" +
+			        std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1));
 	}
 }
 
@@ -3596,11 +3760,14 @@ static void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* ct
 	real(ctx, StartSlot, NumBuffers, ppConstantBuffers);
 }
 
-// 挂 immediate context 槽33/50 —— 幂等 (按 vtable 去重); 门控 = pocbEnabled + probe + ssr
+// 挂 immediate context 槽33/50 —— 幂等 (按 vtable 去重); 门控 = pocbEnabled + (probe|ssr|sky)
+// v0.18.33 T3: 天空是**自己的一级**逃生门 —— sky=1 时即使 ssr=0/probe=0 也要挂这三个观察槽
+// (段7-end 结构触发只需要 ctx 槽33 的入参, 与 SSR 侦察/介入链路完全无关)。
 static void installSsrRecon(ID3D11Device* dev)
 {
-	if (!dev || !pocbEnabled() || !g_probeOn.load(std::memory_order_relaxed) ||
-	    !g_ssrOn.load(std::memory_order_relaxed))
+	if (!dev || !pocbEnabled() ||
+	    !(g_probeOn.load(std::memory_order_relaxed) || g_ssrOn.load(std::memory_order_relaxed) ||
+	      g_skyOn.load(std::memory_order_relaxed)))
 	{
 		// C-5 (待修复事项总结 C-5): 门不满足时**必须**说清是谁关的 —— 原来是一声不吭 return,
 		// 而日志里那行 "ini ssr=1 → 挂 ctx 槽33/47/50" 只是**意图打印** (与门无关),
@@ -3608,18 +3775,22 @@ static void installSsrRecon(ID3D11Device* dev)
 		// FAIL 全是同一根因 (2026-10-06 曾白跑两轮 3600 + 8400 帧)。
 		static std::atomic<bool> s_gateLogged{false};
 		if (!s_gateLogged.exchange(true, std::memory_order_relaxed))
-			logLine(std::string("SSR侦察: 挂载门未满足 — ctx槽33/50 未挂 (dev=") +
+			logLine(std::string(ssrReconLogOn() ? "SSR侦察: " : "天空: ") +
+			        "挂载门未满足 — ctx槽33/50 未挂 (dev=" +
 			        (dev ? "OK" : "空") + " vulkan=" + (pocbEnabled() ? "1" : "0") +
 			        " probe=" + (g_probeOn.load(std::memory_order_relaxed) ? "1" : "0") +
 			        " ssr=" + (g_ssrOn.load(std::memory_order_relaxed) ? "1" : "0") +
-			        ") — 开关顺序 ssr / probe / vulkan (逃生门链 ssr=0 → probe=0 → vulkan=0)");
+			        " sky=" + (g_skyOn.load(std::memory_order_relaxed) ? "1" : "0") +
+			        ") — 开关顺序 ssr / probe / sky / vulkan (逃生门链 "
+			        "ssr=0 → probe=0 → sky=0 → vulkan=0)");
 		return;
 	}
 	ID3D11DeviceContext* ctx = nullptr;
 	dev->GetImmediateContext(&ctx);
 	if (!ctx)
 	{
-		logLine("SSR侦察: GetImmediateContext 空 — 槽33/50 未挂");
+		if (ssrReconLogOn())
+			logLine("SSR侦察: GetImmediateContext 空 — 槽33/50 未挂");
 		return;
 	}
 	void** vtbl = *reinterpret_cast<void***>(ctx);
@@ -3630,19 +3801,26 @@ static void installSsrRecon(ID3D11Device* dev)
 		ctx->Release();
 		return;
 	}
+	// 静默承诺 (docs/07 §3.5): sky=1 且 ssr=0 时下面这些 SSR侦察: 前缀的安装期诊断全静默,
+	// 只留末尾那行 `天空:` 挂载回显 (换前缀, 内容一字不减 ⇒ 判读能力不变)。
+	const bool rlog = ssrReconLogOn();
 	void* o33 = vtbl[33];
 	void* o50 = vtbl[50];
 	void* o47 = vtbl[47]; // CopyResource (Step 2a 身份识别通道)
 	void* o7 = vtbl[7];   // VSSetConstantBuffers (v0.18.17 P3 相机朝向读回)
-	logLine("SSR侦察: ctx vtable=" + hexOf(vtbl) + " slot33(OMSetRenderTargets) 原值=" + hexOf(o33) +
-	        " 来自 " + modulePathOf(o33) + "; slot50(ClearRenderTargetView) 原值=" + hexOf(o50) +
-	        " 来自 " + modulePathOf(o50) + "; slot47(CopyResource) 原值=" + hexOf(o47) +
-	        " 来自 " + modulePathOf(o47));
-	logLine("SSR侦察: ctx slot7(VSSetConstantBuffers) 原值=" + hexOf(o7) + " 来自 " +
-	        modulePathOf(o7));
+	if (rlog)
+	{
+		logLine("SSR侦察: ctx vtable=" + hexOf(vtbl) + " slot33(OMSetRenderTargets) 原值=" + hexOf(o33) +
+		        " 来自 " + modulePathOf(o33) + "; slot50(ClearRenderTargetView) 原值=" + hexOf(o50) +
+		        " 来自 " + modulePathOf(o50) + "; slot47(CopyResource) 原值=" + hexOf(o47) +
+		        " 来自 " + modulePathOf(o47));
+		logLine("SSR侦察: ctx slot7(VSSetConstantBuffers) 原值=" + hexOf(o7) + " 来自 " +
+		        modulePathOf(o7));
+	}
 	if (!isD3D11Family(o33) || !isD3D11Family(o50))
 	{
-		logLine("SSR侦察: ctx slot33/50 原值不在 d3d11/renderdoc — 跳过 (防错槽位)");
+		if (rlog)
+			logLine("SSR侦察: ctx slot33/50 原值不在 d3d11/renderdoc — 跳过 (防错槽位)");
 		LeaveCriticalSection(&g_cs);
 		ctx->Release();
 		return;
@@ -3651,16 +3829,17 @@ static void installSsrRecon(ID3D11Device* dev)
 	// 日志里看不到 [2a] 行即可判读; 绝不能挂一个 orig47 为空的槽 (hookedCopyResource 会
 	// 直接 return 掉真调用 ⇒ 游戏拷贝全丢, 渲染崩)。
 	const bool ok47 = isD3D11Family(o47);
-	if (!ok47)
+	if (!ok47 && rlog)
 		logLine("SSR侦察: ctx slot47 原值不在 d3d11/renderdoc — 不挂 (身份识别降级, 槽33/50 照常)");
 	// slot7 同 ok47 口径: 校验失败只降级该槽 (不挂) —— 挂错槽的代价是游戏每帧绑常量缓冲
 	// 全丢 (比 47 挂错更致命: 绑定吞了 = 整场景无光照/无变换), 所以这道阀绝不能省。
 	const bool ok7 = isD3D11Family(o7);
-	if (!ok7)
+	if (!ok7 && rlog)
 		logLine("SSR侦察: ctx slot7 原值不在 d3d11/renderdoc — 不挂 (P3 相机朝向读回降级, 其余照常)");
 	if (g_ssrCtxN >= (int)(sizeof(g_ssrCtx) / sizeof(g_ssrCtx[0])))
 	{
-		logLine("SSR侦察: ctx 登记表已满 — 跳过 (防越界)");
+		if (rlog)
+			logLine("SSR侦察: ctx 登记表已满 — 跳过 (防越界)");
 		LeaveCriticalSection(&g_cs);
 		ctx->Release();
 		return;
@@ -3678,11 +3857,23 @@ static void installSsrRecon(ID3D11Device* dev)
 		patchSlotLocked(&vtbl[47], reinterpret_cast<void*>(&hookedCopyResource));
 	if (ok7)
 		patchSlotLocked(&vtbl[7], reinterpret_cast<void*>(&hookedVSSetConstantBuffers));
-	logLine("SSR侦察: ctx槽33/50" + std::string(ok47 ? "/47" : "") +
-	        " 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.16.0 Step2; 逃生门 ssr=0)");
-	if (ok7)
-		logLine("SSR侦察: ctx槽7(VSSetConstantBuffers) 已挂 — v0.18.23 P3 相机朝向读回(列正交+多条目) " +
-		        std::string(g_ssrV1CamOn ? "开 (camrot=1, VS cb 槽0..13 全扫)" : "关 (camrot=0)"));
+	if (rlog)
+	{
+		logLine("SSR侦察: ctx槽33/50" + std::string(ok47 ? "/47" : "") +
+		        " 已挂 — 2a 只记日志, 2b 回写需 ssr.sentinel=1 (v0.16.0 Step2; 逃生门 ssr=0)");
+		if (ok7)
+			logLine("SSR侦察: ctx槽7(VSSetConstantBuffers) 已挂 — v0.18.23 P3 相机朝向读回(列正交+多条目) " +
+			        std::string(g_ssrV1CamOn ? "开 (camrot=1, VS cb 槽0..13 全扫)" : "关 (camrot=0)"));
+	}
+	else
+	{
+		// sky=1 且 ssr=0/probe=0: 换成 天空: 前缀 (docs/07 §3.5 静默承诺), 槽位信息一字不减
+		logLine("天空: ctx槽33/50" + std::string(ok47 ? "/47" : "") +
+		        " 已挂 — 段7-end 结构触发用 (sky=1; ssr=0/probe=0 ⇒ SSR 侦察与普查日志全静默)");
+		if (ok7)
+			logLine("天空: ctx槽7(VSSetConstantBuffers) 已挂 (sky 会话: camVSBOnce 由 g_ssrOn 门控, "
+			        "ssr=0 时恒早退, 不产生任何日志或拷贝)");
+	}
 	LeaveCriticalSection(&g_cs);
 	ctx->Release();
 }
@@ -3703,6 +3894,19 @@ static void installSsrRecon(ID3D11Device* dev)
 //   (全帧另有 339 = 17次/1段)。
 static void ssrReconPresent(uint64_t n)
 {
+	// ---- T3 天空段7-end 触发: 每帧复位 (在 ssr 早退**之前** —— sky=1 时 ssr 可以是 0) ----
+	// 三个旗标每帧清零 ⇒ 段7-end 每帧至多触发一次 (R9: 段18 与段7 同签名也不会二次命中)。
+	// 兜底: pending 不带进新帧 (上一帧没被 real() 之后的消费点吃掉的情形, 同 2b/2c/2d 口径)。
+	if (g_skyOn.load(std::memory_order_relaxed))
+	{
+		g_skyInSeg7 = false;
+		g_skySeg7EndPending = false;
+		g_skySeg7Fired = false;
+		g_skyRt0Obj = nullptr;
+		g_skyRt0Runs = 0;
+		g_skySeg7Rt0 = nullptr;
+		g_skySeg7Dsv = nullptr;
+	}
 	if (!g_ssrOn.load(std::memory_order_relaxed))
 		return;
 	const long fo = g_ssrFOm.exchange(0, std::memory_order_relaxed);
@@ -3795,31 +3999,39 @@ void installProbeOn(ID3D11Device* dev)
 		probeIniRead = true;
 		g_probeOn.store(iniFlag("probe", true), std::memory_order_relaxed);
 		if (!g_probeOn.load(std::memory_order_relaxed))
-			logLine("探针升质: ini probe=0 → 不挂 CreateTexture2D (探针保持 512²)");
+			ssrIniEcho("探针升质: ini probe=0 → 不挂 CreateTexture2D (探针保持 512²)");
 		// SSR Step1 侦察 (D5): 默认 0 → 零新增拦截; 1 才挂 ctx 槽33/47/50 (与 probe 同门)
 		g_ssrOn.store(iniFlag("ssr", false), std::memory_order_relaxed);
 		if (g_ssrOn.load(std::memory_order_relaxed))
-			logLine("SSR侦察: ini ssr=1 → 挂 ctx 槽33/47/50 (2a 只记日志) v0.16.0 Step2");
+			ssrIniEcho("SSR侦察: ini ssr=1 → 挂 ctx 槽33/47/50 (2a 只记日志) v0.16.0 Step2");
+		// ---- v0.18.33 T3: 天空总闸 (ini sky, 0/1, 缺省 0; T7 才改 1) ----
+		// sky 是**自己的一级**逃生门 (ssr=0 → probe=0 → sky=0 → vulkan=0): 与 ssr/probe/vulkan
+		// 各自独立, sky=1 时即使 ssr=0/probe=0 也要挂 ctx 槽33/47/50, 只为段7-end 结构触发。
+		// 档位子键 (sky.preset / sky.cloudscale / sky.cloudsteps / sky.cloudtemporal / sky.lutscale)
+		// 由 T4 解析并进同块回显; 本轮 (T3) 只有总闸一个键。回显文案定名 (docs/07 §3.5)。
+		g_skyOn.store(iniFlag("sky", false), std::memory_order_relaxed);
+		if (g_skyOn.load(std::memory_order_relaxed))
+			logLine("天空: ini sky=1 → 挂 ctx 槽33/47/50 (段7-end 结构触发)");
 		// Step 2b 通路哨兵的独立逃生门 —— 首次会动渲染 (324→585 回写), 与"只观察"分开:
 		// ssr=1 但 ssr.sentinel=0 ⇒ 纯观察, 2a 身份照样学; 出问题改 0 即退回只读。
 		g_ssrSentinelOn.store(iniFlag("ssr.sentinel", false), std::memory_order_relaxed);
 		if (g_ssrSentinelOn.load(std::memory_order_relaxed) &&
 		    g_ssrOn.load(std::memory_order_relaxed))
-			logLine("SSR侦察: ini ssr.sentinel=1 → 特征B 处 324→585 回写 (2b 哨兵, 反射区"
+			ssrIniEcho("SSR侦察: ini ssr.sentinel=1 → 特征B 处 324→585 回写 (2b 哨兵, 反射区"
 			        " 会显示成可辨识的旧场景色错误画面; 逃生门 ssr.sentinel=0)");
 		else if (g_ssrSentinelOn.load(std::memory_order_relaxed))
-			logLine("SSR侦察: ini ssr.sentinel=1 但 ssr=0 → 哨兵不生效 (ssr 是总门)");
+			ssrIniEcho("SSR侦察: ini ssr.sentinel=1 但 ssr=0 → 哨兵不生效 (ssr 是总门)");
 		// Step 2c 共享入向的独立开关 (v0.15.0) —— 默认 0 → 与 v0.14.0 的 2b 路径完全一致。
 		// 1 才建 SHARED|NTHANDLE 镜像并每帧拷一次; **只写我方镜像, 不动游戏资源、不改画面**
 		// (与 2b 的"改 585"性质不同, 所以另给一道门; 逃生门思路同 D5)。
 		g_ssrSharedOn.store(iniFlag("ssr.shared", false), std::memory_order_relaxed);
 		if (g_ssrSharedOn.load(std::memory_order_relaxed) &&
 		    g_ssrOn.load(std::memory_order_relaxed))
-			logLine("SSR侦察: ini ssr.shared=1 → 2c 共享入向: 324/520 拷进 SHARED|NTHANDLE "
+			ssrIniEcho("SSR侦察: ini ssr.shared=1 → 2c 共享入向: 324/520 拷进 SHARED|NTHANDLE "
 			        "镜像 + CreateSharedHandle (R2 验证; 只写镜像不改画面; 逃生门 "
 			        "ssr.shared=0)");
 		else if (g_ssrSharedOn.load(std::memory_order_relaxed))
-			logLine("SSR侦察: ini ssr.shared=1 但 ssr=0 → 入向不生效 (ssr 是总门)");
+			ssrIniEcho("SSR侦察: ini ssr.shared=1 但 ssr=0 → 入向不生效 (ssr 是总门)");
 		// Step 2d-1 出向回写 (v0.18.0) —— **会动渲染** (VK 结果拷进 585), 所以再给一道独立门。
 		// 开着时 2b 哨兵让位 ⇒ 585 内容只可能来自 VK; 逃生门改 0 即退回"不动 585"的 2c 形态。
 		// 1 帧延迟: 本帧 Present 由 VK 填出向镜像, **下一帧**特征B 才拷进 585 (零跨 API 栅栏)。
@@ -3827,11 +4039,11 @@ void installProbeOn(ID3D11Device* dev)
 		if (g_ssrVkOutOn.load(std::memory_order_relaxed) &&
 		    g_ssrSharedOn.load(std::memory_order_relaxed) &&
 		    g_ssrOn.load(std::memory_order_relaxed))
-			logLine("SSR侦察: ini ssr.vkout=1 → 2d 出向回写: VK(读324镜像)→出向镜像→"
+			ssrIniEcho("SSR侦察: ini ssr.vkout=1 → 2d 出向回写: VK(读324镜像)→出向镜像→"
 			        " 下帧特征B CopyResource(出向→585); 2b 哨兵让位; 反射区显示上一帧"
 			        " 场景色错误画面 (与 2b 同观感, 验通路; 逃生门 ssr.vkout=0)");
 		else if (g_ssrVkOutOn.load(std::memory_order_relaxed))
-			logLine("SSR侦察: ini ssr.vkout=1 但 ssr.shared=0 或 ssr=0 → 出向不生效 "
+			ssrIniEcho("SSR侦察: ini ssr.vkout=1 但 ssr.shared=0 或 ssr=0 → 出向不生效 "
 			        "(需要 ssr=1 + ssr.shared=1 是总门)");
 		// ---- SSR v1 shader 采样 (v0.18.6): 出向内容从"原样拷"换成"跑一次全屏三角" ----
 		g_ssrV1On.store(iniFlag("ssr.v1", false), std::memory_order_relaxed);
@@ -3861,10 +4073,10 @@ void installProbeOn(ID3D11Device* dev)
 			const int ev = static_cast<int>(iniNum("ssr.edge", 0.0));
 			g_ssrV1Edge = (ev < 0) ? 0 : ((ev > 2) ? 2 : ev);
 			if (g_ssrV1Edge != ev)
-				logLine("ssr.edge = " + std::to_string(ev) + " 越界 -> 钳到 " +
+				ssrIniEcho("ssr.edge = " + std::to_string(ev) + " 越界 -> 钳到 " +
 				        std::to_string(g_ssrV1Edge) + " (合法值 0/1/2)");
 			else if (g_ssrV1Edge == 2)
-				logLine("ssr.edge = 2 (v0.18.16 未命中采真 cubemap) — 探针数据就绪前会先绑 1×1 占位图");
+				ssrIniEcho("ssr.edge = 2 (v0.18.16 未命中采真 cubemap) — 探针数据就绪前会先绑 1×1 占位图");
 		}
 		// ---- v0.18.14: 回注三旋钮 (软限幅 / 位移幅度 / 梯度增益), 默认 0 = 关或自动 ----
 		g_ssrV1RipK = static_cast<float>(iniNum("ssr.ripk", 0.0));
@@ -3899,7 +4111,7 @@ void installProbeOn(ID3D11Device* dev)
 				if (mf > 30.0) mf = 30.0;
 				g_ssrV1MissFade = static_cast<float>(mf);
 			}
-			logLine("SSR侦察: [cam] ini camrot=" + std::to_string(g_ssrV1CamOn) + " camslot=" +
+			ssrIniEcho("SSR侦察: [cam] ini camrot=" + std::to_string(g_ssrV1CamOn) + " camslot=" +
 			        std::to_string(g_ssrCamSlot) + " camidx=" + std::to_string(g_ssrCamIdx) +
 			        " camconj=" + std::to_string(g_ssrCamConj) + " cubeflip=" +
 			        std::to_string(fm) + " cubeelev=" +
@@ -3914,15 +4126,15 @@ void installProbeOn(ID3D11Device* dev)
 		g_probeTrackSec = static_cast<int>(iniNum("ssr.probeint", 2.0));
 		if (g_probeTrackSec < 0) g_probeTrackSec = 0;
 		if (g_probeTrackSec > 60) g_probeTrackSec = 60;
-		logLine("SSR侦察: ini ssr.probeint=" + std::to_string(g_probeTrackSec) +
+		ssrIniEcho("SSR侦察: ini ssr.probeint=" + std::to_string(g_probeTrackSec) +
 		        " (0=两拍冻结旧行为; >0=P1 跟踪重读间隔秒, 签名有变即换代重传)");
 		// v0.18.22: camdump 扩到 2 = 全槽普查 (每个(槽,条目)首次读回原始字节, 不做正交过滤)
 		const int camDumpV = static_cast<int>(iniNum("ssr.camdump", 0.0));
 		g_ssrCamDumpOn = (camDumpV < 0 || camDumpV > 2) ? 0 : camDumpV;
 		if (g_probeDumpOn)
-			logLine("SSR侦察: ini ssr.probedump=1 -> 探针 cube 6 面 PFM 每次换代落盘 (ssr-probe-face0..5.pfm, 插件目录)");
+			ssrIniEcho("SSR侦察: ini ssr.probedump=1 -> 探针 cube 6 面 PFM 每次换代落盘 (ssr-probe-face0..5.pfm, 插件目录)");
 		if (g_ssrCamDumpOn)
-			logLine("SSR侦察: [cam] ini ssr.camdump=" + std::to_string(g_ssrCamDumpOn) + " -> " +
+			ssrIniEcho("SSR侦察: [cam] ini ssr.camdump=" + std::to_string(g_ssrCamDumpOn) + " -> " +
 				(g_ssrCamDumpOn == 2
 					? "全槽普查: 每个(槽,条目)首次读回原始字节落盘 ssr-cams-all.txt (盖住 48B 槽)"
 					: "锁定条目首帧全量 hex 落盘一次 (ssr-camdump.txt)") + ", 插件目录");
@@ -3930,19 +4142,19 @@ void installProbeOn(ID3D11Device* dev)
 		g_ssrWDepOn.store(iniFlag("ssr.wdep", true), std::memory_order_relaxed);
 		if (g_ssrV1Near < 0.01f || g_ssrV1Far <= g_ssrV1Near)
 		{
-			logLine("SSR侦察: ssr.near/ssr.far 不合法 (" + std::to_string(g_ssrV1Near) +
+			ssrIniEcho("SSR侦察: ssr.near/ssr.far 不合法 (" + std::to_string(g_ssrV1Near) +
 			        " / " + std::to_string(g_ssrV1Far) + ") → 回退 10 / 100000");
 			g_ssrV1Near = 10.0f;
 			g_ssrV1Far = 100000.0f;
 		}
 		if (g_ssrV1Steps < 4.0f) // 着色器 stepLen = maxT / steps, 0 会除零
 		{
-			logLine("SSR侦察: ssr.steps 不合法 (" + std::to_string(g_ssrV1Steps) + ") → 回退 32");
+			ssrIniEcho("SSR侦察: ssr.steps 不合法 (" + std::to_string(g_ssrV1Steps) + ") → 回退 32");
 			g_ssrV1Steps = 32.0f;
 		}
 		if (g_ssrV1Dist < 1.0f)
 		{
-			logLine("SSR侦察: ssr.dist 不合法 (" + std::to_string(g_ssrV1Dist) + ") → 回退 500");
+			ssrIniEcho("SSR侦察: ssr.dist 不合法 (" + std::to_string(g_ssrV1Dist) + ") → 回退 500");
 			g_ssrV1Dist = 500.0f;
 		}
 		if (g_ssrV1Rev != 0.0f && g_ssrV1Rev != 1.0f)
@@ -3959,7 +4171,7 @@ void installProbeOn(ID3D11Device* dev)
 			g_ssrV1Ripple = 1.0f;
 		if (g_ssrV1Smooth < 1 || g_ssrV1Smooth > 16)
 		{
-			logLine("SSR侦察: ssr.smooth 不合法 (" + std::to_string(g_ssrV1Smooth) +
+			ssrIniEcho("SSR侦察: ssr.smooth 不合法 (" + std::to_string(g_ssrV1Smooth) +
 			        ") → 回退 4 (邻域 1..16 px)");
 			g_ssrV1Smooth = 4;
 		}
@@ -3967,7 +4179,7 @@ void installProbeOn(ID3D11Device* dev)
 			g_ssrV1Blur = 1;
 		if (g_ssrV1Debug < 0 || g_ssrV1Debug > 9)
 		{
-			logLine("SSR侦察: ssr.debug 不合法 (" + std::to_string(g_ssrV1Debug) +
+			ssrIniEcho("SSR侦察: ssr.debug 不合法 (" + std::to_string(g_ssrV1Debug) +
 			        ") → 回退 0 (0 正常/1 法线/2 命中/3 深度/4 段后水深/5 水面像素/"
 			        "6 回注可视化/7 uBase 原样/8 单位回补量/9 采样方向场)");
 			g_ssrV1Debug = 0;
@@ -3975,7 +4187,7 @@ void installProbeOn(ID3D11Device* dev)
 		// v0.18.10: 回注带宽 1..16 px, 回注方式 0/1; v0.18.11: 未命中回退源 0/1/2 (2 = v0.18.16 采真 cubemap)
 		if (g_ssrV1RippleSz < 1 || g_ssrV1RippleSz > 16)
 		{
-			logLine("SSR侦察: ssr.ripplesz 不合法 (" + std::to_string(g_ssrV1RippleSz) +
+			ssrIniEcho("SSR侦察: ssr.ripplesz 不合法 (" + std::to_string(g_ssrV1RippleSz) +
 			        ") → 回退 4 (1..16 px)");
 			g_ssrV1RippleSz = 4;
 		}
@@ -3994,7 +4206,7 @@ void installProbeOn(ID3D11Device* dev)
 		// => 改成按 0..2 钳, 只有真越界才回退, 并补日志 (老钳位是无声的)。
 		if (g_ssrV1Edge < 0 || g_ssrV1Edge > 2)
 		{
-			logLine("SSR侦察: ssr.edge 不合法 (" + std::to_string(g_ssrV1Edge) +
+			ssrIniEcho("SSR侦察: ssr.edge 不合法 (" + std::to_string(g_ssrV1Edge) +
 			        ") → 回退 1 (0 回原版层 / 1 屏幕边缘延展 / 2 采真 cubemap)");
 			g_ssrV1Edge = 1;
 		}
@@ -4019,7 +4231,7 @@ void installProbeOn(ID3D11Device* dev)
 		    g_ssrVkOutOn.load(std::memory_order_relaxed) &&
 		    g_ssrSharedOn.load(std::memory_order_relaxed) &&
 		    g_ssrOn.load(std::memory_order_relaxed))
-			logLine("SSR侦察: ini ssr.v1=1 → 出向内容改由 VK 全屏三角产出 (采 324+520, "
+			ssrIniEcho("SSR侦察: ini ssr.v1=1 → 出向内容改由 VK 全屏三角产出 (采 324+520, "
 			        "视图空间 ray march) mode=" + std::to_string(g_ssrV1Mode) +
 			        " fov=" + std::to_string(g_ssrV1Fov) + " near=" +
 			        std::to_string(g_ssrV1Near) + " far=" + std::to_string(g_ssrV1Far) +
@@ -4044,12 +4256,17 @@ void installProbeOn(ID3D11Device* dev)
 			        "; strength 现在是 SSR 替换比(0=原版); dist 单位 = near; 逃生门 ssr.v1=0 "
 			        "(R4 = 反推 inv(投影), 倒影位置/比例不对先调 fov, 深度反向先试 ssr.rev=1)");
 		else if (g_ssrV1On.load(std::memory_order_relaxed))
-			logLine("SSR侦察: ini ssr.v1=1 但 ssr/ssr.shared/ssr.vkout 有没开的 → v1 不生效 "
+			ssrIniEcho("SSR侦察: ini ssr.v1=1 但 ssr/ssr.shared/ssr.vkout 有没开的 → v1 不生效 "
 			        "(需要 ssr=1 + ssr.shared=1 + ssr.vkout=1)");
 	}
 	if (!g_probeOn.load(std::memory_order_relaxed))
 	{
 		LeaveCriticalSection(&g_cs);
+		// v0.18.33 T3: probe=0 但 sky=1 时仍要挂 ctx 槽33/47/50 —— 天空是**自己的一级**
+		// 逃生门 (ssr=0 → probe=0 → sky=0 → vulkan=0), 不被 probe 牵连。sky=0 时**不调**
+		// (installSsrRecon 整条从未被调用 ⇒ 连 C-5 挂载门行都不打 ⇒ 与 v0.18.32 逐字节一致)。
+		if (g_skyOn.load(std::memory_order_relaxed))
+			installSsrRecon(dev);
 		return;
 	}
 	for (int i = 0; i < g_devN; ++i)
@@ -4080,7 +4297,7 @@ void installProbeOn(ID3D11Device* dev)
 	logLine("探针升质: 槽5 已挂 (512² cube+配对depth→1024² + 回写desc, 逃生门 probe=0 / vulkan=0)");
 	LeaveCriticalSection(&g_cs);
 	installCtxProbe(dev); // v0.12 plan-B: 同设备 immediate context 槽44/45 (自身幂等)
-	installSsrRecon(dev); // v0.14.0 Step1/2a: SSR 侦察+身份 ctx 槽33/47/50 (幂等, 门控 ssr=1)
+	installSsrRecon(dev); // v0.14.0 Step1/2a: SSR 侦察+身份 ctx 槽33/47/50 (幂等, 门控 ssr=1|sky=1)
 }
 
 // 由 registerSwp (交换链一出现) / pocbInit (双保险) 调 —— 必须早于游戏创建探针
@@ -6241,7 +6458,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.32 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 25: 采样基底合成 q=conj(qcap)⊗qchain+换代快照; 26: probedump 每次换代落盘(诊断: PFM 恒=活跃 cube); 27: debug=9 采样方向场定标 + 恒等q守卫(复位占位不发布) + 第2发布点也落盘; 28: shader 产物补生成 —— make_shaders 此前未跑致 v17/v20/v27 ssr.frag 幻影, DLL 一直嵌 v16 旧 shader(miss 无旋转总根因, 修法=tools/spvsync 闸); 29: 撤销25基底合成(cube 世界轴对齐, 直发 q 即真世界方向) + debug 8/7 闸收窄(debug=9 的 hit 走正常合成); 30: P1 读回跟踪期(ssr.probeint 默认2s — 两拍定C1后周期重读探针, FNV 签名有变即换代重传, 修 miss 区外景冻结/队列#7); 31: miss 采样仰角视差补偿 ssr.cubeelev(spec constant 默认7° — 探针原点比真实反射点Q远, cube天际线低6-7°致 miss 区顶部过早切天空, 下压采样仰角对齐真实天际线, 修『从天空变成山峰』倒置/条目32); 32: miss 屏幕钳带交叉淡入 ssr.missfade(spec constant 默认10° — 探针不在反射点: cube 该方位=开放湖岸远景非本处近景, δ<22° miss 改采 Rf 无穷远投影钳回屏内 uColor 真近景+回补同乘权重, 深处渐交 cube 天空, 修『远景当近景』/条目33); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
+	logLine("==== poc-presenter v0.18.33 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 25: 采样基底合成 q=conj(qcap)⊗qchain+换代快照; 26: probedump 每次换代落盘(诊断: PFM 恒=活跃 cube); 27: debug=9 采样方向场定标 + 恒等q守卫(复位占位不发布) + 第2发布点也落盘; 28: shader 产物补生成 —— make_shaders 此前未跑致 v17/v20/v27 ssr.frag 幻影, DLL 一直嵌 v16 旧 shader(miss 无旋转总根因, 修法=tools/spvsync 闸); 29: 撤销25基底合成(cube 世界轴对齐, 直发 q 即真世界方向) + debug 8/7 闸收窄(debug=9 的 hit 走正常合成); 30: P1 读回跟踪期(ssr.probeint 默认2s — 两拍定C1后周期重读探针, FNV 签名有变即换代重传, 修 miss 区外景冻结/队列#7); 31: miss 采样仰角视差补偿 ssr.cubeelev(spec constant 默认7° — 探针原点比真实反射点Q远, cube天际线低6-7°致 miss 区顶部过早切天空, 下压采样仰角对齐真实天际线, 修『从天空变成山峰』倒置/条目32); 32: miss 屏幕钳带交叉淡入 ssr.missfade(spec constant 默认10° — 探针不在反射点: cube 该方位=开放湖岸远景非本处近景, δ<22° miss 改采 Rf 无穷远投影钳回屏内 uColor 真近景+回补同乘权重, 深处渐交 cube 天空, 修『远景当近景』/条目33); 33: 天空总闸 sky(ini sky 0/1 缺省0, T7才开) + 段7-end 六字段结构触发 (NumViews==3 且 RT0=1920x1080 RGBA16F 且 RT1/RT2 非空 且 DSV=1920x1080 D24家族; 首次不满足=段7-end; 判据纯结构化无抓帧 event id; sky=1 时挂载门独立于 ssr/probe, ssr=0 时 SSR侦察/探针/普查日志全静默); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
