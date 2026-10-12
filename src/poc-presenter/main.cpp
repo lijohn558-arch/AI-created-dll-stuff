@@ -503,6 +503,25 @@
  *   日志定名: `天空: ini sky=1 → 挂 ctx 槽33/47/50 (段7-end 结构触发)` (启动回显) /
  *     `[sky] 段7-end 触发#K 帧=F` (心跳, 前 8 条 + 每 60 条)。
  *
+ * ---- v0.18.34 T4: sky.preset 分档 (档位表 constexpr 编入 DLL ⇒ 换档 = 改 ini 不重编) ----
+ *   ini 键 (定名; 本计划 §Spec「分档设计」表 / docs/07 §3.6 表 / 本文件 kSkyTiers 三处
+ *   必须逐键逐值一致):
+ *     sky.preset        0..3 = 低/中/高/极致, **缺省 2**
+ *     sky.cloudscale    云渲染分辨率比例   0.50 / 0.66 / 0.75 / 1.00
+ *     sky.cloudsteps    raymarch 步数      32 / 48 / 64 / 128
+ *     sky.cloudtemporal 时域复用 0/1      0 / 1 / 1 / 1
+ *     sky.lutscale      天空视图 LUT 倍率 0.5 / 1 / 1 / 2
+ *   解析次序 (计划 §Spec「分档设计」规则句 + docs/07 §3.6「解析次序」):
+ *     ① preset 先展开成子键缺省表 (constexpr kSkyTiers) → ② 再逐键读显式 ini 覆盖
+ *     ⇒ **显式子键值覆盖档位值; 未显式设置的子键随档** (微调不换档 / 换档不覆盖微调)。
+ *   "是否显式设置" 用哨兵 -1 判定 (iniNum 找不到键时原样返回缺省值): 四个子键的合法域
+ *   全部 > -1 (cloudtemporal 的 0 是合法值, -1 不是) ⇒ -1 唯一代表"ini 里没写这一键"。
+ *   回显 (docs/07 §3.5 定名, 与上一段 T3 总闸回显**同块**打印; sky=0 时两条都不打):
+ *     天空: sky=1 preset=2 cloudscale=0.75 cloudsteps=64 cloudtemporal=1 lutscale=1
+ *     打的是**最终解析值** ⇒ knobchk 逐键可验 (单改一个子键 → 该键 = 覆盖值, 其余三键
+ *     仍随 preset 的档位值)。
+ *   本任务只做 解析 + 解析结果回显; 消费这五个量的是 T6 (VkSpecializationInfo 烘焙)。
+ *
  * 构建: GitHub Actions (build.yml job "poc-presenter"), 本地不编译
  * 安装: poc-presenter.dll 放入 <游戏>/Data/SKSE/Plugins/
  */
@@ -1225,6 +1244,86 @@ static void* g_skyRt0Obj = nullptr; // 本帧最近一次段7 的 RT0 资源身�
 static long  g_skyRt0Runs = 0;      // 本帧 RT0 换绑段数 (连续绑定段计数)
 static void* g_skySeg7Rt0 = nullptr; // 段7 内记住的 RT0 身份 (T5 入向拷贝目标)
 static void* g_skySeg7Dsv = nullptr; // 段7 内记住的 DSV 身份 (T5 搭车 461→520 用)
+
+// ---- v0.18.34 T4: sky.preset 分档表 + 最终解析值 ----
+// 档位表 `constexpr` 编进 DLL ⇒ **换档 = 改 ini 不重编** (计划 §Spec「性能分档」约束)。
+// 逐键逐值与 本计划 §Spec「分档设计」表 / docs/07 §3.6「ini 键名」表 一致 (三处一致闸)。
+// 索引 = sky.preset (0 低 / 1 中 / 2 高=缺省 / 3 极致)。
+struct SkyTier
+{
+	float cloudScale;    // 云渲染分辨率比例
+	int   cloudSteps;    // raymarch 步数
+	int   cloudTemporal; // 时域复用 0/1 (≥1 档开)
+	float lutScale;      // 天空视图 LUT 分辨率倍率
+};
+static constexpr SkyTier kSkyTiers[4] = {
+	{0.50f, 32, 0, 0.5f},  // 0 低 (同时是性能回退档, docs/07 §4.3 预案 B)
+	{0.66f, 48, 1, 1.0f},  // 1 中
+	{0.75f, 64, 1, 1.0f},  // 2 高 (缺省)
+	{1.00f, 128, 1, 2.0f}, // 3 极致
+};
+static constexpr int kSkyPresetDef = 2;
+
+// 最终解析值 (ini 缺省 ⇒ 缺省档表; ini 显式 ⇒ 覆盖)。**非 static**: T6 经
+// vkrenderer.h 的 extern 引用 (与 g_ssrV1* 同一套路), 本任务只解析+回显, 不接线。
+int   g_skyPreset = kSkyPresetDef;
+float g_skyCloudScale = kSkyTiers[kSkyPresetDef].cloudScale;
+int   g_skyCloudSteps = kSkyTiers[kSkyPresetDef].cloudSteps;
+int   g_skyCloudTemporal = kSkyTiers[kSkyPresetDef].cloudTemporal;
+float g_skyLutScale = kSkyTiers[kSkyPresetDef].lutScale;
+
+// 回显用的短小数格式 (0.75 而不是 0.750000, 1 而不是 1.000000) —— "%g" 正好给出
+// 档位表的字面形态 (docs/07 §3.5 定名行 `cloudscale=0.75 ... lutscale=1`)。
+static std::string skyNum(float v)
+{
+	char b[32];
+	std::snprintf(b, sizeof b, "%g", static_cast<double>(v));
+	return std::string(b);
+}
+
+// v0.18.34 T4: 解析 sky.preset + 四子键。**只在 ini 一次性解析块里调** (与 ssr.* 同一时机)。
+// 次序 (计划 §Spec 规则句 + docs/07 §3.6「解析次序」): preset 先展开子键缺省表 → 再逐键
+// 读显式 ini 覆盖 ⇒ 显式子键值覆盖档位值, 未显式设置的子键随档 (微调不换档 / 换档不覆盖微调)。
+// 哨兵 -1 = "ini 里没写这个键" (iniNum 找不到键时原样返回 def): 四个子键合法域全部 >= 0,
+// 故 -1 唯一代表缺省。cloudtemporal 的合法值 0 (0 档关时域) 与哨兵 -1 不冲突。
+static void skyTierResolve()
+{
+	// ---- ① 主控: sky.preset (0..3, 缺省 2) ----
+	const double pv = iniNum("sky.preset", static_cast<double>(kSkyPresetDef));
+	int preset = kSkyPresetDef;
+	if (pv >= 0.0 && pv <= 3.0)
+		preset = static_cast<int>(pv); // 0..3 直接取整 (iniNum 走 atof; 非整如 2.9 截到 2)
+	else
+		logLine("天空: sky.preset 不合法 (" + skyNum(static_cast<float>(pv)) +
+		        ") → 回退缺省档 2 (0 低 / 1 中 / 2 高 / 3 极致)");
+	g_skyPreset = preset;
+
+	// ---- ② 档位表展开成子键缺省值 (constexpr, 换档不重编) ----
+	const SkyTier t = kSkyTiers[g_skyPreset];
+	float cs = t.cloudScale;
+	int   st = t.cloudSteps;
+	int   tp = t.cloudTemporal;
+	float ls = t.lutScale;
+
+	// ---- ③ 逐键显式覆盖 (iniNum 的 -1 哨兵 = 该键未写 ⇒ 保持档位值) ----
+	const double vcs = iniNum("sky.cloudscale", -1.0);
+	const double vst = iniNum("sky.cloudsteps", -1.0);
+	const double vtp = iniNum("sky.cloudtemporal", -1.0);
+	const double vls = iniNum("sky.lutscale", -1.0);
+	if (vcs >= 0.0) // 分辨率比例: 0 会让云 RT 尺寸为 0 ⇒ 下限 0.01
+		cs = static_cast<float>(vcs) < 0.01f ? 0.01f : static_cast<float>(vcs);
+	if (vst >= 0.0) // raymarch 步数: 0 步 = 什么都不画 ⇒ 下限 1
+		st = static_cast<int>(vst) < 1 ? 1 : static_cast<int>(vst);
+	if (vtp >= 0.0) // 0/1 二值 (与 ssr.ripplemode 同款钳法)
+		tp = vtp > 0.5 ? 1 : 0;
+	if (vls >= 0.0) // LUT 倍率: 同 cloudscale, 下限 0.01
+		ls = static_cast<float>(vls) < 0.01f ? 0.01f : static_cast<float>(vls);
+
+	g_skyCloudScale = cs;
+	g_skyCloudSteps = st;
+	g_skyCloudTemporal = tp;
+	g_skyLutScale = ls;
+}
 
 // 静默承诺 (docs/07 §3.5 / 计划 T7 Review Focus 7): sky=1 且 ssr=0 时 `SSR侦察:` 前缀
 // **零出现**、探针/普查 logLine 零出现。sky=0 ⇒ 恒 true ⇒ 既有行为逐字节不变;
@@ -4008,10 +4107,21 @@ void installProbeOn(ID3D11Device* dev)
 		// sky 是**自己的一级**逃生门 (ssr=0 → probe=0 → sky=0 → vulkan=0): 与 ssr/probe/vulkan
 		// 各自独立, sky=1 时即使 ssr=0/probe=0 也要挂 ctx 槽33/47/50, 只为段7-end 结构触发。
 		// 档位子键 (sky.preset / sky.cloudscale / sky.cloudsteps / sky.cloudtemporal / sky.lutscale)
-		// 由 T4 解析并进同块回显; 本轮 (T3) 只有总闸一个键。回显文案定名 (docs/07 §3.5)。
+		// 由 T4 在下一行同块解析并回显 (`天空: sky=1 preset=… cloudscale=… …`)。
 		g_skyOn.store(iniFlag("sky", false), std::memory_order_relaxed);
 		if (g_skyOn.load(std::memory_order_relaxed))
+		{
 			logLine("天空: ini sky=1 → 挂 ctx 槽33/47/50 (段7-end 结构触发)");
+			// ---- v0.18.34 T4: 档位解析 + 全键回显 (与上一行同块打印, docs/07 §3.5 定名) ----
+			// 回显的是**最终解析值** (显式 ini 值已覆盖档位值), 故 knobchk 逐键可验:
+			// 单改一个子键 → 该键 = 覆盖值, 其余三键仍随 preset 的档位值。
+			skyTierResolve();
+			logLine("天空: sky=1 preset=" + std::to_string(g_skyPreset) +
+			        " cloudscale=" + skyNum(g_skyCloudScale) +
+			        " cloudsteps=" + std::to_string(g_skyCloudSteps) +
+			        " cloudtemporal=" + std::to_string(g_skyCloudTemporal) +
+			        " lutscale=" + skyNum(g_skyLutScale));
+		}
 		// Step 2b 通路哨兵的独立逃生门 —— 首次会动渲染 (324→585 回写), 与"只观察"分开:
 		// ssr=1 但 ssr.sentinel=0 ⇒ 纯观察, 2a 身份照样学; 出问题改 0 即退回只读。
 		g_ssrSentinelOn.store(iniFlag("ssr.sentinel", false), std::memory_order_relaxed);
@@ -6458,7 +6568,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.33 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 25: 采样基底合成 q=conj(qcap)⊗qchain+换代快照; 26: probedump 每次换代落盘(诊断: PFM 恒=活跃 cube); 27: debug=9 采样方向场定标 + 恒等q守卫(复位占位不发布) + 第2发布点也落盘; 28: shader 产物补生成 —— make_shaders 此前未跑致 v17/v20/v27 ssr.frag 幻影, DLL 一直嵌 v16 旧 shader(miss 无旋转总根因, 修法=tools/spvsync 闸); 29: 撤销25基底合成(cube 世界轴对齐, 直发 q 即真世界方向) + debug 8/7 闸收窄(debug=9 的 hit 走正常合成); 30: P1 读回跟踪期(ssr.probeint 默认2s — 两拍定C1后周期重读探针, FNV 签名有变即换代重传, 修 miss 区外景冻结/队列#7); 31: miss 采样仰角视差补偿 ssr.cubeelev(spec constant 默认7° — 探针原点比真实反射点Q远, cube天际线低6-7°致 miss 区顶部过早切天空, 下压采样仰角对齐真实天际线, 修『从天空变成山峰』倒置/条目32); 32: miss 屏幕钳带交叉淡入 ssr.missfade(spec constant 默认10° — 探针不在反射点: cube 该方位=开放湖岸远景非本处近景, δ<22° miss 改采 Rf 无穷远投影钳回屏内 uColor 真近景+回补同乘权重, 深处渐交 cube 天空, 修『远景当近景』/条目33); 33: 天空总闸 sky(ini sky 0/1 缺省0, T7才开) + 段7-end 六字段结构触发 (NumViews==3 且 RT0=1920x1080 RGBA16F 且 RT1/RT2 非空 且 DSV=1920x1080 D24家族; 首次不满足=段7-end; 判据纯结构化无抓帧 event id; sky=1 时挂载门独立于 ssr/probe, ssr=0 时 SSR侦察/探针/普查日志全静默); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
+	logLine("==== poc-presenter v0.18.34 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 25: 采样基底合成 q=conj(qcap)⊗qchain+换代快照; 26: probedump 每次换代落盘(诊断: PFM 恒=活跃 cube); 27: debug=9 采样方向场定标 + 恒等q守卫(复位占位不发布) + 第2发布点也落盘; 28: shader 产物补生成 —— make_shaders 此前未跑致 v17/v20/v27 ssr.frag 幻影, DLL 一直嵌 v16 旧 shader(miss 无旋转总根因, 修法=tools/spvsync 闸); 29: 撤销25基底合成(cube 世界轴对齐, 直发 q 即真世界方向) + debug 8/7 闸收窄(debug=9 的 hit 走正常合成); 30: P1 读回跟踪期(ssr.probeint 默认2s — 两拍定C1后周期重读探针, FNV 签名有变即换代重传, 修 miss 区外景冻结/队列#7); 31: miss 采样仰角视差补偿 ssr.cubeelev(spec constant 默认7° — 探针原点比真实反射点Q远, cube天际线低6-7°致 miss 区顶部过早切天空, 下压采样仰角对齐真实天际线, 修『从天空变成山峰』倒置/条目32); 32: miss 屏幕钳带交叉淡入 ssr.missfade(spec constant 默认10° — 探针不在反射点: cube 该方位=开放湖岸远景非本处近景, δ<22° miss 改采 Rf 无穷远投影钳回屏内 uColor 真近景+回补同乘权重, 深处渐交 cube 天空, 修『远景当近景』/条目33); 33: 天空总闸 sky(ini sky 0/1 缺省0, T7才开) + 段7-end 六字段结构触发 (NumViews==3 且 RT0=1920x1080 RGBA16F 且 RT1/RT2 非空 且 DSV=1920x1080 D24家族; 首次不满足=段7-end; 判据纯结构化无抓帧 event id; sky=1 时挂载门独立于 ssr/probe, ssr=0 时 SSR侦察/探针/普查日志全静默); 34: sky.preset 分档(0低/1中/2高缺省/3极致, 档位表 constexpr 编入 DLL 换档只改 ini) + 四子键 sky.cloudscale/cloudsteps/cloudtemporal/lutscale 显式 ini 值覆盖档位值、未写则随档, 全键进 `天空:` 启动回显行(knobchk 逐键可验); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)
