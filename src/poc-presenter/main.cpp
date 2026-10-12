@@ -3192,7 +3192,11 @@ static void skyInBuild(ID3D11DeviceContext* ctx)
 
 // 源换了 (换分辨率 / 换场景换了资源) ⇒ 旧镜像的 desc 与新源对不上, CopyResource 会**静默丢弃**。
 // 退掉旧镜像让 skyInBuild 按新源重建 (与 ssrWDepQueue 的「源 desc 变了 ⇒ 镜像重建」同一手法);
-// 老式 handle 归资源所有, 不 CloseHandle (与 2c 同口径)。VK 侧靠 handle 变化自愈重导入。
+// VK 侧靠 handle 变化自愈重导入。
+// ⚠️ **handle 按轴分两种归属, 必须区别处理** (同 ssrInBuild 失败路径那句注释的口径):
+//   · KMT/老式轴 (IDXGIResource::GetSharedHandle) = 资源所有 ⇒ 不 CloseHandle
+//   · NT 轴 (IDXGIResource1::CreateSharedHandle) = **我方所有** ⇒ 必须 CloseHandle;
+//     否则那个打开的 NT handle 会一直钉住共享分配 (skyIn 是 16 MB RGBA16F), 每换一次源泄漏一份。
 static void skyMirrorDrop(ID3D11Texture2D** tex, HANDLE* h, bool* kmt, void* prevSrc, void* src,
                           const char* nm)
 {
@@ -3202,6 +3206,8 @@ static void skyMirrorDrop(ID3D11Texture2D** tex, HANDLE* h, bool* kmt, void* pre
 	        ") → 旧镜像 desc 过时, 退掉按新源重建");
 	(*tex)->Release();
 	*tex = nullptr;
+	if (*h && !*kmt)
+		CloseHandle(*h); // 只 NT 轴归我方 (KMT/老式轴归资源, 不能关)
 	*h = nullptr;
 	*kmt = false;
 	g_skyInBuilt = false; // 就绪行会再打一次 (新的两张都齐之后)
@@ -3256,6 +3262,9 @@ static bool skyDepthRide(ID3D11Resource* pDst, ID3D11Resource* pSrc, unsigned lo
 	{
 		// 520 换了资源 (跨场景/换分辨率) ⇒ 旧 skyDepth 镜像 desc 过时, 先退再持新引用
 		skyMirrorDrop(&g_skyInTexD, &g_skyInHD, &g_skyInDepthKmt, g_skyDepthResObj, dobj, "skyDepth");
+		// 身份换了 ⇒ 那条「520 与段7 深度目标一致 ✓」的证据要重新出一次 (否则换场景后
+		// 整个会话再也不会打, docs/07 §3.4 要的跨帧确认就断了)
+		g_skyRidden = false;
 		if (g_skyDepthRes)
 			g_skyDepthRes->Release();
 		pDst->AddRef(); // 活引用: 520 归游戏, 我方拷完之前它必须活着 (同 2a 持 324/520 的做法)
