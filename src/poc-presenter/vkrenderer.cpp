@@ -4193,6 +4193,19 @@ static bool ssrV1Build(PocbCtx& c, unsigned w, unsigned h)
 		st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 		st[1].module = g_ssrV1Fs;
 		st[1].pName = "main";
+		// v0.18.31: ssr.cubeelev 走 spec constant (constant_id=0), 不扩 128B push constant
+		// 规范下限。管线惰建于首次录制 = ini 已解析完毕 ⇒ 值在此定格; 改 ini 重启生效
+		// (与其余旋钮同口径)。值恒由 ini 读出后 clamp, 不进 ssrV1Sig (管线不重建, 掺了白重录)。
+		VkSpecializationMapEntry ssrSme{};
+		ssrSme.constantID = 0;
+		ssrSme.offset = 0;
+		ssrSme.size = sizeof(float);
+		VkSpecializationInfo ssrSpi{};
+		ssrSpi.mapEntryCount = 1;
+		ssrSpi.pMapEntries = &ssrSme;
+		ssrSpi.dataSize = sizeof(float);
+		ssrSpi.pData = &g_ssrV1CubeElev;
+		st[1].pSpecializationInfo = &ssrSpi;
 		VkPipelineVertexInputStateCreateInfo vi{};
 		vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 		VkPipelineInputAssemblyStateCreateInfo ia{};

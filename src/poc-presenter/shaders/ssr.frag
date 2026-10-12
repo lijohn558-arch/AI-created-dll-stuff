@@ -170,6 +170,15 @@ layout(push_constant) uniform PC
 	vec4 p7; // v0.18.17 P3: x,y,z = cube 轴校准符号 (±1, ini ssr.cubeflip)  w = 开关 (1 = Rf 转世界空间采 uProbe)
 } pc;
 
+// v0.18.31: miss 采样仰角视差补偿 (度; ini ssr.cubeelev, 默认 7, 0=关)。
+// 为什么: 探针原点比真实反射点 Q 远 (Screenshot_103 纵扫实测 cube 天际线 +19° vs
+// 边界 δ≈24.5 处真实天际线 ~+25.5°) ⇒ miss 区顶部过早切成天空, 与命中带的坡面镜像
+// 硬接, 更深处游戏基底层 (585 平面镜像) 的树又冒出来 ⇒ [坡面][天空][山峰] 倒置。
+// 修法: 采样方向仰角整体下压 kCubeElev° (方位角不变), cube 地形带对齐真实天际线,
+// 边界处与命中带无缝续接, 往深处再渐变成天空。走 spec constant (id0), 不扩 128B
+// push constant 规范下限; 管线建时烘焙 = ini 重启生效。仅 miss/edge=2 采 uProbe 前生效。
+layout(constant_id = 0) const float kCubeElev = 0.0;
+
 layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 oColor;
 
@@ -518,7 +527,7 @@ void main()
 					vec3 rw = Rf + 2.0 * cross(qv, cross(qv, Rf) + pc.p6.w * Rf);
 					d = normalize(rw) * pc.p7.xyz;
 				}
-				// v0.18.27 debug=9: 把**最终采样方向 d** 渲成 RGB (d*0.5+0.5) —— 一张截图直接读出:
+				// v0.18.27 debug=9: 把**几何采样方向** d 渲成 RGB (d*0.5+0.5) —— 一张截图直接读出:
 				// 变换在不在跑 (d 场随姿态整体转动 = 在跑, 纹丝不动 = 被绕过)、每个 miss 像素落到
 				// cube 哪个面哪个纹素 (面缝/极点在 d 场里是规则几何线), 轴符号对不对 (同一物理方向
 				// 在 A/C 两姿态下 d 是否一致)。hit 像素照常走合成 ⇒ 命中/未命中分界仍可读;
@@ -527,6 +536,18 @@ void main()
 				{
 					oColor = vec4(d * 0.5 + 0.5, 1.0);
 					return;
+				}
+				// v0.18.31: 视差仰角补偿 —— 只压**采样**仰角 (方位角不变), 不动行进/命中判定,
+				// 也不进上面的 debug=9 调试图 (那张恒 = 纯方向链, 旋钮拧到天边也不变)。
+				// p7.w=0 (未旋, v0.18.16d 路径) 时 d 是视图空间方向, 仰角无世界语义 ⇒ 不压。
+				if (pc.p7.w > 0.5 && kCubeElev != 0.0)
+				{
+					float hl = length(d.xy);
+					if (hl > 1e-6)
+					{
+						float el = atan(d.z, hl) - radians(kCubeElev);
+						d = normalize(vec3(d.xy * (cos(el) / hl), sin(el)));
+					}
 				}
 				// v0.18.20: 隐式 LOD 按 d 的屏幕导数取 mip —— 平缓水面相邻像素的方向导数趋零,
 				// 顶格采到最高层 mip, 等于在游戏原生内容上又叠一层糊 (实拍: 地形色块在、草树影像无);
