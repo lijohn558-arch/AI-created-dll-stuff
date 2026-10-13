@@ -5721,25 +5721,24 @@ static bool skyPassBuild(PocbCtx& c)
 		const unsigned int* spv[4] = {kSkyProbeSpv, kSkyLutSpv, kSkyCloudSpv, kSkyCompSpv};
 		const size_t spvSz[4] = {kSkyProbeSpvBytes, kSkyLutSpvBytes, kSkyCloudSpvBytes, kSkyCompSpvBytes};
 		// 档位 → spec constant (float 声明, 与 kCubeElev/kMissFade 同款数据块口径):
-		//   LUT  : kLutSteps (lutscale 0.5/1 -> 16, 2 -> 28), kSunThreshDeg=0.35 (低频重算阈值)
+		//   LUT  : kLutSteps (lutscale 0.5/1 -> 16, 2 -> 28), kSunThreshDeg=0.35 (低频重算阈值),
+		//          kMulti=1.0 (各向同性多次散射填充), kSunFloor=0.02 (太阳能量下限),
+		//          kCap=2.5 (相对参考值的动态范围上限, 保色相软膝)
 		//   云   : kSteps (sky.cloudsteps 档位值), kHistory (cloudtemporal ? 0.55 : 0),
-		//          kMs=0.03 (多次散射地板), kDistFade=1/6000 (空气透视),
-		//          kAmb=1.3 (环境项倍数), kFace=32 (受光面标定)
-		//   云   : kSteps (sky.cloudsteps 档位值), kHistory (cloudtemporal ? 0.55 : 0),
-		//          kMs=0.03 (多次散射地板), kDistFade=1/6000 (空气透视),
+		//          kMs=0.20 (多次散射地板), kDistFade=1/6000 (空气透视),
 		//          kAmb=1.3 (环境项倍数), kFace=42 (受光面标定), kFaceMax=3.0 (乘积上限)
 		//   合成 : kMix=0.85 (掩码内与原版混合比), kFade=1e-6 (掩码边缘过渡宽度, 像素尺度)
 		// 探针无 spec constant (纯函数, 无档位依赖)。
-		// 云那五个新常量的取值理由见 sky_cloud.frag 顶部注释 (全部以 LUT 天顶散射 zen
-		// 为单位: 受光面 ≈ 2×zen, 云底/内部 ≈ 0.5×zen)。
+		// LUT 那几个常量的理由见 sky_lut.frag 顶部, 云那几个见 sky_cloud.frag 顶部;
+		// 两者都以 LUT 的**参考 texel** (背阳中天) 为量级单位, 不再是天顶。
 		// ⚠️ **VkSpecializationInfo 的数据永远覆盖 SPIR-V 里的默认值** —— 下面的字面量必须
-		// 与 sky_cloud.frag 的 layout(constant_id=…) 默认值逐个对齐, 否则文档里写的标定
+		// 与 sky_*.frag 的 layout(constant_id=…) 默认值逐个对齐, 否则文档里写的标定
 		// 描述的就不是真正在跑的着色器 (kFace 就这样错过一次: GLSL 已改 42, 这里还是 32)。
 		float lutSteps = (g_skyLutScale > 1.5f) ? 28.0f : 16.0f;
-		float lutData[2] = {lutSteps, 0.35f};
+		float lutData[5] = {lutSteps, 0.35f, 1.0f, 0.02f, 2.5f};
 		float cloudData[7] = {(float)(g_skyCloudSteps > 0 ? g_skyCloudSteps : 64),
 		                     (g_skyCloudTemporal > 0) ? 0.55f : 0.0f,
-		                     0.03f,          // kMs
+		                     0.20f,          // kMs
 		                     1.0f / 6000.0f, // kDistFade
 		                     1.3f,           // kAmb
 		                     42.0f,          // kFace  (侧向 42*0.036*1.18 ≈ 1.78×zen)
@@ -5754,6 +5753,13 @@ static bool skyPassBuild(PocbCtx& c)
 		me[1].constantID = 1;
 		me[1].offset = sizeof(float);
 		me[1].size = sizeof(float);
+		VkSpecializationMapEntry me5[5]{};
+		for (int i = 0; i < 5; ++i)
+		{
+			me5[i].constantID = (uint32_t)i;
+			me5[i].offset = (uint32_t)(sizeof(float) * i);
+			me5[i].size = sizeof(float);
+		}
 		VkSpecializationMapEntry me7[7]{};
 		for (int i = 0; i < 7; ++i)
 		{
@@ -5762,8 +5768,8 @@ static bool skyPassBuild(PocbCtx& c)
 			me7[i].size = sizeof(float);
 		}
 		VkSpecializationInfo spec[4]{};
-		spec[1].mapEntryCount = 2;
-		spec[1].pMapEntries = me;
+		spec[1].mapEntryCount = 5;
+		spec[1].pMapEntries = me5;
 		spec[1].dataSize = sizeof(lutData);
 		spec[1].pData = lutData;
 		spec[2].mapEntryCount = 7;

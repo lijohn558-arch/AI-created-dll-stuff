@@ -58,8 +58,12 @@ layout(push_constant) uniform SkyPC
 //             钳乘积而不是钳相位: 前向/侧向之比仍保留 3.0/1.51 ≈ 2.0 倍 (银边还在),
 //             但绝对峰值被钉在 3.0*1.18 ≈ 3.5×zen —— 正好落在「前向峰 2~4×zen」的设计意图里。
 //   kMs     = **多次散射地板**: 厚云内部的亮光主要来自多次散射, 单次散射的 beer 在
-//             深内部必然趋 0, 所以给直接项加一个下限。0.03 ⇒ 内部直接项 ≈ 1.51*0.03
-//             ≈ 0.045×zen, 加上环境项 0.45~1.3×zen ⇒ 落在 0.5~1.35×zen 的灰蓝区间。
+//             深内部必然趋 0。0.03 (上一轮) ⇒ 内部只有 1.51*0.03 ≈ 0.045×zen, 剩下的
+//             0.47×zen 全靠环境项 ⇒ 背光/厚处读成**暗灰** (Screenshot_108 那一坨)。
+//             取 **0.20**: 内部直接项 = faceK*kMs = 1.51*0.20 = 0.30×zen, 加上环境项
+//             (云底 0.45 / 云中 0.62 / 云顶 1.30) ⇒ 内部落在 0.75~1.60×zen 的白灰区间;
+//             受光面 = 1.51*1.18 + 0.30 = 2.08×zen (侧向) 与 3.0*1.18+0.30 = 3.84×zen
+//             (正前, kFaceMax 生效) ⇒ 仍保留明确的方向性明暗, 不会糊成一片。
 //   kAmb    = 环境项倍数: 云底 (hf=0) 拿 0.35×kAmb, 云顶拿 1.0×kAmb。取 1.3 ⇒
 //             云底 0.45×zen、云顶 1.3×zen —— 云顶比云底亮, 符合实际云 (上表面受光)。
 //   kDistFade = 空气透视: 只对**远于 4 km** 的云段衰减 (见 main 里的 far), 天顶那段
@@ -67,7 +71,7 @@ layout(push_constant) uniform SkyPC
 // 一律 float 声明 (数据块按 float 传, 与 kCubeElev/kMissFade 同款)。
 layout(constant_id = 0) const float kSteps = 64.0;
 layout(constant_id = 1) const float kHistory = 0.55;
-layout(constant_id = 2) const float kMs = 0.03;
+layout(constant_id = 2) const float kMs = 0.20;
 layout(constant_id = 3) const float kDistFade = 1.0 / 6000.0;
 layout(constant_id = 4) const float kAmb = 1.3;
 layout(constant_id = 5) const float kFace = 42.0;
@@ -203,8 +207,10 @@ void main()
 	float faceK = min(kFace * phN, kFaceMax);
 	// 太阳低于地平线 => 不给直射 (S5 夜间场景)
 	float sunUp = clamp(sunDir.y * 6.0 + 0.15, 0.0, 1.0);
-	// 帧内量级基准: LUT 天顶散射 (与合成 pass 的 gain 用的是同一个锚点)。
-	vec3 zen = texture(uLut, vec2(0.5, 0.98)).rgb;
+	// 帧内量级基准: **LUT 的参考 texel** (u=0.5 背阳, v=V_REF=0.7568, 与 LUT 内部做范围
+	// 压缩用的是同一个 texel; 见 sky_lut.frag 的 compressLum)。**必须与 sky_comp.frag
+	// 的 refLuminance 采同一个点**, 否则云与天空的标定会分叉。
+	vec3 zen = texture(uLut, vec2(0.5, 0.7568)).rgb;
 	vec3 skyAmb = zen * kAmb * sunUp;
 	vec3 scat = vec3(0.0);
 	float trans = 1.0;
