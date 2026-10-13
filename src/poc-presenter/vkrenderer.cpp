@@ -5559,7 +5559,7 @@ static bool skyPassBuild(PocbCtx& c)
 		ps.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		ps.descriptorCount = 5;
 		VkDescriptorPoolCreateInfo pi{};
-		pi.sType = VK_DESCRIPTOR_POOL_CREATE_INFO;
+		pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		pi.maxSets = 4;
 		pi.poolSizeCount = 1;
 		pi.pPoolSizes = &ps;
@@ -5575,7 +5575,7 @@ static bool skyPassBuild(PocbCtx& c)
 		{
 			VkDescriptorSetLayout lays[4] = {g_skyPassDsl, g_skyPassDsl, g_skyPassDsl, g_skyPassDsl};
 			VkDescriptorSetAllocateInfo ai{};
-			ai.sType = VK_DESCRIPTOR_SET_ALLOCATE_INFO;
+			ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
 			ai.descriptorPool = g_skyPassDp;
 			ai.descriptorSetCount = 4;
 			ai.pSetLayouts = lays;
