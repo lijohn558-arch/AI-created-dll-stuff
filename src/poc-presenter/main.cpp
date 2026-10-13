@@ -1697,6 +1697,17 @@ static long          g_camCenOvf[kCamSlotN] = {};  // 槽内第 kCamEntN+1 个�
 static uint64_t      g_camCenNext = 0; // 下次打普查行的帧号
 static uint64_t      g_camCenFr0 = 0;  // 本区间起始帧号 (行内报帧数做归一)
 static uint32_t      g_camCenN = 0;    // 普查行序号
+// ---- v0.18.41 T8 (计划 2026-10-13-clouds-over-vanilla): 相机入向扩展 + 普查通道 ----
+// 相机捕获不再是 ssr 的附庸: 捕获闸 = (ssr 侧原条件) 或 (sky=1 且 sky.census=1), 两条路径的
+// 拷贝节流完全同款 (每帧至多一次 staging 拷贝, 下帧 Present 才 Map)。默认两侧都关 ⇒
+// 逐字节保持 v0.18.40 行为; sky=0 时下面这些活值没人读 (零命令零日志)。
+std::atomic<bool> g_skyCapOn{false};  // ini sky.census (0/1, 缺省 0) = 天空侧的相机捕获/普查门
+float g_skyTanHalfFovY = 0.0f;         // 活值 tan(fovY/2): 捕到投影矩阵前 = ini ssr.fov 推得值
+float g_skyAspect = 0.0f;              // 活值 aspect: 0 = 未捕获 (发布侧回退 RT 宽高比)
+float g_skyCamPos[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // (x,y,z,w) w=known 0/1 (T9 的 pad 源)
+static bool g_skyFovGot = false;       // 投影矩阵反推成功过 (成功日志只打这一条)
+static bool g_skyCenOpen = false;      // sky-census.txt 首篇 "wb" 已截断 (防上局残留)
+static bool g_skyCenBad = false;       // sky-census.txt 打不开过 (只报一次, 防每帧刷屏)
 
 // ---- v0.18.16 (issue B / P1 探测): 水体探针 cube 的 CPU 侧镜像, 交给 VK 上传 ----
 // D3D11 这半边 (probeDumpTick) 用 STAGING 把 g_probeCube 读回来, 紧凑排成 6 面;
@@ -3928,6 +3939,253 @@ static void camHexRows(FILE* fp, const unsigned char* data, UINT bytes)
 	}
 }
 
+// ---- v0.18.41 T8 Step 1: 相机捕获闸 (解耦) ----
+// ssr 分支与 v0.18.40 逐字节同条件 (camrot=1 且 edge>=2 且 ssr 总闸); sky 分支是新增的
+// 独立逃生门 (sky=1 且 sky.census=1), 供 T9 取真实相机位姿/视场与 Step 4 普查用。
+// camMapTick 也走同一个闸: 否则 sky 侧拷了没人 Map, 或者 ssr=0 时白白扫一遍 pend。
+// 关于静默承诺: sky.census 缺省 0 ⇒ 闸全关 ⇒ [cam] 那几行既不会被执行也不会被打出,
+// `SSR侦察:` 零出现照旧; 只有**显式**开普查的会话 (census=1) 才让 [cam] 的诊断行出声 ——
+// 那正是普查会话要的证据, 且那条会话本来就 sky=1 ssr=0 census=1 三键显式。
+static bool camCapOn()
+{
+	return (g_ssrOn.load(std::memory_order_relaxed) && g_ssrV1CamOn && g_ssrV1Edge >= 2) ||
+	       (g_skyOn.load(std::memory_order_relaxed) && g_skyCapOn.load(std::memory_order_relaxed));
+}
+
+// ---- v0.18.41 T8 Step 3: 投影矩阵特征 (从已锁定的 4x4 里认出来) ----
+// 判别式用"除对角三条外几乎全零", 不用 m11≈-1 的硬形状: docs/02 条目25 那台机是反向深度,
+// 其 m11=-15.00064 (=-f*n/(f-n), n=15) 而不是 -1, 硬编码形状会整类漏检。
+// 对角按 D3D 惯例 m0=1/tanHalfX, m5=1/tanHalfY 读 ⇒ tanHalfFovY=1/m5, aspect=m5/m0
+// (行主序/列主序两种存法的对角与非对角零位相同 ⇒ 这个特征与存法无关)。
+// docs/02 已知案例: m0=1.0, m5=1.7777778 ⇒ tanHalf=0.5625 ⇒ fovY=58.7155°, aspect=16:9。
+// 最后那道至少一条对角偏离 1 超过 5e-4 是**排他**用的: 纯正交阵 (相机复位占位的单位阵,
+// 或正对着看时的视图) 对角恰为 1, 那不是投影矩阵 —— 放过它会把 fov 写成 90°。
+static bool skyProjHit(const float* m)
+{
+	const float d0 = m[0], d1 = m[5], d2 = m[10];
+	if (!(d0 > 0.0f) || !(d1 > 0.0f) || !(std::fabs(d2) > 0.5f))
+		return false; // 前两条正 (视口宽高都是正) + 第三条带深度项
+	if (d0 > 64.0f || d1 > 64.0f || d2 > 64.0f)
+		return false; // 无穷远正交时 m10 会爆掉, 那种矩阵不是有限远投影
+	if (d0 < 1.0005f && d1 < 1.0005f)
+		return false; // 对角前两条都贴着 1 ⇒ 正交阵嫌疑 (见上)
+	const float sc = (d0 > d1 ? d0 : d1);
+	// 行主序存法的非对角零位: m1 m2 m3 / m4 m6 m7 / m8 m9 + 末行的 m12 m13;
+	// m11 与 m14/m15 不查 (深度项本身, 且列主序存法下平移落在 m12 m13 m14)。
+	static const int kOff[10] = {1, 2, 3, 4, 6, 7, 8, 9, 12, 13};
+	for (int i = 0; i < 10; ++i)
+		if (std::fabs(m[kOff[i]]) > 1e-4f * sc)
+			return false;
+	return true;
+}
+static void skyFovPick(const float* m, int slot, int ent, int off)
+{
+	if (g_skyFovGot) // 只取第一次 (之后不再打日志, 也不再改值)
+		return;
+	const float tanY = 1.0f / m[5];
+	const float asp = m[5] / m[0];
+	if (!(tanY > 0.05f && tanY < 4.0f) || !(asp > 0.2f && asp < 5.0f))
+		return; // 越界 ⇒ 不认 (宁可维持 ini 回退)
+	g_skyTanHalfFovY = tanY;
+	g_skyAspect = asp;
+	g_skyFovGot = true;
+	if (!g_skyOn.load(std::memory_order_relaxed))
+		return; // sky=0 时不发天空日志 (静默承诺); 值照旧更新, sky=0 没人读
+	const double deg = 2.0 * std::atan(static_cast<double>(tanY)) * 180.0 / 3.14159265358979323846;
+	logLine("天空: 投影矩阵反推 槽" + std::to_string(slot) + "." + std::to_string(ent) +
+	        " off=" + std::to_string(off) + " m0=" + std::to_string(m[0]) + " m5=" +
+	        std::to_string(m[5]) + " => tanHalfFovY=" + std::to_string(tanY) + " fovY=" +
+	        std::to_string(deg) + " aspect=" + std::to_string(asp) +
+	        " 已取代 ini ssr.fov 的推得值");
+}
+
+// ---- v0.18.41 T8 Step 2: 4x4 的平移列 -> g_skyCamPos ----
+// 约定 (行主序存的 4x4 里平移落在第 4 列) 是**待普查实证**的那一条: 这里先按第 4 列取,
+// 不过合理性闸就再试第 4 行 (列主序存法) 并说一声 —— 两种存法各写一次, 哪条命中就是哪条
+// 存法, 普查会话之前就能定论。合理性闸: 有限, |x|,|y|,|z| < 1e7, y 落在 [-1e5, 1e6],
+// 且三者和 > 1e-3 (排掉纯投影/单位阵那种平移恰为 0 的退化块, 否则 known 会假阳 1)。
+static bool skyPosPlausible(const float* p)
+{
+	const float x = p[0], y = p[1], z = p[2];
+	return std::isfinite(x) && std::isfinite(y) && std::isfinite(z) && std::fabs(x) < 1e7f &&
+	       std::fabs(y) < 1e7f && std::fabs(z) < 1e7f && y >= -1e5f && y <= 1e6f &&
+	       std::fabs(x) + std::fabs(y) + std::fabs(z) > 1e-3f;
+}
+static void skyCamPosPublish(const float* m, int slot, int ent, int off)
+{
+	const float col[4] = {m[3], m[7], m[11], m[15]}; // 行主序: 第 4 列
+	static bool rowWarned = false;
+	if (skyPosPlausible(col))
+	{
+		g_skyCamPos[0] = col[0];
+		g_skyCamPos[1] = col[1];
+		g_skyCamPos[2] = col[2];
+		g_skyCamPos[3] = 1.0f; // known
+		return;
+	}
+	const float row[4] = {m[12], m[13], m[14], m[15]}; // 列主序存法: 第 4 行
+	if (skyPosPlausible(row))
+	{
+		g_skyCamPos[0] = row[0];
+		g_skyCamPos[1] = row[1];
+		g_skyCamPos[2] = row[2];
+		g_skyCamPos[3] = 1.0f;
+		if (!rowWarned)
+		{
+			rowWarned = true;
+			if (g_skyOn.load(std::memory_order_relaxed))
+				logLine("天空: 相机平移不在 4x4 第 4 列而在第 4 行 => 该 cb 是列主序存法; pos=(" +
+				        std::to_string(g_skyCamPos[0]) + "," + std::to_string(g_skyCamPos[1]) +
+				        "," + std::to_string(g_skyCamPos[2]) + ") 槽" + std::to_string(slot) +
+				        "." + std::to_string(ent) + " off=" + std::to_string(off));
+		}
+		return;
+	}
+	g_skyCamPos[3] = 0.0f; // 不合理 => known=0 (xyz 保留上次值, 读方必须看 w)
+}
+
+// ---- v0.18.41 T8 Step 4: 普查 (仅 sky.census=1; 默认关 => 零输出) ----
+// 枚举全部过 camBlockOk 的 (槽,条目,offset), **排除相机自己那条锁定项** (那是 T9 的
+// 已知来源, 不是待钉项)。同偏移连续 3/3 次稳定才落第一行, 之后方向变化 >2° 再落一行。
+// 方向用与发布链同款的重建 (D^f·C^T·D) 取第 3 列 = 世界系前方, 退化时退回候选自身第 3 列。
+static const int kSkyCenMax = 24; // (槽,条目) 观察槽位上限 (14 槽 × 少数条目, 够用且有界)
+struct SkyCenEnt
+{
+	int   slot;
+	int   ent;
+	int   off;      // 当前选中的候选 offset
+	int   streak;   // 同 off 连续命中次数
+	int   lines;    // 已追加的行数 (封顶防刷文件)
+	bool  reported; // 已落过第一行
+	float dir[3];   // 上次落行的方向 (归一化)
+	bool  dirLog;   // 方向变化行是否已打过日志 (只打第一次)
+};
+static SkyCenEnt g_skyCen[kSkyCenMax] = {};
+static int g_skyCenN = 0;
+static void skyCenDir(const float* c9, bool flip, bool col, float d[3])
+{
+	float chain[9];
+	for (int i = 0; i < 3; ++i)
+		for (int j = 0; j < 3; ++j)
+			chain[i * 3 + j] = c9[j * 3 + i]; // C^T
+	if (col)
+	{
+		if (flip)
+			for (int j = 0; j < 3; ++j)
+				chain[2 * 3 + j] = -chain[2 * 3 + j];
+		for (int i = 0; i < 3; ++i)
+			chain[i * 3 + 2] = -chain[i * 3 + 2];
+	}
+	else if (!flip)
+		for (int i = 0; i < 3; ++i)
+			chain[i * 3 + 2] = -chain[i * 3 + 2];
+	for (int i = 0; i < 3; ++i)
+		d[i] = chain[2 * 3 + i];
+	float n = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+	if (!(n > 0.5f)) // 重建链退化 => 退回候选自身的前向量
+	{
+		for (int i = 0; i < 3; ++i)
+			d[i] = c9[2 * 3 + i];
+		n = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+		if (!(n > 0.5f))
+		{
+			d[0] = 0.0f;
+			d[1] = 0.0f;
+			d[2] = 1.0f;
+			return;
+		}
+	}
+	for (int i = 0; i < 3; ++i)
+		d[i] /= n;
+}
+static void skyCenWrite(int slot, int ent, int off, const float* d, const unsigned char* raw)
+{
+	const std::string path = pluginDir() + "\\sky-census.txt";
+	FILE* fp = fopen(path.c_str(), g_skyCenOpen ? "ab" : "wb");
+	if (!fp)
+	{
+		if (!g_skyCenBad)
+		{
+			g_skyCenBad = true;
+			logLine("天空普查: 打不开 " + path + " (之后不再重试打屏)");
+		}
+		return;
+	}
+	if (!g_skyCenOpen)
+	{
+		g_skyCenOpen = true;
+		const std::string hd =
+		    "# sky-census v0.18.41 (T8 Step 4) -- CAND 行 = 一个过 camBlockOk 的 (槽,条目,偏移); "
+		    "dir = 世界系前方 (D^f·C^T·D 的第 3 列); 下面 3 行是 3x3 的 hex/float (偏移相对 off)\n";
+		fwrite(hd.data(), 1, hd.size(), fp);
+	}
+	char ln[160];
+	const int n = std::snprintf(ln, sizeof ln, "CAND slot=%d entry=%d off=%d dir=(%.4f,%.4f,%.4f)\n",
+	                            slot, ent, off, d[0], d[1], d[2]);
+	fwrite(ln, 1, static_cast<size_t>(n), fp);
+	camHexRows(fp, raw, 48); // 3x3 = 48B = 每行 1 个 vec4
+	fclose(fp);
+}
+// 每 (槽,条目) 一次调 (camParse 里); 主候选 offset 用 camParse 同一口径 (ssr.camidx 下标)。
+static void skyCenScan(int slot, int ent, const unsigned char* data, const float* c9, int off,
+                       bool flip, bool col)
+{
+	if (!g_skyCapOn.load(std::memory_order_relaxed))
+		return;
+	if (slot == g_camLockS && ent == g_camLockE)
+		return; // 相机自身锁定项: 已知来源, 不是待钉项
+	SkyCenEnt* sc = nullptr;
+	for (int i = 0; i < g_skyCenN; ++i)
+		if (g_skyCen[i].slot == slot && g_skyCen[i].ent == ent)
+		{
+			sc = &g_skyCen[i];
+			break;
+		}
+	if (!sc)
+	{
+		if (g_skyCenN >= kSkyCenMax)
+			return;
+		sc = &g_skyCen[g_skyCenN++];
+		sc->slot = slot;
+		sc->ent = ent;
+		sc->off = -1;
+	}
+	if (off == sc->off)
+		++sc->streak;
+	else
+	{
+		sc->off = off;
+		sc->streak = 1;
+	}
+	if (sc->streak < 3) // 3/3 稳定才认
+		return;
+	if (sc->lines >= 32) // 每项封顶 32 行 (防玩家转视角把文件刷爆)
+		return;
+	float d[3];
+	skyCenDir(c9, flip, col, d);
+	if (sc->reported)
+	{
+		const float c = sc->dir[0] * d[0] + sc->dir[1] * d[1] + sc->dir[2] * d[2];
+		const float cc = (c > 1.0f) ? 1.0f : ((c < -1.0f) ? -1.0f : c);
+		const double ang = std::acos(static_cast<double>(cc)) * 180.0 / 3.14159265358979323846;
+		if (!(ang > 2.0)) // 变化 <=2° 不记 (逐帧微抖不算事件)
+			return;
+	}
+	const bool first = !sc->reported;
+	skyCenWrite(slot, ent, sc->off, d, data + sc->off);
+	++sc->lines;
+	sc->reported = true;
+	for (int i = 0; i < 3; ++i)
+		sc->dir[i] = d[i];
+	if (first || !sc->dirLog) // 一次性: 锁定事件 + 第一次方向变化 (之后只写文件不打屏)
+	{
+		sc->dirLog = true;
+		logLine("天空普查: " + std::string(first ? "锁定候选" : "方向变化") + " 槽" +
+		        std::to_string(slot) + "." + std::to_string(ent) + " off=" + std::to_string(sc->off) +
+		        " dir=(" + std::to_string(d[0]) + "," + std::to_string(d[1]) + "," +
+		        std::to_string(d[2]) + ") -> sky-census.txt");
+	}
+}
 // v0.18.19: 锁前不发布 (q 保持全 0 ⇒ p7.w=0 = 16d 安全画面); 锁定 = camCensus 窗口按
 // 「候选率 ≥95% 且主 offset 命中 ≥90%」的稳定度判定 —— 18 实拍里 per-draw 垃圾 (槽8:
 // 候选率 ~50%、offset 漂移、q 乱跳) 这类数据锁不上, 相机 VP 每帧必在同 offset 才锁。
@@ -3978,6 +4236,7 @@ static void camParse(const unsigned char* data, UINT bytes, int slot, int ent)
 	int   candOff[8];
 	bool  candFlip[8]; // v0.18.24: 该候选是否走过 det<0 翻线
 	bool  candCol[8];  // v0.18.24: 该候选过的是列模式 (行主序 V) 还是行模式
+	float candM[8][16]; // v0.18.41 T8: 该候选的原始 4x4 (Step 2 平移列 / Step 3 投影特征)
 	int   n = 0;
 	const UINT maxOff = bytes - 64;
 	for (UINT off = 0; off <= maxOff && n < 8; off += 16)
@@ -3990,6 +4249,8 @@ static void camParse(const unsigned char* data, UINT bytes, int slot, int ent)
 			continue;
 		for (int i = 0; i < 9; ++i)
 			cand[n][i] = p[i];
+		for (int i = 0; i < 16; ++i)
+			candM[n][i] = m[i]; // T8: camBlockOk 只就地归一化 p, m 原样留着
 		candOff[n] = static_cast<int>(off);
 		candFlip[n] = flip;
 		candCol[n] = col;
@@ -4018,8 +4279,21 @@ static void camParse(const unsigned char* data, UINT bytes, int slot, int ent)
 			        "." + std::to_string(ent) + ")");
 		return;
 	}
+	// ---- v0.18.41 T8 Step 4: 普查扫描放在发布闸**之前** (普查要的是全部条目, 不只锁定项;
+	// 放闸后的话锁定项又被普查排除 ⇒ 普查永远空转) ----
+	skyCenScan(slot, ent, data, cand[k], candOff[k], candFlip[k], candCol[k]);
 	if (slot != g_camLockS || ent != g_camLockE)
 		return; // 发布闸 (v0.18.19): 未锁定不发布 (q 全 0 = 16d), 锁定后只认锁定条目
+	// ---- v0.18.41 T8 Step 2/3: 锁定块额外出两样活值 (相机世界坐标 + 视场反推) ----
+	// 放在方向链的 det/恒等闸之前: 那两道闸管的是方向四元数能不能表示, 与平移列像不像
+	// 坐标 / 像不像投影无关 —— 复位占位块照样带着真坐标, 不该被一起丢掉。
+	skyCamPosPublish(candM[k], slot, ent, candOff[k]);
+	for (int i = 0; i < n; ++i) // 投影特征 (Step 3): 取第一条命中的 (相机 cb 里 P 与 V 同居)
+		if (skyProjHit(candM[i]))
+		{
+			skyFovPick(candM[i], slot, ent, candOff[i]);
+			break;
+		}
 	if (g_ssrCamDumpOn && !g_camDumpDone)
 	{ // v0.18.21 观测: 锁定条目首帧全量 hex 落盘 (辨识 mat4 块 -> 反解真投影, docs/02 条目22)
 		g_camDumpDone = true;
@@ -4127,8 +4401,8 @@ static void camParse(const unsigned char* data, UINT bytes, int slot, int ent)
 // v0.18.19: 逐 (槽,条目) 处理未读回的拷贝, 每条目独立 Map/Unmap; 全无 pend 时帧级早退。
 static void camMapTick()
 {
-	if (!g_ssrV1CamOn)
-		return;
+	if (!camCapOn())
+		return; // v0.18.41 T8: 与 camVSBOnce 同一个捕获闸 (sky 侧拷了才有人 Map)
 	bool any = false;
 	for (int s = 0; s < kCamSlotN && !any; ++s)
 		for (int e = 0; e < kCamEntN && !any; ++e)
@@ -4327,8 +4601,11 @@ static void camCopyEnt(ID3D11DeviceContext* ctx, CamEnt& ce, ID3D11Buffer* b, in
 static void camVSBOnce(ID3D11DeviceContext* ctx, UINT StartSlot, UINT NumBuffers,
                        ID3D11Buffer* const* pp)
 {
-	if (!g_ssrV1CamOn || g_ssrV1Edge < 2 || !pp || !NumBuffers)
-		return; // edge<2 用不到 cube 朝向 ⇒ 不白拷 (相机数据只服务 edge=2 的采样方向)
+	// v0.18.41 T8 Step 1 解耦: 闸 = (ssr 原条件) 或 (sky=1 且 sky.census=1)。ssr 分支与
+	// v0.18.40 逐字节相同 (camrot=1 ∧ edge>=2 ∧ ssr 总闸); edge<2 用不到 cube 朝向 ⇒ 不白拷。
+	// sky 分支不加任何节流差别: 同样每帧至多一次 staging 拷贝, 下帧 Present 才 Map。
+	if (!camCapOn() || !pp || !NumBuffers)
+		return;
 	const uint64_t fr = g_presentCount.load(std::memory_order_relaxed) + 1;
 	camCensus(fr, StartSlot, NumBuffers, pp);
 	for (UINT i = 0; i < NumBuffers; ++i)
@@ -4413,6 +4690,7 @@ static void camVSBOnce(ID3D11DeviceContext* ctx, UINT StartSlot, UINT NumBuffers
 }
 
 // 槽7 钩本体: 与其它钩同款 lookup/real/watch 口径; real 永远调 (不观察也绝不吞游戏的绑定)。
+// v0.18.41 T8: 观察条件从 `ssrOn` 改成 `camCapOn()` (ssr 分支不变, 新增 sky.census 分支)。
 static void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* ctx, UINT StartSlot,
                                                          UINT NumBuffers,
                                                          ID3D11Buffer* const* ppConstantBuffers)
@@ -4422,7 +4700,7 @@ static void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* ct
 	const Fn_t real = e ? reinterpret_cast<Fn_t>(e->orig7) : nullptr;
 	if (!real) // 只有 ok7 校验通过才会被 patch, 理论不可达 (与 hookedCopyResource 同口径)
 		return;
-	if (ssrWatch(e, ctx) && g_ssrOn.load(std::memory_order_relaxed))
+	if (ssrWatch(e, ctx) && camCapOn())
 		camVSBOnce(ctx, StartSlot, NumBuffers, ppConstantBuffers);
 	real(ctx, StartSlot, NumBuffers, ppConstantBuffers);
 }
@@ -4684,11 +4962,22 @@ void installProbeOn(ID3D11Device* dev)
 			// 回显的是**最终解析值** (显式 ini 值已覆盖档位值), 故 knobchk 逐键可验:
 			// 单改一个子键 → 该键 = 覆盖值, 其余三键仍随 preset 的档位值。
 			skyTierResolve();
+			// ---- v0.18.41 T8 Step 1/4: 天空侧的相机捕获/普查门 (ini sky.census, 缺省 0) ----
+			// 缺省 0 ⇒ 天空会话照旧零捕获零落盘 (静默承诺); 置 1 才挂 VS cb 槽7 观察 (T9 的
+			// 相机位姿/视场来源, 也是本轮普查会话的开关)。ssr 分支与它互不影响。
+			g_skyCapOn.store(iniFlag("sky.census", false), std::memory_order_relaxed);
+			// 未捕到投影矩阵前的回退值: 与 vkrenderer.cpp 旧的那句 tan(ssr.fov/2) 同式同源,
+			// 捕到之后由 camParse 的 skyFovPick 顶掉 (成功日志一条, 只打一次)。
+			g_skyTanHalfFovY = std::tan(static_cast<float>(iniNum("ssr.fov", 65.0)) * 3.14159265358979f / 360.0f);
 			logLine("天空: sky=1 preset=" + std::to_string(g_skyPreset) +
 			        " cloudscale=" + skyNum(g_skyCloudScale) +
 			        " cloudsteps=" + std::to_string(g_skyCloudSteps) +
 			        " cloudtemporal=" + std::to_string(g_skyCloudTemporal) +
-			        " lutscale=" + skyNum(g_skyLutScale));
+			        " lutscale=" + skyNum(g_skyLutScale) +
+			        " census=" + std::to_string(g_skyCapOn.load(std::memory_order_relaxed) ? 1 : 0));
+			if (g_skyCapOn.load(std::memory_order_relaxed))
+				logLine("天空: ini sky.census=1 → 挂 VS cb 槽7 相机捕获 (每帧至多一次 staging 拷, "
+				        "下帧读回) + 普查候选落 sky-census.txt (默认 0 = 天空会话零捕获零落盘)");
 			// ---- T6 用的垂直 FOV 来自 **ssr 命名空间** 的键 (v0.18.37 Review I2) ----
 			// sky 的四个 frag 都靠 tan(fovY/2) 反解视线 (探针估地平线、云 slab、合成 LUT
 			// 取样), fov 偏 10% 就会把地平线高度和云层整体抬高/压低一个可观的量。
@@ -7149,7 +7438,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.40 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 25: 采样基底合成 q=conj(qcap)⊗qchain+换代快照; 26: probedump 每次换代落盘(诊断: PFM 恒=活跃 cube); 27: debug=9 采样方向场定标 + 恒等q守卫(复位占位不发布) + 第2发布点也落盘; 28: shader 产物补生成 —— make_shaders 此前未跑致 v17/v20/v27 ssr.frag 幻影, DLL 一直嵌 v16 旧 shader(miss 无旋转总根因, 修法=tools/spvsync 闸); 29: 撤销25基底合成(cube 世界轴对齐, 直发 q 即真世界方向) + debug 8/7 闸收窄(debug=9 的 hit 走正常合成); 30: P1 读回跟踪期(ssr.probeint 默认2s — 两拍定C1后周期重读探针, FNV 签名有变即换代重传, 修 miss 区外景冻结/队列#7); 31: miss 采样仰角视差补偿 ssr.cubeelev(spec constant 默认7° — 探针原点比真实反射点Q远, cube天际线低6-7°致 miss 区顶部过早切天空, 下压采样仰角对齐真实天际线, 修『从天空变成山峰』倒置/条目32); 32: miss 屏幕钳带交叉淡入 ssr.missfade(spec constant 默认10° — 探针不在反射点: cube 该方位=开放湖岸远景非本处近景, δ<22° miss 改采 Rf 无穷远投影钳回屏内 uColor 真近景+回补同乘权重, 深处渐交 cube 天空, 修『远景当近景』/条目33); 33: 天空总闸 sky(ini sky 0/1 缺省0, T7才开) + 段7-end 六字段结构触发 (NumViews==3 且 RT0=1920x1080 RGBA16F 且 RT1/RT2 非空 且 DSV=1920x1080 D24家族; 首次不满足=段7-end; 判据纯结构化无抓帧 event id; sky=1 时挂载门独立于 ssr/probe, ssr=0 时 SSR侦察/探针/普查日志全静默); 34: sky.preset 分档(0低/1中/2高缺省/3极致, 档位表 constexpr 编入 DLL 换档只改 ini) + 四子键 sky.cloudscale/cloudsteps/cloudtemporal/lutscale 显式 ini 值覆盖档位值、未写则随档, 全键进 `天空:` 启动回显行(knobchk 逐键可验); 35: 天空入向数据通路 —— skyIn←321(段7-end 触发点 real() 之后发行, 此刻 321 已解绑) + skyDepth←520(搭车游戏 461→520 拷贝点, 发行排在 real() 之后保队列顺序), 两张共享镜像(NT handle, 深度源退老式 SHARED→KMT)VK 侧导入只 SAMPLED, 全程零同步读回, 自发行拷贝经 g_ssrSelfCopy 排除标记不污染 copy.sequence 锚点, 掩码判据=skyDepth D24 精确 0xFFFFFF(空掩码⇒合成零工作); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 36: 天空四 pass + 出向回写 —— 四个 frag(探针 1x2 RGBA16F 纯 GPU 估太阳方向/地平线/平均亮度, 散射 LUT 按太阳方向阈值 0.35° 低频重算否则直采上一帧, 体积云 3D 值噪声 FBM 32^3 RGBA8 一次上传 + cloudtemporal ping-pong, 合成掩码内替 skyIn 原色), 竖直复用 ssr.vert 全屏三角, push constant 128B, 档位值经 VkSpecializationInfo 烘焙(spec constant 仿 kMissFade), 四套 descriptor set 各一 pass(池 maxSets=4/descriptorCount=20); 回写 CopyResource(321←skyOut, desc 预检逐字段比对+不致就静默停用不写坏画面), 段7-end 触发点同帧跑完 pass 再回写(docs/07 §4.3 禁延迟一帧); 同步照 ssrInGateWait 模板(两条入向拷贝后 End(D3D11_QUERY_EVENT)+Flush, VK 侧 GetData+DONOTFLUSH+Sleep(0) 自旋+2000ms 超时放行+一次性消费, 累计均值单独计数 g_skyGateN/g_skyGateMs); 全链 g_skyOn 总闸, sky=0 零命令零日志; 37: 天空视觉初验两轮修复 —— 云受光重建(消光 0.06→0.025/m, 直接项改以 LUT 天顶为单位并加多次散射地板 kMs=0.03 与受光乘积上限 kFaceMax=3.0, 修直接阳光项因光学厚度 15~47 而恒为 0), 平视黑幕收口(步进上限 60km→12km, 无云带 0.46°~6.7°, 另加只罚远于 4km 的空气透视且淡向中性), 合成增益分母改帧常量 LUT 天顶(修逐像素分母把天空梯度抹平且近太阳吹白), 探针太阳仰角抬升改 peakRow<=1 且加 3/3 迟滞闩锁(存状态图 .z, 不改纹理格式); 38: 天空第二轮视觉修复 —— LUT 加各向同性多次散射填充(kMulti=1, 颜色取 Rayleigh β, 强度 pow(太阳高度+下限,0.35), 解单次散射导致的偏暗偏灰), LUT 输出加保色相软膝范围压缩(kCap=2.5×参考值, 膝点=1.0×参考 ⇒ 参考 texel 逐位透传), 参考值从「天顶」改成「背阳中天」(实测天顶是全场最暗方向, 拿它当基准 ⇒ 地平线/日晕行原样进 tonemap 炸白), 云 pass 的多次散射地板 kMs 0.03→0.20, 三处参考采样点统一到 LUT 的参考 texel; 39: 参考 texel 坐标吸附到真实 texel 中心(三处各按 textureSize 算同一式子, LINEAR 采样取到单个 texel ⇒ 参考点逐位透传严格成立), 夜间环境项脱钩 sunUp(假太阳落到地平线下时 sunUp 恰为 0, 旧写法让环境项一起归零 ⇒ 纯黑云剪影; 现在夜间只剩环境项 0.45~1.30×参考, 暗但看得见), enc_gate 增 CR 硬失败并覆盖着色器与 C++ 源; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
+	logLine("==== poc-presenter v0.18.41 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 25: 采样基底合成 q=conj(qcap)⊗qchain+换代快照; 26: probedump 每次换代落盘(诊断: PFM 恒=活跃 cube); 27: debug=9 采样方向场定标 + 恒等q守卫(复位占位不发布) + 第2发布点也落盘; 28: shader 产物补生成 —— make_shaders 此前未跑致 v17/v20/v27 ssr.frag 幻影, DLL 一直嵌 v16 旧 shader(miss 无旋转总根因, 修法=tools/spvsync 闸); 29: 撤销25基底合成(cube 世界轴对齐, 直发 q 即真世界方向) + debug 8/7 闸收窄(debug=9 的 hit 走正常合成); 30: P1 读回跟踪期(ssr.probeint 默认2s — 两拍定C1后周期重读探针, FNV 签名有变即换代重传, 修 miss 区外景冻结/队列#7); 31: miss 采样仰角视差补偿 ssr.cubeelev(spec constant 默认7° — 探针原点比真实反射点Q远, cube天际线低6-7°致 miss 区顶部过早切天空, 下压采样仰角对齐真实天际线, 修『从天空变成山峰』倒置/条目32); 32: miss 屏幕钳带交叉淡入 ssr.missfade(spec constant 默认10° — 探针不在反射点: cube 该方位=开放湖岸远景非本处近景, δ<22° miss 改采 Rf 无穷远投影钳回屏内 uColor 真近景+回补同乘权重, 深处渐交 cube 天空, 修『远景当近景』/条目33); 33: 天空总闸 sky(ini sky 0/1 缺省0, T7才开) + 段7-end 六字段结构触发 (NumViews==3 且 RT0=1920x1080 RGBA16F 且 RT1/RT2 非空 且 DSV=1920x1080 D24家族; 首次不满足=段7-end; 判据纯结构化无抓帧 event id; sky=1 时挂载门独立于 ssr/probe, ssr=0 时 SSR侦察/探针/普查日志全静默); 34: sky.preset 分档(0低/1中/2高缺省/3极致, 档位表 constexpr 编入 DLL 换档只改 ini) + 四子键 sky.cloudscale/cloudsteps/cloudtemporal/lutscale 显式 ini 值覆盖档位值、未写则随档, 全键进 `天空:` 启动回显行(knobchk 逐键可验); 35: 天空入向数据通路 —— skyIn←321(段7-end 触发点 real() 之后发行, 此刻 321 已解绑) + skyDepth←520(搭车游戏 461→520 拷贝点, 发行排在 real() 之后保队列顺序), 两张共享镜像(NT handle, 深度源退老式 SHARED→KMT)VK 侧导入只 SAMPLED, 全程零同步读回, 自发行拷贝经 g_ssrSelfCopy 排除标记不污染 copy.sequence 锚点, 掩码判据=skyDepth D24 精确 0xFFFFFF(空掩码⇒合成零工作); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 36: 天空四 pass + 出向回写 —— 四个 frag(探针 1x2 RGBA16F 纯 GPU 估太阳方向/地平线/平均亮度, 散射 LUT 按太阳方向阈值 0.35° 低频重算否则直采上一帧, 体积云 3D 值噪声 FBM 32^3 RGBA8 一次上传 + cloudtemporal ping-pong, 合成掩码内替 skyIn 原色), 竖直复用 ssr.vert 全屏三角, push constant 128B, 档位值经 VkSpecializationInfo 烘焙(spec constant 仿 kMissFade), 四套 descriptor set 各一 pass(池 maxSets=4/descriptorCount=20); 回写 CopyResource(321←skyOut, desc 预检逐字段比对+不致就静默停用不写坏画面), 段7-end 触发点同帧跑完 pass 再回写(docs/07 §4.3 禁延迟一帧); 同步照 ssrInGateWait 模板(两条入向拷贝后 End(D3D11_QUERY_EVENT)+Flush, VK 侧 GetData+DONOTFLUSH+Sleep(0) 自旋+2000ms 超时放行+一次性消费, 累计均值单独计数 g_skyGateN/g_skyGateMs); 全链 g_skyOn 总闸, sky=0 零命令零日志; 37: 天空视觉初验两轮修复 —— 云受光重建(消光 0.06→0.025/m, 直接项改以 LUT 天顶为单位并加多次散射地板 kMs=0.03 与受光乘积上限 kFaceMax=3.0, 修直接阳光项因光学厚度 15~47 而恒为 0), 平视黑幕收口(步进上限 60km→12km, 无云带 0.46°~6.7°, 另加只罚远于 4km 的空气透视且淡向中性), 合成增益分母改帧常量 LUT 天顶(修逐像素分母把天空梯度抹平且近太阳吹白), 探针太阳仰角抬升改 peakRow<=1 且加 3/3 迟滞闩锁(存状态图 .z, 不改纹理格式); 38: 天空第二轮视觉修复 —— LUT 加各向同性多次散射填充(kMulti=1, 颜色取 Rayleigh β, 强度 pow(太阳高度+下限,0.35), 解单次散射导致的偏暗偏灰), LUT 输出加保色相软膝范围压缩(kCap=2.5×参考值, 膝点=1.0×参考 ⇒ 参考 texel 逐位透传), 参考值从「天顶」改成「背阳中天」(实测天顶是全场最暗方向, 拿它当基准 ⇒ 地平线/日晕行原样进 tonemap 炸白), 云 pass 的多次散射地板 kMs 0.03→0.20, 三处参考采样点统一到 LUT 的参考 texel; 39: 参考 texel 坐标吸附到真实 texel 中心(三处各按 textureSize 算同一式子, LINEAR 采样取到单个 texel ⇒ 参考点逐位透传严格成立), 夜间环境项脱钩 sunUp(假太阳落到地平线下时 sunUp 恰为 0, 旧写法让环境项一起归零 ⇒ 纯黑云剪影; 现在夜间只剩环境项 0.45~1.30×参考, 暗但看得见), enc_gate 增 CR 硬失败并覆盖着色器与 C++ 源; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/); 41: 相机入向扩展 + 普查通道(T8) —— 捕获闸解耦为 (ssr 原条件) 或 (sky=1 且 sky.census=1), sky.census 缺省 0 ⇒ 天空会话零捕获零落盘且 `SSR侦察:` 零出现照旧; 锁定块额外出两项活值: 4x4 平移列 → g_skyCamPos(xyz + w=known, 合理性闸不过则 w=0, 列主序存法退第 4 行并出声) 与投影矩阵特征(对角正且非对角近零, 单位阵排他)反推 tanHalfFovY=1/m5 与 aspect=m5/m0 (顶替 pc.cam[2]/pc.cam[1], 成功只打一条; 未捕到维持 ini ssr.fov 回退), 相机坐标占 push pad[0] 备 T9 太阳/月亮方向; 普查 sky.census=1 时枚举全部过 camBlockOk 的 (槽,条目,偏移) 并排除相机锁定项, 同偏移连续 3/3 稳定才落 sky-census.txt (CAND slot/entry/off/dir + 3x3 hex), 方向变化 >2° 再落一行, 默认零输出 ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

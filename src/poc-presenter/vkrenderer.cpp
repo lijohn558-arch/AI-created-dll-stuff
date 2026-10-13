@@ -5939,9 +5939,16 @@ static void skyPassRecord(PocbCtx& c)
 		// 时间: 由帧计数推导的**单调**时间轴 (不读系统时钟 ⇒ 可复现; 云靠它漂移)
 		const float t = (float)g_skyPassN * (1.0f / 60.0f);
 		pc.cam[0] = t;
-		pc.cam[1] = (float)g_skyVkW / (float)(g_skyVkH ? g_skyVkH : 1);
-		// FOV: 沿用 SSR 侧同一口径的真投影值 (ssr.fov, ini 里 58.7155 = docs/02 §14.29 实测)
-		pc.cam[2] = std::tan(g_ssrV1Fov * 3.14159265358979f / 360.0f);
+		// aspect (v0.18.41 T8): 捕到投影矩阵就用真值 g_skyAspect, 没捕到才回退 RT 宽高比
+		// (与 v0.18.40 逐字节同值 —— 天空会话没开 census 时恒走回退分支)。
+		pc.cam[1] = (g_skyAspect > 0.0f) ? g_skyAspect
+		                                 : (float)g_skyVkW / (float)(g_skyVkH ? g_skyVkH : 1);
+		// FOV: 沿用 SSR 侧同一口径的真投影值 (ssr.fov, ini 里 58.7155 = docs/02 §14.29 实测);
+		// v0.18.41 T8 起**优先**用捕获到的真投影反推值 g_skyTanHalfFovY (= 1/m5),
+		// 没捕到时 g_skyTanHalfFovY 就是 ini 推得值 ⇒ 与 v0.18.40 的表达式逐字节等价。
+		pc.cam[2] = (g_skyTanHalfFovY > 0.0f)
+		                ? g_skyTanHalfFovY
+		                : std::tan(g_ssrV1Fov * 3.14159265358979f / 360.0f);
 		pc.cam[3] = 1.0f;
 		pc.sz[0] = (float)g_skyCloudW;
 		pc.sz[1] = (float)g_skyCloudH;
@@ -5959,9 +5966,17 @@ static void skyPassRecord(PocbCtx& c)
 		pc.tier[1] = g_skyLutScale;
 		pc.tier[2] = (float)(g_skyCloudTemporal > 0 ? 1 : 0);
 		pc.tier[3] = mode; // 仅 sky_lut 用: 1 = 这次渲 1x1 状态图而不是 LUT
+		// v0.18.41 T8: 相机世界坐标占 pad[0] (xyz + w=known)。本轮四个 frag 都不读它
+		// (pad 之前恒 0, GLSL 侧没有 spec/data 改动 ⇒ 无需同步默认值), T9 往这里放太阳/
+		// 月亮方向时与相机坐标共用同一条 pad 通道。
+		pc.pad[0][0] = g_skyCamPos[0];
+		pc.pad[0][1] = g_skyCamPos[1];
+		pc.pad[0][2] = g_skyCamPos[2];
+		pc.pad[0][3] = g_skyCamPos[3];
 		for (int i = 0; i < 4; ++i)
 			for (int j = 0; j < 4; ++j)
-				pc.pad[i][j] = 0.0f;
+				if (i != 0)
+					pc.pad[i][j] = 0.0f;
 		c.fns.vkCmdPushConstants(g_skyPassCmd, g_skyPassPl, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
 		                         sizeof(pc), &pc);
 		c.fns.vkCmdDraw(g_skyPassCmd, 3, 1, 0, 0);

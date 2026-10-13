@@ -282,4 +282,11 @@ namespace pocmain
 	extern int                     g_skyCloudSteps;   // ini sky.cloudsteps
 	extern int                     g_skyCloudTemporal;// ini sky.cloudtemporal (0/1)
 	extern float                   g_skyLutScale;     // ini sky.lutscale
+	// ---- v0.18.41 T8: 相机入向活值 (main.cpp camParse 发布) ----
+	// 视场/宽高比: 捕到投影矩阵前维持 ini ssr.fov 的推得值, 捕到后由真投影反推 (活值);
+	// g_skyAspect == 0 表示未捕获 ⇒ 本侧回退 RT 宽高比。相机世界坐标 (x,y,z,w=known 0/1)
+	// 是 T9 往 pad 里放太阳/月亮方向的同一条通道 (本轮只发布, 没有 frag 读它)。
+	extern float                   g_skyTanHalfFovY;  // tan(fovY/2) 活值
+	extern float                   g_skyAspect;       // aspect 活值 (0 = 未捕获)
+	extern float                   g_skyCamPos[4];    // (x,y,z,w) 相机世界坐标, w = known 0/1
 }
