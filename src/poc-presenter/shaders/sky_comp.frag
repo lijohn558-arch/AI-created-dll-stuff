@@ -17,7 +17,7 @@
 //   cam  = (time, aspect, tan(fovY/2), exposure)
 //   sz   = (cloudW, cloudH, windX, windZ)
 //   ctl  = (coverage, density, sunIntensity, firstFrame)
-//   tier = (cloudscale, lutscale, cloudtemporal, unused)
+//   tier = (cloudscale, lutscale, cloudtemporal, mode<本 frag 恒 0>)
 layout(set = 0, binding = 0) uniform sampler2D uSkyIn;   // skyIn RGBA16F (LINEAR clamp)
 layout(set = 0, binding = 1) uniform sampler2D uMask;    // skyDepth depth aspect (NEAREST)
 layout(set = 0, binding = 2) uniform sampler2D uLut;     // 散射 LUT (LINEAR clamp)
@@ -40,20 +40,25 @@ layout(push_constant) uniform SkyPC
 //   kMix  = 与原 skyIn 的混合比 (0 = 纯替换, 1 = 原版); 0.85 是本轮视觉档位
 //          (计划 T6「掩码内替换 skyIn 原色」; 留 0.15 给原版是**接缝兜底**: 掩码
 //          在物体轮廓处是硬边, 纯替换会让地形边缘出现 1px 硬接缝)
-//   kFade = 掩码边缘 (depth 与远平面的差值) 的过渡宽度, 让接缝再柔一点
+//   kFade = 掩码边缘 (depth 与远平面的差值) 的过渡宽度, 让接缝再柔一点。
+// **必须是像素尺度**: 深度是高度非线性的 (游戏 near=15 / far=353467.6), 归一化深度
+// 差 Δd 对应的**米数**随距离变化: dw/dz = (n/z²)/(1-n/f)。kFade=1.6e-3 在 z=10km 处
+// 相当于 ~9.4 km 的地形深度带 —— 那会把 9.4 km 以外直到远平面的**所有地形**都压到 kMix
+// 的 15% 亮度, 根本不是"接缝柔化"而是整片远景变黑。1e-6 ≈ D24 的 ~17 个码宽, z=1km 处
+// ~7cm、z=10km 处 ~6.7m, 才是像素级接缝。
 layout(constant_id = 0) const float kMix = 0.85;
-layout(constant_id = 1) const float kFade = 0.0016;
+layout(constant_id = 1) const float kFade = 1.0e-6;
+
+// ---- 掩码判据 (**与 sky_cloud.frag 里的同名常量必须逐字一致**) ----
+// 早退判定用纯 kSkyEps, **不掺 kFade**: 掺进去会让 [kSkyEps-kFade, kSkyEps) 这一段被
+// 本 pass 当"天空"、被云 pass 当"非天空", 正好落进云输出中性值(alpha=1 ⇒ 纯散射)的缝里。
+const float kSkyEps = 0.9999999;
 
 layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 oColor;
 
 const float kPi = 3.14159265358979;
 
-float vToSin(float v)
-{
-	float t = clamp(v, 0.0, 1.0);
-	return -0.10 + 1.10 * (t * t);
-}
 float sinToV(float s)
 {
 	return sqrt(clamp((s + 0.10) / 1.10, 0.0, 1.0));
@@ -63,8 +68,10 @@ void main()
 {
 	vec4 orig = texture(uSkyIn, vUV);
 	float d = texture(uMask, vUV).x;
-	// ---- 掩码外: 原样透传 (室内整帧走这里 ⇒ 合成零工作) ----
-	if (d < 0.9999999 - kFade)
+	// ---- 掩码外: 原样透传 (室内整帧走这里 ⇒ 逐像素着色零工作) ----
+	// 注意措辞: 这里省掉的是**逐像素着色**, 不是整趟 pass —— 全屏 dispatch 与出向整帧
+	// CopyResource 照旧发生 (省那一趟要靠预案 A 子矩形, 本轮不做)。
+	if (d < kSkyEps)
 	{
 		oColor = orig;
 		return;
@@ -97,6 +104,7 @@ void main()
 	float v = sinToV(rd.y);
 	vec3 scatter = texture(uLut, vec2(clamp(u, 0.001, 0.999), clamp(v, 0.001, 0.999))).rgb;
 	// ---- 云: 云 RT 是 (散射色, 透射率); alpha 复合 = cloud.rgb + scatter*(1-trans) ----
+	// 云 pass 的三个早退写 vec4(0,0,0,**1**) ⇒ alpha=1 ⇒ 这里退化成"只有散射色", 正确。
 	vec4 cl = texture(uCloud, vUV);
 	vec3 sky = cl.rgb + scatter * cl.a;
 	// ---- 强度标定: 与游戏自己天空的平均亮度对齐 ----
@@ -104,9 +112,9 @@ void main()
 	float skyLum = dot(sky, vec3(0.2126, 0.7152, 0.0722));
 	float gain = pc.cam.w * clamp(meanLum / max(skyLum, 1e-4), 0.15, 8.0);
 	sky *= gain;
-	// ---- 与原版混合 + 掩码边缘软过渡 ----
+	// ---- 与原版混合 + 掩码边缘软过渡 (kFade 是**像素尺度**, 见上面的推导) ----
 	vec3 outc = mix(orig.rgb, sky, kMix);
-	float edge = (d >= 0.9999999 - kFade) ? clamp((d - (0.9999999 - kFade)) / kFade, 0.0, 1.0) : 1.0;
+	float edge = clamp((d - kSkyEps) / kFade, 0.0, 1.0);
 	outc = mix(orig.rgb, outc, mix(kMix, 1.0, edge));
 	// ---- 输出: alpha 保持 skyIn 原值 (HDR 目标的 alpha 语义不由我方决定) ----
 	oColor = vec4(max(outc, vec3(0.0)), orig.a);

@@ -28,7 +28,7 @@
 //   cam  = (time, aspect, tan(fovY/2), exposure)
 //   sz   = (cloudW, cloudH, windX, windZ)
 //   ctl  = (coverage, density, sunIntensity, firstFrame)
-//   tier = (cloudscale, lutscale, cloudtemporal, unused)
+//   tier = (cloudscale, lutscale, cloudtemporal, mode<本 frag 恒 0>)
 layout(set = 0, binding = 0) uniform sampler2D uSkyIn; // skyIn RGBA16F (LINEAR clamp)
 layout(set = 0, binding = 1) uniform sampler2D uDepth; // skyDepth depth aspect (NEAREST)
 layout(set = 0, binding = 2) uniform sampler2D uState; // 1x2 上一帧状态 (NEAREST)

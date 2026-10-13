@@ -890,6 +890,33 @@ double iniNum(const char* key, double def)
 	return out;
 }
 
+// ini 里**有没有这个键** (与 iniNum 同一份文件、同一套解析口径)。用途: 区分「用户显式写了
+// 这个值」与「落到了默认值」—— 后者在对参数敏感的通路上必须出声告警, 不能静默。
+bool iniHasKey(const char* key)
+{
+	std::ifstream f(pluginDir() + "\\poc-presenter.ini");
+	std::string line;
+	while (std::getline(f, line))
+	{
+		const size_t eq = line.find('=');
+		if (eq == std::string::npos)
+			continue;
+		std::string k = lowerCopy(line.substr(0, eq));
+		while (!k.empty() && std::isspace(static_cast<unsigned char>(k.back())))
+			k.pop_back();
+		if (k != key)
+			continue;
+		std::string v = line.substr(eq + 1);
+		const size_t cm = v.find_first_of("#;");
+		if (cm != std::string::npos)
+			v.erase(cm);
+		if (v.find_first_not_of(" \t\r") == std::string::npos)
+			continue; // 只有键没有值 ⇒ 仍算"没写"
+		return true;
+	}
+	return false;
+}
+
 // ---------- 探针升质 hook (v0.11.0 + v0.12.0 plan-B): CreateTexture2D 槽5 + context 槽44/45 ----------
 // 水体样本第一步 (docs/00 §1.1 / docs/03 §6.1): 501 = 6面512² RGBA16F 环境反射 cubemap
 // 探针, 命中描述符时把宽高翻倍 (512²→1024²)。v0.12 再补: 绑定感知拦 RSSetViewports/
@@ -3375,8 +3402,12 @@ static void skyOutBuild(ID3D11DeviceContext* ctx)
 		return;
 	}
 	g_skyOutBuilt = true;
-	logLine("[sky] 出向就绪 skyOut=1920x1080 RGBA16F (desc 照抄 321, 与 321 逐字段一致) "
-	        "skyOut轴=" + std::string(g_skyOutKmt ? "KMT(老式SHARED)" : "NT") +
+	// 尺寸/格式打**真值** (321 的 desc), 不写死 1920x1080 —— 换分辨率时那句写死的日志会
+	// 直接变成假信息, 而这条行恰恰是"回写链路通了"的唯一凭据。
+	logLine("[sky] 出向就绪 skyOut=" + std::to_string(sd.Width) + "x" + std::to_string(sd.Height) +
+	        " " + ssrFmtName(sd.Format) +
+	        " (desc 照抄 321, 与 321 逐字段一致) skyOut轴=" +
+	        std::string(g_skyOutKmt ? "KMT(老式SHARED)" : "NT") +
 	        " — 四 pass 渲进 skyOut, 本帧触发链里 CopyResource(321 ← skyOut)");
 }
 
@@ -3436,7 +3467,9 @@ static void skyGateQueue(ID3D11DeviceContext* ctx)
 
 // T5 心跳 + 配平汇总。节流按**触发计数** g_skySeg7N 取模 (段7 一次都没出现的帧自然不刷屏),
 // 与本文件 2b/2c/2d 的 k%N 同一口径: 前 8 次全打 + 每 60 帧心跳; 配平汇总每 600 帧一行。
-// K3 (skyOut回写) 由 T6 落, 本轮恒 0 —— 照打真实值, 不假造 (计划 T5 定名)。
+// K3 (skyOut 回写) 由 T6 的 skyOutFire 真写 (g_skyOutN++) —— 已经不是恒 0 了。
+// 仍然只照打真实值: 回写被 desc 预检 / VK 侧没就绪 / fence 超时挡下时 K3 会落后于 K1,
+// 那个比值本身就是"回写链路有没有在掉队"的信号, 假造等于把唯一的观测点废掉。
 static void skyBalanceLog(long k)
 {
 	const long trig = g_skySeg7N;
@@ -4656,6 +4689,19 @@ void installProbeOn(ID3D11Device* dev)
 			        " cloudsteps=" + std::to_string(g_skyCloudSteps) +
 			        " cloudtemporal=" + std::to_string(g_skyCloudTemporal) +
 			        " lutscale=" + skyNum(g_skyLutScale));
+			// ---- T6 用的垂直 FOV 来自 **ssr 命名空间** 的键 (v0.18.37 Review I2) ----
+			// sky 的四个 frag 都靠 tan(fovY/2) 反解视线 (探针估地平线、云 slab、合成 LUT
+			// 取样), fov 偏 10% 就会把地平线高度和云层整体抬高/压低一个可观的量。
+			// T4 把天空的键名钉死为五个, 本轮**不新增** ini 键, 只能继续借 ssr.fov。
+			// 但 iniNum 的缺省值是 65 而本机实测是 58.7155 (游戏 ini, 不在仓库里) ——
+			// 键缺失时静默用一个错的 fov 是最难查的一类故障, 所以出声说一次。
+			// 这里读的是 ini 里的**最终取值**, 与后面 g_ssrV1Fov 的解析同源同值。
+			if (!iniHasKey("ssr.fov"))
+				logLine("天空: 垂直FOV 用 ini 缺省 " +
+				        std::to_string(static_cast<int>(iniNum("ssr.fov", 65.0))) +
+				        "° (ini 里没有 ssr.fov 键 —— 天空通路的 FOV 借自 ssr 命名空间, "
+				        "本机实测真投影是 58.7155°, 缺这个键会让地平线与云层整体偏 ~10%); "
+				        "想精确就在 poc-presenter.ini 写一行 ssr.fov = 58.7155");
 		}
 		// Step 2b 通路哨兵的独立逃生门 —— 首次会动渲染 (324→585 回写), 与"只观察"分开:
 		// ssr=1 但 ssr.sentinel=0 ⇒ 纯观察, 2a 身份照样学; 出问题改 0 即退回只读。

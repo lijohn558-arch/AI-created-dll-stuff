@@ -19,7 +19,7 @@
 //   cam  = (time, aspect, tan(fovY/2), exposure)
 //   sz   = (cloudW, cloudH, windX, windZ)
 //   ctl  = (coverage, density, sunIntensity, firstFrame)
-//   tier = (cloudscale, lutscale, cloudtemporal, unused)
+//   tier = (cloudscale, lutscale, cloudtemporal, mode<本 frag 恒 0>)
 layout(set = 0, binding = 0) uniform sampler2D uProbe;    // 1x2 本帧探针 (NEAREST)
 layout(set = 0, binding = 1) uniform sampler2D uMask;     // skyDepth depth aspect (NEAREST)
 layout(set = 0, binding = 2) uniform sampler2D uLut;      // 散射 LUT (LINEAR clamp)
@@ -44,6 +44,11 @@ layout(push_constant) uniform SkyPC
 // 一律 float 声明 (数据块按 float 传, 与 kCubeElev/kMissFade 同款)。
 layout(constant_id = 0) const float kSteps = 64.0;
 layout(constant_id = 1) const float kHistory = 0.55;
+
+// ---- 掩码判据 (**与 sky_comp.frag 里的同名常量必须逐字一致**) ----
+// skyDepth 是 D24 归一化值, 天空 = 精确满值 0xFFFFFF ⇒ 1.0。留一点点余量吸收驱动端的
+// 24bit→float 舍入。云 pass 与合成 pass 用**同一条**判据, 两边不允许各写各的阈值。
+const float kSkyEps = 0.9999999;
 
 layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 oColor;
@@ -101,17 +106,21 @@ float cloudDensity(vec3 p, float hBase, float hSpan, float coverage, float shape
 
 void main()
 {
-	// ---- 掩码外: 零工作 (docs/07 §3.4 / §6 R3 室内早退的实际实现点) ----
-	if (texture(uMask, vUV).x < 0.9999999)
+	// ---- 掩码外: 原样透传 (早退; 但**必须写中性值**, 见下) ----
+	// 中性 = vec4(0,0,0,**1**): 合成侧 `sky = cl.rgb + scatter*cl.a`, alpha 0 会让整段天空
+	// 变成纯黑 (mix(orig, 0, kMix) 只剩 15% 亮度), alpha 1 才是"无云、全透射"。
+	// 判据 kSkyEps 与 sky_comp.frag **逐字相同** —— 两处一旦不一致, 中间那段深度会既被判
+	// "非天空"(这里写中性) 又被判 "天空"(那里照样替换), 直接吃到上面那个黑缺陷。
+	if (texture(uMask, vUV).x < kSkyEps)
 	{
-		oColor = vec4(0.0);
+		oColor = vec4(0.0, 0.0, 0.0, 1.0);
 		return;
 	}
 	vec4 probe = texture(uProbe, vec2(0.5, 0.25));
 	vec4 probeH = texture(uProbe, vec2(0.5, 0.75));
 	if (probeH.y < 0.5)
 	{
-		oColor = vec4(0.0);
+		oColor = vec4(0.0, 0.0, 0.0, 1.0);
 		return;
 	}
 	vec3 sunDir = normalize(probe.xyz + vec3(1e-6, 0.0, 0.0));
@@ -125,12 +134,16 @@ void main()
 	float hSpan = 2200.0;
 	if (rd.y <= 0.008)
 	{
-		oColor = vec4(0.0);
+		oColor = vec4(0.0, 0.0, 0.0, 1.0);
 		return;
 	}
+	// 进/出 slab 距离: **两端都要钳**。只钳 tExit 时, 天顶方向 (rd.y≈1) 的 tExit=3600 小于
+	// 天底方向被 rd.y<=0.008 挡掉之前算出的 tEnter 上限区, dt 可能为负 ⇒ 步进反向 ⇒ 最低
+	// 约 5° 的天空里云直接消失。钳成同一个上限 ⇒ 退化成"沿射线走满上限"的极限步进。
 	float tEnter = hBase / rd.y;
 	float tExit = (hBase + hSpan) / rd.y;
-	tExit = min(tExit, 60000.0);
+	tEnter = min(tEnter, 60000.0);
+	tExit = min(max(tExit, tEnter), 60000.0);
 	float coverage = pc.ctl.x;
 	float shape = pc.ctl.y;
 	float density = 0.06; // 每米消光尺度

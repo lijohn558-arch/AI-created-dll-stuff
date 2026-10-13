@@ -9,20 +9,26 @@
 //   参数化的 sky-view LUT, 每像素 ~16x5 次采样, 全图 64x32 ⇒ 每帧不到 0.05ms。
 //
 // 低频重算 (docs/07: "按太阳方向变化阈值低频重算"):
-//   本 pass **无条件被录制**, 但像素级早退 —— 拿当前探针 (uProbe) 与上一帧探针
-//   (uProbePrev) 的太阳方向比夹角, 小于阈值 (spec constant kSunThreshDeg) 时直接
-//   采上一帧的 LUT 原样输出 (一次纹理取), 不跑积分。阈值之上才真算。
-//   ⇒ "太阳不动 ⇒ 每帧只花一次 2x2 取样" 的低频语义成立, 且**不需要任何 CPU 读回**
-//     (docs/00 L109 硬约束): 判定完全在 GPU 上。
+//   本 pass **无条件被录制**, 但像素级早退 —— 拿当前探针 (uProbe) 与 1x1 状态图
+//   (uLutState, 存的是**上一次真算时用的太阳方向**) 比夹角, 小于阈值 (spec constant
+//   kSunThreshDeg) 时直接采上一帧的 LUT 原样输出 (一次纹理取), 不跑积分。
+//   ⇒ 基准是"真算时的太阳"而不是"上一帧的太阳": 探针输出带帧间平滑 (k=0.35), 拿平滑值
+//     当基准会让阈值判定在平滑运动下被推迟很久, 而合成侧按**当前**太阳采这张 LUT。
+//   ⇒ "太阳不动 ⇒ 每帧只花一次取样" 的低频语义成立, 且**不需要任何 CPU 读回**
+//     (docs/00 L109 硬约束): 判定与状态更新完全在 GPU 上。
+//   ⇒ 状态更新用**同一条管线再渲一次 1x1** (push constant tier.w = 1 走状态分支),
+//     不需要 MRT、不需要新管线、不需要新 shader。
 //
-// push constant 口径 (三个 frag 共用同一布局, 见 vkrenderer.cpp SkyPcBlock):
+// push constant 口径 (四个 frag 共用同一布局, 见 vkrenderer.cpp skyPassRecord 的 pc):
 //   cam  = (time, aspect, tan(fovY/2), exposure)
 //   sz   = (cloudW, cloudH, windX, windZ)
 //   ctl  = (coverage, density, sunIntensity, firstFrame)
-//   tier = (cloudscale, lutscale, cloudtemporal, unused)
+//   tier = (cloudscale, lutscale, cloudtemporal, mode<仅本 frag: 0=算 LUT / 1=写状态>)
 layout(set = 0, binding = 0) uniform sampler2D uProbe;     // 1x2 本帧探针 (NEAREST)
-layout(set = 0, binding = 1) uniform sampler2D uProbePrev; // 1x2 上一帧探针 (NEAREST)
+// binding 1 空着 (原 uProbePrev 已不用, 见 main() 里的注释); 描述符布局是四个 pass 共用的
+// 5 binding 表, 空位照填不误 —— 未被着色器引用的 binding 在 Vulkan 里合法。
 layout(set = 0, binding = 2) uniform sampler2D uLutPrev;   // 上一帧 LUT (LINEAR clamp)
+layout(set = 0, binding = 3) uniform sampler2D uLutState;  // 1x1 上次**真算**用的太阳 (NEAREST)
 
 layout(push_constant) uniform SkyPC
 {
@@ -118,19 +124,38 @@ void main()
 {
 	vec4 probe = texture(uProbe, vec2(0.5, 0.25));       // (sunDir.xyz, meanLum)
 	vec4 probeH = texture(uProbe, vec2(0.5, 0.75));      // (horizon, valid, peak, frac)
-	vec4 pprobe = texture(uProbePrev, vec2(0.5, 0.25));
+	vec4 state = texture(uLutState, vec2(0.5, 0.5));     // (上次真算用的太阳方向, 有效位)
 	vec3 sunDir = (dot(probe.xyz, probe.xyz) > 0.25) ? normalize(probe.xyz) : vec3(0.0, 1.0, 0.0);
-	// ---- 低频重算闸: 太阳夹角小于阈值 ⇒ 直接沿用上一帧 LUT ----
-	if (probeH.y > 0.5 && dot(pprobe.xyz, pprobe.xyz) > 0.25)
+	// ---- 低频重算闸: 跟「上一次**真算**时用的太阳方向」比, 不是跟上一帧比 ----
+	// 探针输出是帧间平滑过的 (系数 0.35), 平滑运动时每帧增量只有原始增量的 ~0.35 倍;
+	// 拿它当基准会把"太阳已走过阈值"这件事推迟很久 (理论上可冻结数分钟), 而合成侧又按
+	// **当前** sunDir 去采这张 LUT ⇒ 散射与太阳系统性错位。state 存的是「生成 lut[cur]
+	// 时用的那个太阳」, 于是两次真算之间的漂移恒 ≤ kSunThreshDeg, 与平滑系数无关。
+	const bool haveRef = (state.w > 0.5) && (dot(state.xyz, state.xyz) > 0.25);
+	bool doCompute;
+	if (probeH.y < 0.5)
+		doCompute = false;               // 全帧无天空: 本 LUT 没人用 (云/合成各自早退), 不跑积分
+	else if (!haveRef)
+		doCompute = true;                // 首帧 / 基准还没建立
+	else
 	{
-		vec3 pSun = normalize(pprobe.xyz);
-		float cs = clamp(dot(sunDir, pSun), -1.0, 1.0);
-		float ang = degrees(acos(cs));
-		if (ang < kSunThreshDeg)
-		{
-			oColor = texture(uLutPrev, vUV);
-			return;
-		}
+		vec3 refSun = normalize(state.xyz);
+		float cs = clamp(dot(sunDir, refSun), -1.0, 1.0);
+		doCompute = (degrees(acos(cs)) >= kSunThreshDeg);
+	}
+	// ---- 状态写回 (mode=1): 渲进 1x1 小图, 与主 LUT **同一条管线 / 同一套描述符**,
+	//      所以上面那段判据逐字复用即可 (输入相同 ⇒ 结论必然相同)。 ----
+	if (pc.tier.w > 0.5)
+	{
+		vec3 newSun = doCompute ? sunDir : (haveRef ? normalize(state.xyz) : vec3(0.0, 0.0, 0.0));
+		float ok = (doCompute || haveRef) ? 1.0 : 0.0;
+		oColor = vec4(newSun, ok);
+		return;
+	}
+	if (!doCompute)
+	{
+		oColor = texture(uLutPrev, vUV);  // 一次取样沿用上一帧, 连积分都不跑
+		return;
 	}
 	// ---- uv → 视线方向 (以太阳的方位角为参考) ----
 	float phi = vUV.x * 2.0 * kPi;

@@ -6,6 +6,7 @@
 #include "vkrenderer.h"
 #include "pocb_shaders.h"
 #include <cmath> // v0.18.6: SSR v1 反推 inv(投影) 要 tan(FOV/2)
+#include <cstdio> // v0.18.37: skyMs() 用 snprintf("%.2f") 做定长小数格式化
 
 PocbCtx g_pocb; // 定义在这里 (vkrenderer.h 声明为 extern); 原 main.cpp 里是 static
 using namespace pocmain; // hook 面提供的 日志/ini/哈希/D3D11 镜像 (声明见 vkrenderer.h)
@@ -4883,6 +4884,16 @@ static VkImage         g_skyCloudImg[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
 static VkDeviceMemory  g_skyCloudMem[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
 static VkImageView     g_skyCloudView[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
 static VkFramebuffer   g_skyFbCloud[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+// **LUT 重算基准** (I1): 1x1 RGBA16F ping-pong, 存 "生成 lut[cur] 时用的太阳方向 + 有效位"。
+// 低频重算的阈值必须跟"上一次**真算**的太阳"比, 不能跟上一帧比 —— 探针输出带帧间平滑
+// (k=0.35), 平滑运动时每帧增量只有原始的 ~0.35 倍, 拿它当基准会把阈值判定推迟很久
+// (理论可冻结数分钟), 而合成侧按**当前**太阳采这张 LUT ⇒ 系统性错位。
+// 写法: LUT 渲完后再用**同一条管线**渲一次 1x1 (push constant tier.w=1 走状态分支),
+// 不需要 MRT、不需要新管线、不需要第五个 shader。
+static VkImage         g_skyStateImg[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkDeviceMemory  g_skyStateMem[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkImageView     g_skyStateView[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkFramebuffer   g_skyFbState[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
 static VkImage         g_skyNoiseImg = VK_NULL_HANDLE;   // 3D 噪声 (VK_IMAGE_TYPE_3D)
 static VkDeviceMemory  g_skyNoiseMem = VK_NULL_HANDLE;
 static VkImageView     g_skyNoiseView = VK_NULL_HANDLE;
@@ -4910,7 +4921,19 @@ static int             g_skyPing = 0;                    // 本帧用哪一侧 (
 static bool            g_skyRtInit = false;               // 六张 ping-pong 图是否已从 UNDEFINED 迁走过
 static long            g_skyPassN = 0;                   // 四 pass 提交帧数
 static double          g_skyPassMs = 0.0;                // 提交+fence 累计 ms
+static long            g_skyTimeOutN = 0;                // fence 有界等待超时次数 (节流告警用)
 static bool            g_skyPassLogOnce = false;
+
+// 毫秒格式化: **固定两位小数**。原来的 std::to_string(ms).substr(0,5) 有两个毛病 ——
+// (a) to_string 给的是 locale 相关格式, 换台机器就换小数点/位数; (b) substr(0,5) 是按
+// **字符**切, 一旦 ≥100 ms ("100.5") 就把数字截成 "100." 这种坏串。snprintf("%.2f")
+// 两种都免疫, 且本 TU 已在用 snprintf 之外不需要新依赖。
+static std::string skyMs(double ms)
+{
+	char buf[32];
+	snprintf(buf, sizeof(buf), "%.2f", ms);
+	return std::string(buf);
+}
 
 // ---- CPU 端 3D 噪声生成 (值噪声 FBM, 可平铺 ⇒ 采样器用 REPEAT) ----
 // 确定性哈希 (整数混合) —— 不用 <random> 之类实现相关的东西, 保证每次构建字节一致。
@@ -5071,10 +5094,36 @@ static bool skyNoiseBuild(PocbCtx& c)
 		return true;
 	const int n = 32; // 32^3 x RGBA8 = 128 KB
 	const VkDeviceSize need = (VkDeviceSize)n * n * n * 4ULL;
-	if (!skyMakeRt(c, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_TYPE_3D,
+	// usage **必须**带 TRANSFER_DST: 这张图后面要被 vkCmdCopyBufferToImage 以
+	// VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL 写入, 只给 SAMPLED 是规范违反 (拷贝未定义),
+	// 后果是噪声纹理恒黑 ⇒ cloudDensity 恒低于阈值 ⇒ 任何档位都**一缕云都看不到**。
+	if (!skyMakeRt(c, VK_FORMAT_R8G8B8A8_UNORM,
+	               VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_TYPE_3D,
 	               (uint32_t)n, (uint32_t)n, (uint32_t)n, VK_IMAGE_VIEW_TYPE_3D, g_skyNoiseImg,
 	               g_skyNoiseMem, g_skyNoiseView, VK_IMAGE_ASPECT_COLOR_BIT))
 		return false;
+	// 统一退掉 (图 + 已映射 buffer): 这一段三个失败分支都是"建到一半", 漏退任何一件
+	// 都会让下次进来时的 g_skyNoiseImg != VK_NULL_HANDLE 判定误以为"已就绪"而跳过上传,
+	// 结果就是一张**从未被灌过数据**的噪声图被当成好的用。
+	auto dropAll = [&]() {
+		if (g_skyNoiseBufPtr)
+		{
+			c.fns.vkUnmapMemory(c.vdev, g_skyNoiseBufMem);
+			g_skyNoiseBufPtr = nullptr;
+		}
+		if (g_skyNoiseBufMem != VK_NULL_HANDLE)
+		{
+			c.fns.vkFreeMemory(c.vdev, g_skyNoiseBufMem, nullptr);
+			g_skyNoiseBufMem = VK_NULL_HANDLE;
+		}
+		if (g_skyNoiseBuf != VK_NULL_HANDLE)
+		{
+			c.fns.vkDestroyBuffer(c.vdev, g_skyNoiseBuf, nullptr);
+			g_skyNoiseBuf = VK_NULL_HANDLE;
+		}
+		VkFramebuffer noFb = VK_NULL_HANDLE;
+		skyFreeRt(c, g_skyNoiseImg, g_skyNoiseMem, g_skyNoiseView, noFb);
+	};
 	// ---- 上传 buffer (HOST_VISIBLE|COHERENT; 表里没有 vkInvalidateMappedMemoryRanges,
 	//      不 COHERENT 就没法保证 CPU 写对 GPU 可见 —— 与读回 buffer 同一条口径) ----
 	VkBufferCreateInfo bci{};
@@ -5120,25 +5169,14 @@ static bool skyNoiseBuild(PocbCtx& c)
 	if (c.fns.vkAllocateMemory(c.vdev, &bmai, nullptr, &g_skyNoiseBufMem) != VK_SUCCESS)
 	{
 		g_skyNoiseBufMem = VK_NULL_HANDLE;
-		c.fns.vkDestroyBuffer(c.vdev, g_skyNoiseBuf, nullptr);
-		g_skyNoiseBuf = VK_NULL_HANDLE;
+		dropAll();
 		return false;
 	}
 	if (c.fns.vkBindBufferMemory(c.vdev, g_skyNoiseBuf, g_skyNoiseBufMem, 0) != VK_SUCCESS ||
 	    c.fns.vkMapMemory(c.vdev, g_skyNoiseBufMem, 0, VK_WHOLE_SIZE, 0, &g_skyNoiseBufPtr) !=
 	        VK_SUCCESS)
 	{
-		if (g_skyNoiseBufPtr)
-		{
-			c.fns.vkUnmapMemory(c.vdev, g_skyNoiseBufMem);
-			g_skyNoiseBufPtr = nullptr;
-		}
-		c.fns.vkFreeMemory(c.vdev, g_skyNoiseBufMem, nullptr);
-		g_skyNoiseBufMem = VK_NULL_HANDLE;
-		c.fns.vkDestroyBuffer(c.vdev, g_skyNoiseBuf, nullptr);
-		g_skyNoiseBuf = VK_NULL_HANDLE;
-		VkFramebuffer noFb = VK_NULL_HANDLE;
-		skyFreeRt(c, g_skyNoiseImg, g_skyNoiseMem, g_skyNoiseView, noFb);
+		dropAll();
 		return false;
 	}
 	// ---- 灌数据: 四通道各一组频率/种子 ⇒ 大形状 (R) / 中频 (G,B) / 高频细节 (A) ----
@@ -5169,6 +5207,7 @@ static bool skyNoiseBuild(PocbCtx& c)
 		if (c.fns.vkCreateCommandPool(c.vdev, &pci, nullptr, &g_skyPassPool) != VK_SUCCESS)
 		{
 			g_skyPassPool = VK_NULL_HANDLE;
+			dropAll();
 			return false;
 		}
 	}
@@ -5182,6 +5221,7 @@ static bool skyNoiseBuild(PocbCtx& c)
 		if (c.fns.vkAllocateCommandBuffers(c.vdev, &cbai, &g_skyPassCmd) != VK_SUCCESS)
 		{
 			g_skyPassCmd = VK_NULL_HANDLE;
+			dropAll();
 			return false;
 		}
 	}
@@ -5190,7 +5230,10 @@ static bool skyNoiseBuild(PocbCtx& c)
 	cbb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 	if (c.fns.vkBeginCommandBuffer(g_skyPassCmd, &cbb) != VK_SUCCESS)
+	{
+		dropAll();
 		return false;
+	}
 	VkImageMemoryBarrier imb{};
 	imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 	imb.srcAccessMask = 0;
@@ -5264,8 +5307,8 @@ static void skyInGateWait(PocbCtx& c)
 	// 不每帧刷屏 (docs/07 §3.5 静默/节流纪律)。
 	if (g_skyGateN <= 4 || (g_skyGateN % 300) == 0)
 		logLine("[sky] 入向EVENT闸#" + std::to_string(g_skyGateN) + " 等待=" +
-		        std::to_string(ms).substr(0, 5) + "ms 累计均值=" +
-		        std::to_string(g_skyGateMs / (double)g_skyGateN).substr(0, 5) + "ms 帧=" +
+		        skyMs(ms) + "ms 累计均值=" +
+		        skyMs(g_skyGateMs / (double)g_skyGateN) + "ms 帧=" +
 		        std::to_string(g_presentCount.load(std::memory_order_relaxed)));
 }
 
@@ -5464,6 +5507,12 @@ static bool skyPassBuild(PocbCtx& c)
 		               VK_IMAGE_VIEW_TYPE_2D, g_skyCloudImg[i], g_skyCloudMem[i], g_skyCloudView[i],
 		               VK_IMAGE_ASPECT_COLOR_BIT))
 			return fail("云 RT 建不出");
+		// LUT 重算基准 1x1 (I1): 与 LUT 同格式同管线, 只是尺寸 1x1, 用同一个 render pass。
+		if (!g_skyStateImg[i] &&
+		    !skyMakeRt(c, VK_FORMAT_R16G16B16A16_SFLOAT, rtUsage, VK_IMAGE_TYPE_2D, 1, 1, 1,
+		               VK_IMAGE_VIEW_TYPE_2D, g_skyStateImg[i], g_skyStateMem[i],
+		               g_skyStateView[i], VK_IMAGE_ASPECT_COLOR_BIT))
+			return fail("LUT 状态 1x1 建不出");
 	}
 	// ---- render pass (单附件 RGBA16F, loadOp DONT_CARE 模板; 四个 pass 共用) ----
 	if (!g_skyPassRp)
@@ -5605,6 +5654,8 @@ static bool skyPassBuild(PocbCtx& c)
 			return fail("LUT framebuffer 建不出");
 		if (!mkFb(g_skyCloudView[i], cw, ch, g_skyFbCloud[i]))
 			return fail("云 framebuffer 建不出");
+		if (!mkFb(g_skyStateView[i], 1, 1, g_skyFbState[i]))
+			return fail("LUT 状态 framebuffer 建不出");
 	}
 	if (!g_skyFbOut)
 	{
@@ -5678,7 +5729,9 @@ static bool skyPassBuild(PocbCtx& c)
 		float lutData[2] = {lutSteps, 0.35f};
 		float cloudData[2] = {(float)(g_skyCloudSteps > 0 ? g_skyCloudSteps : 64),
 		                     (g_skyCloudTemporal > 0) ? 0.55f : 0.0f};
-		float compData[2] = {0.85f, 0.0016f};
+		// kFade 是**像素尺度**的接缝柔化宽度 (1e-6 ≈ D24 十几个码宽)。原值 1.6e-3 在游戏
+	// near=15/far=353467.6 下等于 10km 处约 9.4km 的地形深度带, 会把远处地形整片压暗。
+	float compData[2] = {0.85f, 1.0e-6f};
 		VkSpecializationMapEntry me[2]{};
 		me[0].constantID = 0;
 		me[0].offset = 0;
@@ -5795,7 +5848,8 @@ static bool skyPassBuild(PocbCtx& c)
 // 录制内容 (顺序即依赖顺序):
 //   ① 入向 skyIn/skyDepth: GENERAL → SHADER_READ_ONLY
 //   ② 探针 pass (写 probe[cur], 读 skyIn + mask + probe[prev])
-//   ③ LUT pass   (写 lut[cur], 读 probe[cur] + probe[prev] + lut[prev])
+//   ③ LUT pass   (写 lut[cur], 读 probe[cur] + state[prv] + lut[prv])
+//   ③' LUT 状态  (写 state[cur] 1x1, 同一条管线 tier.w=1 —— 低频重算的基准, 见 I1)
 //   ④ 云 pass    (写 cloud[cur], 读 probe[cur] + mask + lut[cur] + cloud[prev] + 噪声)
 //   ⑤ 合成 pass  (写 skyOut, 读 skyIn + mask + lut[cur] + cloud[cur] + probe[cur])
 //   ⑥ 出向 skyOut 留在 GENERAL (D3D11 侧 CopyResource 读它)
@@ -5821,7 +5875,7 @@ static void skyPassRecord(PocbCtx& c)
 		imb.subresourceRange = {aspect, 0, 1, 0, 1};
 		c.fns.vkCmdPipelineBarrier(g_skyPassCmd, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &imb);
 	};
-	auto draw = [&](int pass, VkFramebuffer fb, unsigned w, unsigned h) {
+	auto draw = [&](int pass, VkFramebuffer fb, unsigned w, unsigned h, float mode) {
 		VkRenderPassBeginInfo rb{};
 		rb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 		rb.renderPass = g_skyPassRp;
@@ -5845,13 +5899,13 @@ static void skyPassRecord(PocbCtx& c)
 		sc.offset = {0, 0};
 		sc.extent = VkExtent2D{w, h};
 		c.fns.vkCmdSetScissor(g_skyPassCmd, 0, 1, &sc);
-		// ---- push constant 128B (三个 frag 共用同一布局) ----
+		// ---- push constant 128B (四个 frag 共用同一布局) ----
 		struct
 		{
 			float cam[4];  // x=time(s) y=aspect z=tan(fovY/2) w=exposure
 			float sz[4];   // x=cloudW y=cloudH z=windX w=windZ
 			float ctl[4];  // x=coverage y=density z=sunIntensity w=firstFrame
-			float tier[4]; // x=cloudscale y=lutscale z=cloudtemporal w=unused
+			float tier[4]; // x=cloudscale y=lutscale z=cloudtemporal w=mode(仅 LUT: 1=写状态)
 			float pad[4][4];
 		} pc;
 		// 时间: 由帧计数推导的**单调**时间轴 (不读系统时钟 ⇒ 可复现; 云靠它漂移)
@@ -5876,7 +5930,7 @@ static void skyPassRecord(PocbCtx& c)
 		pc.tier[0] = g_skyCloudScale;
 		pc.tier[1] = g_skyLutScale;
 		pc.tier[2] = (float)(g_skyCloudTemporal > 0 ? 1 : 0);
-		pc.tier[3] = 0.0f;
+		pc.tier[3] = mode; // 仅 sky_lut 用: 1 = 这次渲 1x1 状态图而不是 LUT
 		for (int i = 0; i < 4; ++i)
 			for (int j = 0; j < 4; ++j)
 				pc.pad[i][j] = 0.0f;
@@ -5885,17 +5939,18 @@ static void skyPassRecord(PocbCtx& c)
 		c.fns.vkCmdDraw(g_skyPassCmd, 3, 1, 0, 0);
 		c.fns.vkCmdEndRenderPass(g_skyPassCmd);
 	};
-	// ⓪ 首次: 六张 ping-pong 图 UNDEFINED → SHADER_READ_ONLY。
-	// 历史侧 (probe[prv]/lut[prv]/cloud[prv]) 在头几帧会被当 sampler 读, 而描述符里写的是
-	// SHADER_READ_ONLY_OPTIMAL —— 不先迁一次就是拿 UNDEFINED 布局采样 (未定义行为, 可能读到
-	// 垃圾/NaN 污染第一帧的太阳方向)。图重建 (换分辨率/换档) 后由 skyPassBuild 清位重做。
+	// ⓪ 首次: 八张 ping-pong 图 UNDEFINED → SHADER_READ_ONLY。
+	// 历史侧 (probe[prv]/lut[prv]/cloud[prv]/state[prv]) 在头几帧会被当 sampler 读, 而描述符里
+	// 写的是 SHADER_READ_ONLY_OPTIMAL —— 不先迁一次就是拿 UNDEFINED 布局采样 (未定义行为, 可能
+	// 读到垃圾/NaN 污染第一帧的太阳方向)。图重建 (换分辨率/换档) 后由 skyPassBuild 清位重做。
 	if (!g_skyRtInit)
 	{
 		g_skyRtInit = true;
 		for (int i = 0; i < 2; ++i)
 		{
-			const VkImage trio[3] = {g_skyProbeImg[i], g_skyLutImg[i], g_skyCloudImg[i]};
-			for (int j = 0; j < 3; ++j)
+			const VkImage trio[4] = {g_skyProbeImg[i], g_skyLutImg[i], g_skyCloudImg[i],
+			                         g_skyStateImg[i]};
+			for (int j = 0; j < 4; ++j)
 				barrier(trio[j], VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
 				        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
 				        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -5911,22 +5966,30 @@ static void skyPassRecord(PocbCtx& c)
 	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
 	        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
 	        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-	draw(0, g_skyFbProbe[cur], 1, 2);
+	draw(0, g_skyFbProbe[cur], 1, 2, 0.0f);
 	barrier(g_skyProbeImg[cur], VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 	        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 	        VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
 	        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-	draw(1, g_skyFbLut[cur], g_skyLutW, g_skyLutH);
+	draw(1, g_skyFbLut[cur], g_skyLutW, g_skyLutH, 0.0f);
 	barrier(g_skyLutImg[cur], VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 	        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 	        VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
 	        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-	draw(2, g_skyFbCloud[cur], g_skyCloudW, g_skyCloudH);
+	// LUT 重算基准写回 (I1): **同一条 LUT 管线**再渲一次 1x1 (tier.w=1 走状态分支),
+	// 输入与上面那次完全相同 ⇒ 判据结论必然相同 ⇒ 写进去的正是"本帧这次真算用的太阳"。
+	// 用的是同一套描述符 (set[1]: binding0=probe[cur] 取太阳, binding3=state[prv] 取旧基准)。
+	draw(1, g_skyFbState[cur], 1, 1, 1.0f);
+	barrier(g_skyStateImg[cur], VK_IMAGE_ASPECT_COLOR_BIT,
+	        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+	        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+	        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	draw(2, g_skyFbCloud[cur], g_skyCloudW, g_skyCloudH, 0.0f);
 	barrier(g_skyCloudImg[cur], VK_IMAGE_ASPECT_COLOR_BIT,
 	        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 	        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
 	        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-	draw(3, g_skyFbOut, g_skyVkW, g_skyVkH);
+	draw(3, g_skyFbOut, g_skyVkW, g_skyVkH, 0.0f);
 	// ⑥ 出向停在 GENERAL (D3D11 侧 CopyResource(321 ← skyOut) 读它)
 	barrier(g_skyOutVkImg, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 	        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
@@ -5982,11 +6045,12 @@ static void skyPassFillSets(PocbCtx& c)
 		const VkImageLayout ly[3] = {ro, ro, ro};
 		fill(0, sm, vw, ly, 3);
 	}
-	{ // LUT
-		const VkSampler sm[3] = {sNear, sNear, sLin};
-		const VkImageView vw[3] = {g_skyProbeView[cur], g_skyProbeView[prv], g_skyLutView[prv]};
-		const VkImageLayout ly[3] = {ro, ro, ro};
-		fill(1, sm, vw, ly, 3);
+	{ // LUT  (binding 1 已被着色器弃用, 仍照填 —— 布局是四 pass 共用的 5 binding 表)
+		const VkSampler sm[4] = {sNear, sNear, sLin, sNear};
+		const VkImageView vw[4] = {g_skyProbeView[cur], g_skyProbeView[prv], g_skyLutView[prv],
+		                          g_skyStateView[prv]};
+		const VkImageLayout ly[4] = {ro, ro, ro, ro};
+		fill(1, sm, vw, ly, 4);
 	}
 	{ // 云
 		const VkSampler sm[5] = {sNear, sNear, sLin, sLin, sRep};
@@ -6033,7 +6097,15 @@ void skyVkFrame(PocbCtx& c) // vkrenderer.h 有声明 (非 static), 定义必须
 	skyPassRecord(c);
 	if (c.fns.vkEndCommandBuffer(g_skyPassCmd) != VK_SUCCESS)
 		return;
-	// ---- 提交 + 等完 (出向 skyOut 必须在 hook 面 CopyResource 之前完成 ⇒ 必须等) ----
+	// ---- 提交 + **有界**等待 (出向 skyOut 必须在 hook 面 CopyResource 之前完成 ⇒ 必须等) ----
+	// 等待上限 64 ms: 这条队列上只有四个全屏 dispatch (最贵的一档 1080p×cloudscale 的云
+	// raymarch), 正常是亚毫秒级; 64 ms ≈ 60fps 下 4 帧的预算, 已经是「慢得离谱但还可能
+	// 只是排队」的天花板。**不用 UINT64_MAX**: 那是把渲染线程无限期挂死的量 —— GPU 挂而未
+	// lost 时 (驱动不报 DEVICE_LOST, 队列不再推进) 就会永久卡住, 且没有任何降级出口。
+	// 超时后: 本帧**不写回** (g_skyOutReady=false ⇒ skyOutFire 直接跳过, 画面留原版天空),
+	// 只打一行节流告警, **不置 g_skyPassState=2** —— 超时是瞬时现象, 下一帧照常重试;
+	// VK_ERROR_DEVICE_LOST / SUBOPTIMAL_KHR 等真错误仍走原有的关自己分支。
+	const uint64_t kSkyWaitMs = 64;
 	const auto f0 = std::chrono::steady_clock::now();
 	c.fns.vkResetFences(c.vdev, 1, &c.fence);
 	VkSubmitInfo si{};
@@ -6042,9 +6114,19 @@ void skyVkFrame(PocbCtx& c) // vkrenderer.h 有声明 (非 static), 定义必须
 	si.pCommandBuffers = &g_skyPassCmd;
 	VkResult vr = c.fns.vkQueueSubmit(c.queue, 1, &si, c.fence);
 	if (vr == VK_SUCCESS)
-		vr = c.fns.vkWaitForFences(c.vdev, 1, &c.fence, VK_TRUE, UINT64_MAX);
+		vr = c.fns.vkWaitForFences(c.vdev, 1, &c.fence, VK_TRUE, kSkyWaitMs * 1000000ULL);
 	const double ms =
 	    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - f0).count();
+	if (vr == VK_TIMEOUT)
+	{
+		g_skyOutReady = false;   // 本帧不回写 ⇒ 321 保持游戏自己的天空
+		g_skyTimeOutN++;
+		if (g_skyTimeOutN <= 3 || (g_skyTimeOutN % 300) == 0)
+			logLine("[sky] 四 pass 等 fence 超 " + skyMs(kSkyWaitMs) +
+			        "ms (第 " + std::to_string(g_skyTimeOutN) + " 次) → 本帧不回写 (画面留原版天空); "
+			        "下帧照常重试, 不关自己");
+		return;
+	}
 	if (vr != VK_SUCCESS)
 	{
 		logLine("[sky] 四 pass 提交/等待 = " + pocbCode(vr) + " → 本帧不回写 (画面留原版天空)");
@@ -6057,15 +6139,15 @@ void skyVkFrame(PocbCtx& c) // vkrenderer.h 有声明 (非 static), 定义必须
 	if (!g_skyPassLogOnce)
 	{
 		g_skyPassLogOnce = true;
-		logLine("[sky] 四 pass 第 1 帧完成: 探针+LUT+云+合成 = " + std::to_string(ms).substr(0, 5) +
+		logLine("[sky] 四 pass 第 1 帧完成: 探针+LUT+状态+LUT+云+合成 = " + skyMs(ms) +
 		        "ms (含提交+fence 同步等完; 出向 skyOut 已就绪, hook 面将 CopyResource(321←skyOut))");
 	}
 	else if ((g_skyPassN % 600) == 0)
 	{
 		logLine("[sky] 四 pass 累计均值 " +
-		        std::to_string(g_skyPassMs / (double)g_skyPassN).substr(0, 5) + "ms/帧 (本帧 " +
-		        std::to_string(ms).substr(0, 5) + "ms, 闸等待均值 " +
-		        std::to_string(g_skyGateN ? g_skyGateMs / (double)g_skyGateN : 0.0).substr(0, 5) +
+		        skyMs(g_skyPassMs / (double)g_skyPassN) + "ms/帧 (本帧 " + skyMs(ms) +
+		        "ms, 闸等待均值 " +
+		        skyMs(g_skyGateN ? g_skyGateMs / (double)g_skyGateN : 0.0) +
 		        "ms, 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed)) +
 		        ") — 5% 闸账口径 (docs/07 §6 R6)");
 	}
