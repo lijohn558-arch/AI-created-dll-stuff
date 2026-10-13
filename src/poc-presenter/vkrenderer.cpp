@@ -5725,18 +5725,25 @@ static bool skyPassBuild(PocbCtx& c)
 		//   云   : kSteps (sky.cloudsteps 档位值), kHistory (cloudtemporal ? 0.55 : 0),
 		//          kMs=0.03 (多次散射地板), kDistFade=1/6000 (空气透视),
 		//          kAmb=1.3 (环境项倍数), kFace=32 (受光面标定)
+		//   云   : kSteps (sky.cloudsteps 档位值), kHistory (cloudtemporal ? 0.55 : 0),
+		//          kMs=0.03 (多次散射地板), kDistFade=1/6000 (空气透视),
+		//          kAmb=1.3 (环境项倍数), kFace=42 (受光面标定), kFaceMax=3.0 (乘积上限)
 		//   合成 : kMix=0.85 (掩码内与原版混合比), kFade=1e-6 (掩码边缘过渡宽度, 像素尺度)
 		// 探针无 spec constant (纯函数, 无档位依赖)。
-		// 云那四个新常量的取值理由见 sky_cloud.frag 顶部注释 (全部以 LUT 天顶散射 zen
+		// 云那五个新常量的取值理由见 sky_cloud.frag 顶部注释 (全部以 LUT 天顶散射 zen
 		// 为单位: 受光面 ≈ 2×zen, 云底/内部 ≈ 0.5×zen)。
+		// ⚠️ **VkSpecializationInfo 的数据永远覆盖 SPIR-V 里的默认值** —— 下面的字面量必须
+		// 与 sky_cloud.frag 的 layout(constant_id=…) 默认值逐个对齐, 否则文档里写的标定
+		// 描述的就不是真正在跑的着色器 (kFace 就这样错过一次: GLSL 已改 42, 这里还是 32)。
 		float lutSteps = (g_skyLutScale > 1.5f) ? 28.0f : 16.0f;
 		float lutData[2] = {lutSteps, 0.35f};
-		float cloudData[6] = {(float)(g_skyCloudSteps > 0 ? g_skyCloudSteps : 64),
+		float cloudData[7] = {(float)(g_skyCloudSteps > 0 ? g_skyCloudSteps : 64),
 		                     (g_skyCloudTemporal > 0) ? 0.55f : 0.0f,
 		                     0.03f,          // kMs
 		                     1.0f / 6000.0f, // kDistFade
 		                     1.3f,           // kAmb
-		                     32.0f};         // kFace
+		                     42.0f,          // kFace  (侧向 42*0.036*1.18 ≈ 1.78×zen)
+		                     3.0f};          // kFaceMax (正向封顶 3.0*1.18 ≈ 3.5×zen)
 		// kFade 是**像素尺度**的接缝柔化宽度 (1e-6 ≈ D24 十几个码宽)。原值 1.6e-3 在游戏
 		// near=15/far=353467.6 下等于 10km 处约 9.4km 的地形深度带, 会把远处地形整片压暗。
 		float compData[2] = {0.85f, 1.0e-6f};
@@ -5747,20 +5754,20 @@ static bool skyPassBuild(PocbCtx& c)
 		me[1].constantID = 1;
 		me[1].offset = sizeof(float);
 		me[1].size = sizeof(float);
-		VkSpecializationMapEntry me6[6]{};
-		for (int i = 0; i < 6; ++i)
+		VkSpecializationMapEntry me7[7]{};
+		for (int i = 0; i < 7; ++i)
 		{
-			me6[i].constantID = (uint32_t)i;
-			me6[i].offset = (uint32_t)(sizeof(float) * i);
-			me6[i].size = sizeof(float);
+			me7[i].constantID = (uint32_t)i;
+			me7[i].offset = (uint32_t)(sizeof(float) * i);
+			me7[i].size = sizeof(float);
 		}
 		VkSpecializationInfo spec[4]{};
 		spec[1].mapEntryCount = 2;
 		spec[1].pMapEntries = me;
 		spec[1].dataSize = sizeof(lutData);
 		spec[1].pData = lutData;
-		spec[2].mapEntryCount = 6;
-		spec[2].pMapEntries = me6;
+		spec[2].mapEntryCount = 7;
+		spec[2].pMapEntries = me7;
 		spec[2].dataSize = sizeof(cloudData);
 		spec[2].pData = cloudData;
 		spec[3].mapEntryCount = 2;

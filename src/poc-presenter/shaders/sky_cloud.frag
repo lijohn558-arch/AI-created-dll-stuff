@@ -51,7 +51,8 @@ layout(push_constant) uniform SkyPC
 //   kFace   = 受光面标定。**标定用的是侧向散射 (mu=0, 视线⊥太阳) 的 phN = 0.036**:
 //             42 * 0.036 * 1.18 (粉末项) ≈ **1.78×zen ≈ 2×zen**。
 //             关键: 真正被限制的不是 phN 而是**乘积 kFace·phN** (见 kFaceMax)。
-//   kFaceMax = **乘积上限 3.0** (shader 常量)。相位前向峰在 mu→1 是 1.7, 比侧向高 47 倍,
+//   kFaceMax = **乘积上限 3.0** (spec constant_id 6, 由 vkrenderer.cpp 的 cloudData[6]
+//             喂进来; 与 GLSL 默认值必须一致)。相位前向峰在 mu→1 是 1.7, 比侧向高 47 倍,
 //             乘上 kFace 就是 42*1.7 ≈ 71×zen —— 游戏自己的 tonemap 吸收不掉, 那正是
 //             上一版 (钳 phN≤0.35, 乘积仍达 11.2 ⇒ 约 15×meanLum) 的过曝缺陷换个地方复发。
 //             钳乘积而不是钳相位: 前向/侧向之比仍保留 3.0/1.51 ≈ 2.0 倍 (银边还在),
@@ -70,10 +71,10 @@ layout(constant_id = 2) const float kMs = 0.03;
 layout(constant_id = 3) const float kDistFade = 1.0 / 6000.0;
 layout(constant_id = 4) const float kAmb = 1.3;
 layout(constant_id = 5) const float kFace = 42.0;
-
-// 受光项乘积上限: 设计意图是「前向峰 2~4×zen, 侧向 ~2×zen」。侧向乘积天然是
-// 42*0.036 = 1.51, 所以上限取 3.0 正好只削前向那一段, 不动侧向标定。
-const float kFaceMax = 3.0;
+// 受光项乘积上限 (与 kFace/kMs/kAmb/kDistFade 同款: 走 VkSpecializationInfo,
+// 见 vkrenderer.cpp cloudData[6]): 设计意图是「前向峰 2~4×zen, 侧向 ~2×zen」。
+// 侧向乘积天然是 42*0.036 = 1.51, 所以上限取 3.0 正好只削正向前段, 不动侧向标定。
+layout(constant_id = 6) const float kFaceMax = 3.0;
 
 // ---- 掩码判据 (**与 sky_comp.frag 里的同名常量必须逐字一致**) ----
 // skyDepth 是 D24 归一化值, 天空 = 精确满值 0xFFFFFF ⇒ 1.0。留一点点余量吸收驱动端的
