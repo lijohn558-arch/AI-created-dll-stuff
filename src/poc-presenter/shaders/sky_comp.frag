@@ -54,6 +54,18 @@ layout(constant_id = 1) const float kFade = 1.0e-6;
 // 本 pass 当"天空"、被云 pass 当"非天空", 正好落进云输出中性值(alpha=1 ⇒ 纯散射)的缝里。
 const float kSkyEps = 0.9999999;
 
+// ---- LUT 参考 texel 的坐标 (**与 sky_lut.frag / sky_cloud.frag 必须逐字一致**) ----
+// 吸附到真实 texel 中心, 使 LINEAR 采样取到的是**单个 texel** —— 这样 LUT 内部
+// 「参考点逐位透传」的性质才严格成立 (写死 0.7568 会落在两行/两列之间, 采到插值)。
+// 三处各算一遍同样的式子, 而 uLut 与 LUT pass 的 uLutPrev 同尺寸 ⇒ 坐标必然一致。
+vec2 refTexel()
+{
+	ivec2 sz = textureSize(uLut, 0);
+	float x = (floor(0.5 * float(sz.x) - 0.5) + 0.5) / float(sz.x);
+	float y = (floor(0.7568 * float(sz.y) - 0.5) + 0.5) / float(sz.y);
+	return vec2(x, y);
+}
+
 layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 oColor;
 
@@ -111,18 +123,18 @@ void main()
 	// 原先用**逐像素**的模型亮度 skyLum 做分母 (RC3): gain = meanLum/skyLum 逐像素成立,
 	// 于是 sky*gain ≈ exposure*meanLum 处处相等 —— 天空只剩色相, 模型本身那条「地平线比
 	// 天顶亮」的梯度被彻底抹平; 而近太阳处 Mie 前向峰 × gain 直接吹成全屏白。
-	// 现在分母换成**帧常量**: LUT 的**参考 texel** (u=0.5 背阳, v=0.7568) —— 与 LUT 内部做
-// 范围压缩用的、以及云 pass 取环境光用的, 是**同一个点** (见 sky_lut.frag compressLum)。
-// 不能再用天顶 (u=0.5, v=0.98): 在这个单次散射模型里天顶是全场**最暗**的方向, 拿它
-// 当分母等于"按最暗处定标", 于是地平线/日晕那些行 (实测是背阳中天的 5.4 / 16.6 / 153
-// 倍, 45°/10°/夜间) 会原样被推成 5~153 倍的游戏均值 ⇒ 直接进 tonemap ⇒ 炸白带。
-// 整帧只有一个标量 ⇒ 模型的梯度原样保留: 地平线变暖、天顶保持蓝、近太阳是一圈
-// 自然的白晕而不是全屏过曝。云的 RT 本来就是以这个参考为单位的, 于是云与天空同标定。
+	// 现在分母换成**帧常量**: LUT 的**参考 texel** —— 与 LUT 内部做范围压缩用的、以及云
+	// pass 取环境光用的, 是**同一个 texel**; 坐标由 refTexel() 吸附到真实 texel 中心,
+	// 三个 pass 各算一遍同样的式子 ⇒ 必然一致 (见 sky_lut.frag 的 refTexel/compressLum)。
+	// 不能再用天顶 (u=0.5, v=0.98): 在这个单次散射模型里天顶是全场**最暗**的方向, 拿它
+	// 当分母等于「按最暗处定标」, 于是地平线/日晕那些行 (实测是背阳中天的 5.4 / 16.6 /
+	// 153 倍, 45°/10°/夜间) 会原样被推成 5~153 倍的游戏均值 ⇒ 直接进 tonemap ⇒ 炸白带。
+	// 整帧只有一个标量 ⇒ 模型的梯度原样保留: 地平线变暖、天顶保持蓝、近太阳是一圈
+	// 自然的白晕而不是全屏过曝。云的 RT 本来就是以这个参考为单位的, 于是云与天空同标定。
 	float meanLum = max(probe.w, 1e-4);
-	vec3 zenRef = texture(uLut, vec2(0.5, 0.7568)).rgb;
-	float refLum = max(dot(zenRef, vec3(0.2126, 0.7152, 0.0722)), 1e-5);
+	vec3 refC = texture(uLut, refTexel()).rgb;
+	float refLum = max(dot(refC, vec3(0.2126, 0.7152, 0.0722)), 1e-5);
 	// 上限 32: refLum 只在 ref 退化到极小时才会顶到这个值 (正常天空的增益≈1, 因为
-	// 分母就是"背阳中天"这一档本身)。32 足以覆盖 ref 比均值暗一个半数量级的极端夜景,
 	// 又能在 ref 数值异常时把整帧的放大锁在 32× 以内, 不至于把画面整体吹白。
 	float gain = pc.cam.w * clamp(meanLum / refLum, 0.1, 32.0);
 	sky *= gain;

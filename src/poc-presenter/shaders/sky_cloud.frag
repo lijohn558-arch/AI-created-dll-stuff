@@ -45,27 +45,32 @@ layout(push_constant) uniform SkyPC
 // "3 步 × 260m × density 0.06/m" 的光学厚度决定 ⇒ 只要光线在云里 (d>=0.1) OD 就是
 // 15~47, beer = exp(-OD) ≈ 0 **到处都成立** ⇒ 直接项在数学上是死的, 云只被环境项
 // 照亮, 呈现为暗蓝灰团块。现在:
-//   全部以 **LUT 天顶散射 `zen`** 为单位表达 (zen 就是这一帧天空的量级基准), 于是
-//   "受光面 ≈ 2× 天顶 (白天读起来是白的) / 云底内部 ≈ 0.5× 天顶 (灰蓝, 不发黑)"
+//   全部以 **LUT 参考 texel 的散射 (`refC`, 背阳中等仰角那一档)** 为单位表达 —— 注意
+//   **不是天顶**: 在这个单次散射模型里天顶是全场最暗的方向, 拿它当单位会把整片天空
+//   标成几十倍 (见 sky_lut.frag 的 compressLum 与报告的 CPU 参考表)。于是
+//   "受光面 ≈ 2×参考 (白天读起来是白的) / 云底内部 ≈ 0.5~1.6×参考 (白灰, 不发黑)"
 //   这两个目标可以直接写成常数, 不依赖 sunIntensity/exposure 的绝对值。
 //   kFace   = 受光面标定。**标定用的是侧向散射 (mu=0, 视线⊥太阳) 的 phN = 0.036**:
-//             42 * 0.036 * 1.18 (粉末项) ≈ **1.78×zen ≈ 2×zen**。
+//             42 * 0.036 * 1.18 (粉末项) ≈ **1.78×参考 ≈ 2×参考**。
 //             关键: 真正被限制的不是 phN 而是**乘积 kFace·phN** (见 kFaceMax)。
 //   kFaceMax = **乘积上限 3.0** (spec constant_id 6, 由 vkrenderer.cpp 的 cloudData[6]
 //             喂进来; 与 GLSL 默认值必须一致)。相位前向峰在 mu→1 是 1.7, 比侧向高 47 倍,
-//             乘上 kFace 就是 42*1.7 ≈ 71×zen —— 游戏自己的 tonemap 吸收不掉, 那正是
+//             乘上 kFace 就是 42*1.7 ≈ 71×参考 —— 游戏自己的 tonemap 吸收不掉, 那正是
 //             上一版 (钳 phN≤0.35, 乘积仍达 11.2 ⇒ 约 15×meanLum) 的过曝缺陷换个地方复发。
 //             钳乘积而不是钳相位: 前向/侧向之比仍保留 3.0/1.51 ≈ 2.0 倍 (银边还在),
-//             但绝对峰值被钉在 3.0*1.18 ≈ 3.5×zen —— 正好落在「前向峰 2~4×zen」的设计意图里。
+//             但绝对峰值被钉在 3.0*1.18 ≈ 3.5×参考 —— 落在「前向峰 2~4×参考」的设计意图里。
 //   kMs     = **多次散射地板**: 厚云内部的亮光主要来自多次散射, 单次散射的 beer 在
-//             深内部必然趋 0。0.03 (上一轮) ⇒ 内部只有 1.51*0.03 ≈ 0.045×zen, 剩下的
-//             0.47×zen 全靠环境项 ⇒ 背光/厚处读成**暗灰** (Screenshot_108 那一坨)。
-//             取 **0.20**: 内部直接项 = faceK*kMs = 1.51*0.20 = 0.30×zen, 加上环境项
-//             (云底 0.45 / 云中 0.62 / 云顶 1.30) ⇒ 内部落在 0.75~1.60×zen 的白灰区间;
-//             受光面 = 1.51*1.18 + 0.30 = 2.08×zen (侧向) 与 3.0*1.18+0.30 = 3.84×zen
+//             深内部必然趋 0。0.03 (上一轮) ⇒ 内部只有 1.51*0.03 ≈ 0.045×参考, 剩下的
+//             0.47×参考 全靠环境项 ⇒ 背光/厚处读成**暗灰** (Screenshot_108 那一坨)。
+//             取 **0.20**: 内部直接项 = faceK*kMs = 1.51*0.20 = 0.30×参考, 加上环境项
+//             (云底 0.45 / 云中 0.62 / 云顶 1.30) ⇒ 内部落在 0.75~1.60×参考 的白灰区间;
+//             受光面 = 1.51*1.18 + 0.30 = 2.08×参考 (侧向) 与 3.0*1.18+0.30 = 3.84×参考
 //             (正前, kFaceMax 生效) ⇒ 仍保留明确的方向性明暗, 不会糊成一片。
+//             ⚠️ 这一项**乘 sunUp**: 夜里没有直射就没有直射项, 云只剩环境项 (见 main 里
+//             skyAmb 那段) —— 暗但看得见, 不是纯黑剪影。
 //   kAmb    = 环境项倍数: 云底 (hf=0) 拿 0.35×kAmb, 云顶拿 1.0×kAmb。取 1.3 ⇒
-//             云底 0.45×zen、云顶 1.3×zen —— 云顶比云底亮, 符合实际云 (上表面受光)。
+//             云底 0.45×参考、云顶 1.3×参考 —— 云顶比云底亮, 符合实际云 (上表面受光)。
+//             **不乘 sunUp** (夜里的环境光不需要太阳在地平线以上)。
 //   kDistFade = 空气透视: 只对**远于 4 km** 的云段衰减 (见 main 里的 far), 天顶那段
 //             (tEnter 1.4~3.6 km) 一点不暗。
 // 一律 float 声明 (数据块按 float 传, 与 kCubeElev/kMissFade 同款)。
@@ -76,9 +81,22 @@ layout(constant_id = 3) const float kDistFade = 1.0 / 6000.0;
 layout(constant_id = 4) const float kAmb = 1.3;
 layout(constant_id = 5) const float kFace = 42.0;
 // 受光项乘积上限 (与 kFace/kMs/kAmb/kDistFade 同款: 走 VkSpecializationInfo,
-// 见 vkrenderer.cpp cloudData[6]): 设计意图是「前向峰 2~4×zen, 侧向 ~2×zen」。
+// 见 vkrenderer.cpp cloudData[6]): 设计意图是「前向峰 2~4×参考, 侧向 ~2×参考」。
 // 侧向乘积天然是 42*0.036 = 1.51, 所以上限取 3.0 正好只削正向前段, 不动侧向标定。
 layout(constant_id = 6) const float kFaceMax = 3.0;
+
+// ---- LUT 参考 texel 的坐标 (**与 sky_lut.frag / sky_comp.frag 必须逐字一致**) ----
+// 目标是吸附到**真实 texel 中心**: LUT 高度随 lutscale 变 (16/32/64), 而采样器是 LINEAR,
+// 固定写 0.7568 会落在两行 (甚至两列) 之间 ⇒ 采到的是插值值, LUT 内部那个「参考点逐位
+// 透传」的性质就不成立 (压缩用的 ref 与这里采到的不是同一个数, 差几个百分点)。
+// 三个 pass 各算一遍同样的式子 (各自的 uLut/uLutPrev 尺寸相同) ⇒ 坐标必然一致。
+vec2 refTexel()
+{
+	ivec2 sz = textureSize(uLut, 0);
+	float x = (floor(0.5 * float(sz.x) - 0.5) + 0.5) / float(sz.x);
+	float y = (floor(0.7568 * float(sz.y) - 0.5) + 0.5) / float(sz.y);
+	return vec2(x, y);
+}
 
 // ---- 掩码判据 (**与 sky_comp.frag 里的同名常量必须逐字一致**) ----
 // skyDepth 是 D24 归一化值, 天空 = 精确满值 0xFFFFFF ⇒ 1.0。留一点点余量吸收驱动端的
@@ -197,21 +215,25 @@ void main()
 	int n = max(int(kSteps + 0.5), 4);
 	float dt = (tExit - tEnter) / float(n);
 	float mu = dot(rd, sunDir);
-	// 相位: 归一化的 HG 混双叶 (原代码乘 4π 只是为了"看得见", 现在以 zen 为单位,
+	// 相位: 归一化的 HG 混双叶 (原代码乘 4π 只是为了"看得见", 现在以参考值为单位,
 	// 乘 4π 会让近太阳处直接爆掉)。**这里不钳相位, 钳的是乘积** (见下面 faceK):
 	// 钳 phN 会把侧向标定一起削掉, 前向/侧向的层次 (银边) 就没了。
 	float phN = mix(hg(mu, 0.72), hg(mu, -0.28), 0.35);
 	// 受光项系数 = kFace·phN, **封顶 kFaceMax**: 侧向 (mu=0) 天然 42*0.036 = 1.51,
 	// 正向 (mu→1) 原本能到 71 ⇒ 峰值被钉在 3.0 ⇒ 前向/侧向仍留 ≈2.0 倍的银边,
-	// 但绝对值落在 3.0*1.18 ≈ 3.5×zen (设计意图: 前向峰 2~4×zen)。
+	// 但绝对值落在 3.0*1.18 ≈ 3.5×参考 (设计意图: 前向峰 2~4×参考)。
 	float faceK = min(kFace * phN, kFaceMax);
 	// 太阳低于地平线 => 不给直射 (S5 夜间场景)
 	float sunUp = clamp(sunDir.y * 6.0 + 0.15, 0.0, 1.0);
-	// 帧内量级基准: **LUT 的参考 texel** (u=0.5 背阳, v=V_REF=0.7568, 与 LUT 内部做范围
-	// 压缩用的是同一个 texel; 见 sky_lut.frag 的 compressLum)。**必须与 sky_comp.frag
-	// 的 refLuminance 采同一个点**, 否则云与天空的标定会分叉。
-	vec3 zen = texture(uLut, vec2(0.5, 0.7568)).rgb;
-	vec3 skyAmb = zen * kAmb * sunUp;
+	// 帧内量级基准: **LUT 的参考 texel** (与 LUT 内部做范围压缩用的是同一个 texel, 坐标由
+	// refTexel() 吸附到真实 texel 中心, 三处必须逐字一致; 见 sky_lut.frag)。
+	vec3 refC = texture(uLut, refTexel()).rgb;
+	// **环境项不乘 sunUp** (v0.18.40): 夜里的天空环境光并不需要太阳在地平线以上 —— LUT 里
+	// 的 kSunFloor 填充已经编码了"入夜"这件事 (夜间 ref 仍是真实非零值)。而 sunUp 在
+	// 假太阳估到地平线以下 (sunDir.y <= -0.025, 约 1.4°) 时**恰好是 0**, 旧写法会让
+	// 环境项与直接项一起归零 ⇒ 厚云 lum=0、scat→0、trans→0 ⇒ 合成输出一坨**纯黑**的
+	// 云剪影 (比"偏暗"更糟)。现在夜间内部只剩环境项: 深蓝灰, 不会黑也不会发光。
+	vec3 skyAmb = refC * kAmb;
 	vec3 scat = vec3(0.0);
 	float trans = 1.0;
 	for (int i = 0; i < n; ++i)
@@ -237,9 +259,10 @@ void main()
 		// 粉末项 (Powder): 视线穿厚云时边缘变亮, 廉价但很出体积感
 		float powder = 1.0 - exp(-d * 6.0);
 		float hf = clamp((p.y - hBase) / hSpan, 0.0, 1.0);
-		// 直接项 (以 zen 为单位): beer·powder 是单次散射, kMs 是多次散射地板;
-		// 环境项让云底比云顶暗 (hf 权重), 厚处仍有光, 不会黑成一块。
-		vec3 lum = zen * faceK * (beer * (0.55 + 0.75 * powder) + kMs) * sunUp +
+		// 直接项 (以参考值为单位): beer·powder 是单次散射, kMs 是多次散射地板;
+		// **这一项继续乘 sunUp** (物理上正确: 没有直射太阳就没有直射项), 夜里它归零,
+		// 于是夜间的云只剩上面的环境项 —— 暗但看得见, 不会黑。
+		vec3 lum = refC * faceK * (beer * (0.55 + 0.75 * powder) + kMs) * sunUp +
 		           skyAmb * (0.35 + 0.65 * hf);
 		float a = 1.0 - exp(-d * density * dt);
 		scat += trans * a * lum;

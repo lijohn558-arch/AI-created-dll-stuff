@@ -44,8 +44,8 @@ layout(push_constant) uniform SkyPC
 
 // 档位烘焙 (VkSpecializationInfo, 仿 kMissFade 模式): kLutSteps 随 lutscale 档位变
 // (lutscale=0.5/1 -> 16 步, 2 -> 28 步); kSunThreshDeg = 低频重算的太阳夹角阈值。
-// v0.18.39 (第二轮视觉): 三个新常量, 全部走 spec (由 vkrenderer.cpp lutData[5] 喂入,
-// **必须与这里的默认值逐个对齐**, 见那边 blockData 上的提醒)。
+// v0.18.39 (第二轮视觉): 三个新常量, 全部走 spec (由 vkrenderer.cpp 的
+// **lutData[2..4]** 喂入, **必须与这里的默认值逐个对齐**, 见那边 spec 块上的提醒)。
 //   kMulti = 多次散射填充强度。**1.0 的含义是字面的**: 把 Rayleigh 项的相函数从真实
 //             相位换成**各向同性 1/4π** 再加一遍 —— 这是多次散射最粗糙也最常用的近似
 //             (真实多次散射≈各向同性)。取 1 而不是更大, 是因为它本来就是「同一积分的
@@ -70,15 +70,28 @@ layout(constant_id = 4) const float kCap = 2.5;
 // (见报告): 以天顶为参考时, 地平线/天顶 = 5.4 (45° 太阳) / 16.6 (10°) / **153** (夜间),
 // 这些行经过 V3 的帧增益后原样进游戏 tonemap ⇒ 就是截图里那条炸白带。
 // 改用「背阳中天」当参考后, 同一张表的 max/ref 全部 ≤2.5。
-const float V_REF = 0.7568;   // = sinToV(0.53): 一个有代表性的中等仰角背阳方向
+//
+// 坐标**吸附到真实 texel 中心** (而不是写死 0.7568): LUT 高度随 lutscale 变 (16/32/64),
+// 采样器又是 LINEAR —— 写死的 0.7568 在 lutscale=1 时落在第 24 行与第 23 行之间, 采到的
+// 是两行插值, 于是「参考点逐位透传」这个性质只近似成立 (差几个百分点)。吸附到中心之后
+// LINEAR 采样取到的就是**单个 texel**, 性质严格成立。sky_cloud.frag 与 sky_comp.frag
+// 里的 refTexel() 是同一段式子 (各自 textureSize 自己的 LUT, 尺寸相同) ⇒ 四处坐标
+// 必然一致。
+vec2 refTexel()
+{
+	ivec2 sz = textureSize(uLutPrev, 0);   // 本 pass 的目标图与 uLutPrev 同尺寸
+	float x = (floor(0.5 * float(sz.x) - 0.5) + 0.5) / float(sz.x);
+	float y = (floor(0.7568 * float(sz.y) - 0.5) + 0.5) / float(sz.y);
+	return vec2(x, y);
+}
 float skyLum3(vec3 c)
 {
 	return dot(c, vec3(0.2126, 0.7152, 0.0722));
 }
 // 膝点取 **1.0×ref** 是结构性的: compress(ref) = ref (x<=knee 直接返回), 于是存储在
-// 参考点上的那一个 texel 与参考值**逐位相同**, 云 pass 的 skyAmb 与合成 pass 的 gain
-// 采到的就是压缩用的那个数 ⇒ 三处口径天然一致。knee 一旦 <1, 参考点自己就会被压,
-// 三处立刻失配。
+// 参考 texel 上的值与参考值**逐位相同**, 云 pass 的 skyAmb 与合成 pass 的 gain 采到的
+// 就是压缩用的那个数 ⇒ 三处口径天然一致。knee 一旦 <1, 参考点自己就会被压, 三处立刻
+// 失配。
 float compressLum(float x, float ref, float cap)
 {
 	float knee = ref;
@@ -261,10 +274,14 @@ void main()
 	// 5.4 / 16.6 / 153 倍 (45°/10°/夜间) —— 那正是被 V3 帧增益原样放大进 tonemap 的
 	// 炸白带。色相保持靠"等比缩放 RGB": 只压亮度系数, 三通道同一个比例, 不做通道裁剪,
 	// 所以蓝调不会被压成灰。
-	vec3 refC = lutIntegral(sunDir, 0.5, V_REF);
+	vec2 rUV = refTexel();                       // 吸附到真实 texel 中心 (见 refTexel())
+	vec3 refC = lutIntegral(sunDir, rUV.x, rUV.y);
 	float refL = max(skyLum3(refC), 1e-9);
 	float l = skyLum3(ins);
 	float k = (l > 1e-12) ? (compressLum(l, refL, kCap) / l) : 1.0;
 	ins = max(ins * k, vec3(0.0));
+	// alpha 被**征用**: 原本存透过率, 现在存"这个 texel 被压了多少"(1=没压, 0=压到上限)。
+	// 任何消费方 (云/合成) 都只读 .rgb, 所以这是一个免费的可视化/调试通道 —— 留一句话在
+	// 这里, 是为了下一个人别把它当成透过率来用。
 	oColor = vec4(ins, 1.0 - clamp(l / max(refL * 4.0, 1e-9), 0.0, 1.0));
 }
