@@ -5307,7 +5307,7 @@ static bool skyOutVkImport(PocbCtx& c)
 	}
 	if (!g_skyOutHC)
 		return false;
-	const VkExternalMemoryHandleTypeFlags ht =
+	const VkExternalMemoryHandleTypeFlagBits ht =
 	    g_skyOutKmt ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT
 	                : VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
 	VkExternalMemoryImageCreateInfo emi{};
