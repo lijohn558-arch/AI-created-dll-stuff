@@ -63,7 +63,7 @@ layout(constant_id = 2) const float kMulti = 1.0;
 layout(constant_id = 3) const float kSunFloor = 0.02;
 layout(constant_id = 4) const float kCap = 2.5;
 
-// ---- L3 范围压缩: 参考点 = 「背阳、中等仰角」那一档, 即 LUT 的 (u=0.5, v=V_REF) ----
+// ---- L3 范围压缩: 参考点 = 「背阳、中等仰角」那一档, 即 LUT 里 refTexel() 指向的那个 texel ----
 // **为什么不是天顶**: 天顶在这个单次散射模型里是**全场最暗**的方向 (45° 太阳时天顶只有
 // 背阳中天的 0.64 倍, 10° 太阳时只有 0.41 倍 —— 单次散射下最短光程 = 最少能量)。
 // 拿天顶当压缩参考, 上限就是"按最暗处定标"⇒ 上限远在天空之上, 等于没压。CPU 实测
