@@ -3299,6 +3299,11 @@ static bool skyVkImport(PocbCtx& c, SkyVkImg& m, VkFormat fmt, uint32_t aspect, 
 	return true;
 }
 
+// 前置声明: g_skyVkDepthView 的定义在本文件靠后 (天空 pass 那一段, L4855 上下)。
+// 入向 skyDepth 换 handle 时 dropH 只退掉 m.view / m.img 两个字段, **退不掉**这个另建的
+// depth-aspect 采样 view ⇒ 不显式退它就等于留一个指向已销毁图的句柄, 后面照用会炸。
+static void skyDropDepthView(PocbCtx& c);
+
 static void skyMirrorVkBuild(PocbCtx& c)
 {
 	if (g_skyVkC.state == 2 && g_skyVkD.state == 2)
@@ -3338,6 +3343,8 @@ static void skyMirrorVkBuild(PocbCtx& c)
 		m.logged = false;
 		m.dev = VK_NULL_HANDLE;
 		logLine(std::string("[sky] VK ") + tag + " D3D11 侧镜像换了 handle → 退掉旧图重建");
+		if (std::string(tag) == "skyDepth")
+			skyDropDepthView(c); // 另建的 depth-aspect view 一起退 (skyPassBuild 会重建)
 	};
 	dropH(g_skyVkC, g_skyInHC, "skyIn");
 	dropH(g_skyVkD, g_skyInHD, "skyDepth");
@@ -4821,6 +4828,1249 @@ static bool ssrV1RecordOut(PocbCtx& c, unsigned w, unsigned h)
 	return true;
 }
 
+// ===========================================================================
+// v0.18.36 T6: 天空四 pass (探针 / 大气散射 LUT / 体积云 / 合成) + 天空入向 EVENT 闸
+// ---------------------------------------------------------------------------
+// 输入 (全部来自 T5 已建好的两张入向共享镜像, 本块**零同步读回**):
+//   skyIn (RGBA16F 1920x1080)  —— 游戏自己的天空色, 探针据此估太阳/地平线/量级,
+//                                 合成 pass 在掩码外原样透传它
+//   skyDepth (D24S8)          —— 掩码源 (判据 D24 精确 == 1.0, 即 0xFFFFFF, docs/07 §3.4)
+// 输出:
+//   skyOut (RGBA16F, desc 照抄 321) —— hook 面在段7-end 触发链里 CopyResource(321 ← skyOut)
+//
+// 四条 pass 的顺序与**完成窗口** (docs/07 §4.2):
+//   段7-end 换绑 (arm) → skyIn/skyDepth 拷贝 → End(EVENT)+Flush
+//     → [VK] skyInGateWait → 探针 → LUT → 云 → 合成 → fence 等完
+//     → [D3D11] desc 预检 → CopyResource(321 ← skyOut)
+//   → 段9 降采样消费 321 (硬截止线)
+//
+// **本 pass 块不 hook 任何 D3D11 入口** —— 触发与三条拷贝的发行全在 main.cpp hook 面
+// (VK 重写铺垫: 搬移时这块只需换掉"入向镜像来源", 触发谓词不动)。
+//
+// 3D 噪声纹理: 本机/CI 都无 .comp 工具链 ⇒ 云噪声走 **VK 自建 3D 图 + CPU 生成 + 上传**
+// (值噪声 FBM, 四通道不同频率/种子; 手工生成 ⇒ 无第三方代码, GPL 红线安全)。
+// ===========================================================================
+
+// ---- 状态 ----
+static int             g_skyPassState = 0; // 0=未建 1=OK 2=失败关自己
+static VkDevice        g_skyPassDev = VK_NULL_HANDLE;
+static VkImage         g_skyOutVkImg = VK_NULL_HANDLE;   // 从 g_skyOutHC 导入 (COLOR_ATTACHMENT)
+static VkDeviceMemory  g_skyOutVkMem = VK_NULL_HANDLE;
+static HANDLE          g_skyOutVkSrc = nullptr;         // 导入时的 handle (D3D11 侧换了才重建)
+static VkImageView     g_skyOutVkView = VK_NULL_HANDLE;
+static VkFramebuffer   g_skyFbOut = VK_NULL_HANDLE;      // 合成 pass 的 framebuffer
+static VkImageView     g_skyVkDepthView = VK_NULL_HANDLE; // skyDepth 的 **depth aspect** 采样 view
+// 入向 skyDepth 换 handle ⇒ 旧图已销毁, 这个 view 必须一起退 (dropH 只管 m.view/m.img)。
+// 清成 VK_NULL_HANDLE 后 skyPassBuild 会照常重建它; 描述符集每帧重填, 无需动管线。
+static void skyDropDepthView(PocbCtx& c)
+{
+	if (g_skyVkDepthView == VK_NULL_HANDLE || !c.vdev)
+		return;
+	c.fns.vkDeviceWaitIdle(c.vdev);
+	c.fns.vkDestroyImageView(c.vdev, g_skyVkDepthView, nullptr);
+	g_skyVkDepthView = VK_NULL_HANDLE;
+}
+// ping-pong: 探针 1x2 / LUT (lutW x lutH) / 云 (cloudW x cloudH), 各两张
+static VkImage         g_skyProbeImg[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkDeviceMemory  g_skyProbeMem[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkImageView     g_skyProbeView[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkFramebuffer   g_skyFbProbe[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkImage         g_skyLutImg[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkDeviceMemory  g_skyLutMem[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkImageView     g_skyLutView[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkFramebuffer   g_skyFbLut[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkImage         g_skyCloudImg[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkDeviceMemory  g_skyCloudMem[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkImageView     g_skyCloudView[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkFramebuffer   g_skyFbCloud[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkImage         g_skyNoiseImg = VK_NULL_HANDLE;   // 3D 噪声 (VK_IMAGE_TYPE_3D)
+static VkDeviceMemory  g_skyNoiseMem = VK_NULL_HANDLE;
+static VkImageView     g_skyNoiseView = VK_NULL_HANDLE;
+static VkBuffer        g_skyNoiseBuf = VK_NULL_HANDLE;   // 上传源 (HOST_VISIBLE|COHERENT)
+static VkDeviceMemory  g_skyNoiseBufMem = VK_NULL_HANDLE;
+static void*           g_skyNoiseBufPtr = nullptr;
+static VkRenderPass    g_skyPassRp = VK_NULL_HANDLE;    // 单附件 RGBA16F (四个 pass 共用)
+static VkShaderModule  g_skyPassVs = VK_NULL_HANDLE;
+static VkShaderModule  g_skyPassFs[4] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkPipelineLayout g_skyPassPl = VK_NULL_HANDLE;
+static VkPipeline      g_skyPassPipe[4] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkDescriptorSetLayout g_skyPassDsl = VK_NULL_HANDLE;
+static VkDescriptorPool g_skyPassDp = VK_NULL_HANDLE;
+// **每个 pass 一套 set** (四个): Vulkan 规定描述符在**执行时**读取, 所以录进同一条命令里的
+// 四个 pass 不能共用一套内容不同的 set (换 set 内容会互相踩)。maxSets=4, 每帧统一重填。
+static VkDescriptorSet  g_skyPassSet[4] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+static VkSampler       g_skySmpLin = VK_NULL_HANDLE;     // LINEAR + clamp
+static VkSampler       g_skySmpNear = VK_NULL_HANDLE;    // NEAREST + clamp (掩码/探针)
+static VkSampler       g_skySmpRep = VK_NULL_HANDLE;     // LINEAR + repeat (3D 噪声)
+static VkCommandBuffer g_skyPassCmd = VK_NULL_HANDLE;    // 每帧重录 (push constant 变)
+static VkCommandPool   g_skyPassPool = VK_NULL_HANDLE;   // 自己的 pool: 需要 RESET_COMMAND_BUFFER
+static unsigned        g_skyLutW = 0, g_skyLutH = 0;     // LUT 尺寸 (lutscale 换档会变)
+static unsigned        g_skyCloudW = 0, g_skyCloudH = 0; // 云 RT 尺寸 (cloudscale 换档会变)
+static int             g_skyPing = 0;                    // 本帧用哪一侧 (ping-pong)
+static bool            g_skyRtInit = false;               // 六张 ping-pong 图是否已从 UNDEFINED 迁走过
+static long            g_skyPassN = 0;                   // 四 pass 提交帧数
+static double          g_skyPassMs = 0.0;                // 提交+fence 累计 ms
+static bool            g_skyPassLogOnce = false;
+
+// ---- CPU 端 3D 噪声生成 (值噪声 FBM, 可平铺 ⇒ 采样器用 REPEAT) ----
+// 确定性哈希 (整数混合) —— 不用 <random> 之类实现相关的东西, 保证每次构建字节一致。
+static float skyHash3(int x, int y, int z, unsigned seed)
+{
+	unsigned h = (unsigned)x * 374761393u + (unsigned)y * 668265263u + (unsigned)z * 1274126177u +
+	             seed * 2654435761u;
+	h = (h ^ (h >> 13)) * 1274126177u;
+	h ^= h >> 16;
+	return (float)(h & 0x00FFFFFFu) / 16777215.0f;
+}
+// 周期 = p 的可平铺值噪声 (整数格点按 p 取模 ⇒ 首尾相接)
+static float skyVnoiseT(float x, float y, float z, int p, unsigned seed)
+{
+	float fx = x * p, fy = y * p, fz = z * p;
+	int ix = (int)fx, iy = (int)fy, iz = (int)fz;
+	float tx = fx - (float)ix, ty = fy - (float)iy, tz = fz - (float)iz;
+	tx = tx * tx * (3.0f - 2.0f * tx);
+	ty = ty * ty * (3.0f - 2.0f * ty);
+	tz = tz * tz * (3.0f - 2.0f * tz);
+	float r = 0.0f;
+	for (int dz = 0; dz < 2; ++dz)
+		for (int dy = 0; dy < 2; ++dy)
+			for (int dx = 0; dx < 2; ++dx)
+			{
+				int hx = ((ix + dx) % p + p) % p;
+				int hy = ((iy + dy) % p + p) % p;
+				int hz = ((iz + dz) % p + p) % p;
+				float w = (dx ? tx : 1.0f - tx) * (dy ? ty : 1.0f - ty) * (dz ? tz : 1.0f - tz);
+				r += w * skyHash3(hx, hy, hz, seed);
+			}
+	return r;
+}
+static float skyFbmT(float x, float y, float z, int p0, int oct, unsigned seed)
+{
+	float a = 0.5f, sum = 0.0f, norm = 0.0f;
+	int p = p0;
+	for (int i = 0; i < oct; ++i)
+	{
+		sum += a * skyVnoiseT(x, y, z, p, seed + (unsigned)i * 7919u);
+		norm += a;
+		a *= 0.5f;
+		p *= 2;
+	}
+	return sum / (norm > 0.0f ? norm : 1.0f);
+}
+
+// ---- 小工具: 造一张 VK 私有图 + view (format/usage 参数化) ----
+static bool skyMakeRt(PocbCtx& c, VkFormat fmt, VkImageUsageFlags usage, VkImageType itype,
+                      uint32_t w, uint32_t h, uint32_t d, VkImageViewType vtype,
+                      VkImage& oImg, VkDeviceMemory& oMem, VkImageView& oView,
+                      VkImageAspectFlags aspect)
+{
+	VkImageCreateInfo ici{};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.imageType = itype;
+	ici.format = fmt;
+	ici.extent = VkExtent3D{w, h, d};
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = usage;
+	ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	if (c.fns.vkCreateImage(c.vdev, &ici, nullptr, &oImg) != VK_SUCCESS)
+	{
+		oImg = VK_NULL_HANDLE;
+		return false;
+	}
+	VkMemoryRequirements req{};
+	c.fns.vkGetImageMemoryRequirements(c.vdev, oImg, &req);
+	VkPhysicalDeviceMemoryProperties mp{};
+	c.fns.vkGetPhysicalDeviceMemoryProperties(c.phys, &mp);
+	uint32_t pick = UINT32_MAX;
+	for (int pass = 0; pass < 2 && pick == UINT32_MAX; ++pass)
+		for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+		{
+			if (!(req.memoryTypeBits & (1u << i)))
+				continue;
+			if (pass == 0 && !(mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+				continue;
+			pick = i;
+			break;
+		}
+	if (pick == UINT32_MAX)
+	{
+		c.fns.vkDestroyImage(c.vdev, oImg, nullptr);
+		oImg = VK_NULL_HANDLE;
+		return false;
+	}
+	VkMemoryAllocateInfo mai{};
+	mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	mai.allocationSize = req.size;
+	mai.memoryTypeIndex = pick;
+	if (c.fns.vkAllocateMemory(c.vdev, &mai, nullptr, &oMem) != VK_SUCCESS)
+	{
+		oMem = VK_NULL_HANDLE;
+		c.fns.vkDestroyImage(c.vdev, oImg, nullptr);
+		oImg = VK_NULL_HANDLE;
+		return false;
+	}
+	if (c.fns.vkBindImageMemory(c.vdev, oImg, oMem, 0) != VK_SUCCESS)
+	{
+		c.fns.vkFreeMemory(c.vdev, oMem, nullptr);
+		oMem = VK_NULL_HANDLE;
+		c.fns.vkDestroyImage(c.vdev, oImg, nullptr);
+		oImg = VK_NULL_HANDLE;
+		return false;
+	}
+	VkImageViewCreateInfo vci{};
+	vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vci.image = oImg;
+	vci.viewType = vtype;
+	vci.format = fmt;
+	vci.subresourceRange = {aspect, 0, 1, 0, 1};
+	if (c.fns.vkCreateImageView(c.vdev, &vci, nullptr, &oView) != VK_SUCCESS)
+	{
+		oView = VK_NULL_HANDLE;
+		c.fns.vkFreeMemory(c.vdev, oMem, nullptr);
+		oMem = VK_NULL_HANDLE;
+		c.fns.vkDestroyImage(c.vdev, oImg, nullptr);
+		oImg = VK_NULL_HANDLE;
+		return false;
+	}
+	return true;
+}
+
+static void skyFreeRt(PocbCtx& c, VkImage& img, VkDeviceMemory& mem, VkImageView& view,
+                      VkFramebuffer& fb)
+{
+	if (fb)
+	{
+		c.fns.vkDestroyFramebuffer(c.vdev, fb, nullptr);
+		fb = VK_NULL_HANDLE;
+	}
+	if (view)
+	{
+		c.fns.vkDestroyImageView(c.vdev, view, nullptr);
+		view = VK_NULL_HANDLE;
+	}
+	if (img)
+	{
+		c.fns.vkDestroyImage(c.vdev, img, nullptr);
+		img = VK_NULL_HANDLE;
+	}
+	if (mem)
+	{
+		c.fns.vkFreeMemory(c.vdev, mem, nullptr);
+		mem = VK_NULL_HANDLE;
+	}
+}
+
+// 3D 噪声纹理: 建图 → 上传 (一次性, 之后每帧只采样)
+static bool skyNoiseBuild(PocbCtx& c)
+{
+	if (g_skyNoiseImg != VK_NULL_HANDLE)
+		return true;
+	const int n = 32; // 32^3 x RGBA8 = 128 KB
+	const VkDeviceSize need = (VkDeviceSize)n * n * n * 4ULL;
+	if (!skyMakeRt(c, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_TYPE_3D,
+	               (uint32_t)n, (uint32_t)n, (uint32_t)n, VK_IMAGE_VIEW_TYPE_3D, g_skyNoiseImg,
+	               g_skyNoiseMem, g_skyNoiseView, VK_IMAGE_ASPECT_COLOR_BIT))
+		return false;
+	// ---- 上传 buffer (HOST_VISIBLE|COHERENT; 表里没有 vkInvalidateMappedMemoryRanges,
+	//      不 COHERENT 就没法保证 CPU 写对 GPU 可见 —— 与读回 buffer 同一条口径) ----
+	VkBufferCreateInfo bci{};
+	bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bci.size = need;
+	bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	if (c.fns.vkCreateBuffer(c.vdev, &bci, nullptr, &g_skyNoiseBuf) != VK_SUCCESS)
+	{
+		g_skyNoiseBuf = VK_NULL_HANDLE;
+		VkFramebuffer noFb = VK_NULL_HANDLE;
+		skyFreeRt(c, g_skyNoiseImg, g_skyNoiseMem, g_skyNoiseView, noFb);
+		return false;
+	}
+	VkMemoryRequirements breq{};
+	c.fns.vkGetBufferMemoryRequirements(c.vdev, g_skyNoiseBuf, &breq);
+	VkPhysicalDeviceMemoryProperties mp{};
+	c.fns.vkGetPhysicalDeviceMemoryProperties(c.phys, &mp);
+	uint32_t pick = UINT32_MAX;
+	for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+	{
+		if (!(breq.memoryTypeBits & (1u << i)))
+			continue;
+		if ((mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+		    (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+		{
+			pick = i;
+			break;
+		}
+	}
+	if (pick == UINT32_MAX)
+	{
+		c.fns.vkDestroyBuffer(c.vdev, g_skyNoiseBuf, nullptr);
+		g_skyNoiseBuf = VK_NULL_HANDLE;
+		VkFramebuffer noFb = VK_NULL_HANDLE;
+		skyFreeRt(c, g_skyNoiseImg, g_skyNoiseMem, g_skyNoiseView, noFb);
+		return false;
+	}
+	VkMemoryAllocateInfo bmai{};
+	bmai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	bmai.allocationSize = breq.size;
+	bmai.memoryTypeIndex = pick;
+	if (c.fns.vkAllocateMemory(c.vdev, &bmai, nullptr, &g_skyNoiseBufMem) != VK_SUCCESS)
+	{
+		g_skyNoiseBufMem = VK_NULL_HANDLE;
+		c.fns.vkDestroyBuffer(c.vdev, g_skyNoiseBuf, nullptr);
+		g_skyNoiseBuf = VK_NULL_HANDLE;
+		return false;
+	}
+	if (c.fns.vkBindBufferMemory(c.vdev, g_skyNoiseBuf, g_skyNoiseBufMem, 0) != VK_SUCCESS ||
+	    c.fns.vkMapMemory(c.vdev, g_skyNoiseBufMem, 0, VK_WHOLE_SIZE, 0, &g_skyNoiseBufPtr) !=
+	        VK_SUCCESS)
+	{
+		if (g_skyNoiseBufPtr)
+		{
+			c.fns.vkUnmapMemory(c.vdev, g_skyNoiseBufMem);
+			g_skyNoiseBufPtr = nullptr;
+		}
+		c.fns.vkFreeMemory(c.vdev, g_skyNoiseBufMem, nullptr);
+		g_skyNoiseBufMem = VK_NULL_HANDLE;
+		c.fns.vkDestroyBuffer(c.vdev, g_skyNoiseBuf, nullptr);
+		g_skyNoiseBuf = VK_NULL_HANDLE;
+		VkFramebuffer noFb = VK_NULL_HANDLE;
+		skyFreeRt(c, g_skyNoiseImg, g_skyNoiseMem, g_skyNoiseView, noFb);
+		return false;
+	}
+	// ---- 灌数据: 四通道各一组频率/种子 ⇒ 大形状 (R) / 中频 (G,B) / 高频细节 (A) ----
+	unsigned char* px = (unsigned char*)g_skyNoiseBufPtr;
+	const float inv = 1.0f / (float)n;
+	for (int z = 0; z < n; ++z)
+		for (int y = 0; y < n; ++y)
+			for (int x = 0; x < n; ++x)
+			{
+				float fx = (float)x * inv, fy = (float)y * inv, fz = (float)z * inv;
+				float r = skyFbmT(fx, fy, fz, 4, 4, 1u);
+				float g = skyFbmT(fx, fy, fz, 8, 3, 977u);
+				float b = skyFbmT(fx, fy, fz, 8, 3, 52301u);
+				float a = skyFbmT(fx, fy, fz, 16, 2, 2654435u);
+				unsigned char* o = px + ((size_t)z * n * n + (size_t)y * n + (size_t)x) * 4;
+				o[0] = (unsigned char)(r * 255.0f);
+				o[1] = (unsigned char)(g * 255.0f);
+				o[2] = (unsigned char)(b * 255.0f);
+				o[3] = (unsigned char)(a * 255.0f);
+			}
+	// ---- 上传: UNDEFINED -> TRANSFER_DST -> SHADER_READ_ONLY ----
+	if (!g_skyPassPool)
+	{
+		VkCommandPoolCreateInfo pci{};
+		pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+		pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		pci.queueFamilyIndex = c.qfi;
+		if (c.fns.vkCreateCommandPool(c.vdev, &pci, nullptr, &g_skyPassPool) != VK_SUCCESS)
+		{
+			g_skyPassPool = VK_NULL_HANDLE;
+			return false;
+		}
+	}
+	if (!g_skyPassCmd)
+	{
+		VkCommandBufferAllocateInfo cbai{};
+		cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		cbai.commandPool = g_skyPassPool;
+		cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		cbai.commandBufferCount = 1;
+		if (c.fns.vkAllocateCommandBuffers(c.vdev, &cbai, &g_skyPassCmd) != VK_SUCCESS)
+		{
+			g_skyPassCmd = VK_NULL_HANDLE;
+			return false;
+		}
+	}
+	c.fns.vkResetCommandPool(c.vdev, g_skyPassPool, 0);
+	VkCommandBufferBeginInfo cbb{};
+	cbb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	if (c.fns.vkBeginCommandBuffer(g_skyPassCmd, &cbb) != VK_SUCCESS)
+		return false;
+	VkImageMemoryBarrier imb{};
+	imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	imb.srcAccessMask = 0;
+	imb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	imb.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	imb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	imb.image = g_skyNoiseImg;
+	imb.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+	c.fns.vkCmdPipelineBarrier(g_skyPassCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+	                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &imb);
+	VkBufferImageCopy bic{};
+	bic.bufferOffset = 0;
+	bic.bufferRowLength = 0;     // 0 = 按 extent 紧密排列
+	bic.bufferImageHeight = 0;
+	bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+	bic.imageOffset = VkOffset3D{0, 0, 0};
+	bic.imageExtent = VkExtent3D{(uint32_t)n, (uint32_t)n, (uint32_t)n};
+	c.fns.vkCmdCopyBufferToImage(g_skyPassCmd, g_skyNoiseBuf, g_skyNoiseImg,
+	                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+	imb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	imb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	imb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	c.fns.vkCmdPipelineBarrier(g_skyPassCmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+	                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+	                           &imb);
+	if (c.fns.vkEndCommandBuffer(g_skyPassCmd) != VK_SUCCESS)
+		return false;
+	c.fns.vkResetFences(c.vdev, 1, &c.fence);
+	VkSubmitInfo si{};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &g_skyPassCmd;
+	VkResult vr = c.fns.vkQueueSubmit(c.queue, 1, &si, c.fence);
+	if (vr == VK_SUCCESS)
+		vr = c.fns.vkWaitForFences(c.vdev, 1, &c.fence, VK_TRUE, 5000000000ULL);
+	if (vr != VK_SUCCESS)
+		return false;
+	logLine("[sky] VK 3D 噪声纹理就绪 (32^3 RGBA8, 四通道 FBM, 一次性上传 128KB, 采样器 REPEAT)");
+	return true;
+}
+
+// ---- 天空入向 EVENT 闸 (v0.18.36 T6; 模板 = ssrInGateWait, docs/07 §4.1) ----
+// 与 2c 那道闸**分开计数**: 两道闸的实测成本要分别归因 (docs/07 §6 R6 单列天空这条),
+// 混在一起就看不出本轮新增的闸等占了多少。一次性消费 + 2000ms 超时放行 (绝不卡死帧)。
+static void skyInGateWait(PocbCtx& c)
+{
+	const bool live = g_skyQLive && g_skyQ && c.ctx;
+	if (!live)
+		return;
+	g_skyQLive = false;
+	if (c.state.load() != 2 || !c.vdev)
+		return; // VK 没起来 ⇒ 没人读镜像, 不必白等 (但已消费掉)
+	const auto g0 = std::chrono::steady_clock::now();
+	while (c.ctx->GetData(g_skyQ, nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_FALSE)
+	{
+		if (std::chrono::steady_clock::now() - g0 > std::chrono::milliseconds(2000))
+		{
+			logLine("[sky] 入向EVENT闸 等待超 2000ms → 放行本帧 (入向可能不是本帧那份)");
+			break;
+		}
+		Sleep(0);
+	}
+	const double ms =
+	    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g0).count();
+	g_skyGateMs += ms;
+	++g_skyGateN;
+	// 节流: 前 4 条 + 每 300 条 (= 配平口径的每 600 帧一半, 保证 5s 粒度能看出趋势),
+	// 不每帧刷屏 (docs/07 §3.5 静默/节流纪律)。
+	if (g_skyGateN <= 4 || (g_skyGateN % 300) == 0)
+		logLine("[sky] 入向EVENT闸#" + std::to_string(g_skyGateN) + " 等待=" +
+		        std::to_string(ms).substr(0, 5) + "ms 累计均值=" +
+		        std::to_string(g_skyGateMs / (double)g_skyGateN).substr(0, 5) + "ms 帧=" +
+		        std::to_string(g_presentCount.load(std::memory_order_relaxed)));
+}
+
+// ---- 尺寸计算 (T4 交接: cloudscale/lutscale 要**有意**取整到像素; 下限由 T4 保证非零) ----
+static void skyRtSizes(unsigned& lw, unsigned& lh, unsigned& cw, unsigned& ch)
+{
+	const unsigned w = g_skyVkW ? g_skyVkW : 1920;
+	const unsigned h = g_skyVkH ? g_skyVkH : 1080;
+	const float ls = g_skyLutScale > 0.01f ? g_skyLutScale : 1.0f;
+	const float cs = g_skyCloudScale > 0.01f ? g_skyCloudScale : 1.0f;
+	lw = (unsigned)(64.0f * ls + 0.5f);
+	lh = (unsigned)(32.0f * ls + 0.5f);
+	if (lw < 8u)
+		lw = 8u;
+	if (lh < 4u)
+		lh = 4u;
+	cw = (unsigned)((float)w * cs + 0.5f);
+	ch = (unsigned)((float)h * cs + 0.5f);
+	if (cw < 8u)
+		cw = 8u;
+	if (ch < 8u)
+		ch = 8u;
+	if (cw > w)
+		cw = w;
+	if (ch > h)
+		ch = h;
+}
+
+// ---- 出向镜像导入 (skyOutHandle: NT 或 KMT; usage COLOR_ATTACHMENT 供合成 pass 渲染) ----
+static bool skyOutVkImport(PocbCtx& c)
+{
+	if (g_skyOutVkImg != VK_NULL_HANDLE && g_skyOutVkSrc == g_skyOutHC)
+		return true;
+	if (g_skyOutVkImg != VK_NULL_HANDLE) // D3D11 侧换了 handle ⇒ 退掉整套重建
+	{
+		c.fns.vkDeviceWaitIdle(c.vdev);
+		skyFreeRt(c, g_skyOutVkImg, g_skyOutVkMem, g_skyOutVkView, g_skyFbOut);
+		g_skyOutVkSrc = nullptr;
+	}
+	if (!g_skyOutHC)
+		return false;
+	const VkExternalMemoryHandleTypeFlags ht =
+	    g_skyOutKmt ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT
+	                : VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+	VkExternalMemoryImageCreateInfo emi{};
+	emi.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+	emi.handleTypes = ht;
+	VkImageCreateInfo ici{};
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.pNext = &emi;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+	ici.extent = VkExtent3D{g_skyVkW, g_skyVkH, 1};
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	if (c.fns.vkCreateImage(c.vdev, &ici, nullptr, &g_skyOutVkImg) != VK_SUCCESS)
+	{
+		g_skyOutVkImg = VK_NULL_HANDLE;
+		return false;
+	}
+	VkMemoryRequirements req{};
+	c.fns.vkGetImageMemoryRequirements(c.vdev, g_skyOutVkImg, &req);
+	VkPhysicalDeviceMemoryProperties mp{};
+	c.fns.vkGetPhysicalDeviceMemoryProperties(c.phys, &mp);
+	VkImportMemoryWin32HandleInfoKHR imp{};
+	imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+	imp.handleType = ht;
+	imp.handle = g_skyOutHC; // 只借用不接管 —— 归 D3D11 侧, 不 CloseHandle
+	VkMemoryDedicatedAllocateInfo dai{};
+	dai.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+	dai.pNext = &imp;
+	dai.image = g_skyOutVkImg;
+	VkMemoryAllocateInfo mai{};
+	mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	mai.pNext = &dai;
+	mai.allocationSize = req.size;
+	bool ok = false;
+	for (int di = 0; di < 2 && !ok; ++di)
+	{
+		uint32_t pick = UINT32_MAX;
+		for (int pass = 0; pass < 2 && pick == UINT32_MAX; ++pass)
+			for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+			{
+				if (!(req.memoryTypeBits & (1u << i)))
+					continue;
+				if (pass == 0 && !(mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+					continue;
+				pick = i;
+				break;
+			}
+		if (pick == UINT32_MAX)
+			break;
+		mai.memoryTypeIndex = pick;
+		mai.pNext = (di == 0) ? static_cast<const void*>(&dai) : static_cast<const void*>(&imp);
+		if (c.fns.vkAllocateMemory(c.vdev, &mai, nullptr, &g_skyOutVkMem) == VK_SUCCESS)
+			ok = true;
+	}
+	if (!ok)
+	{
+		c.fns.vkDestroyImage(c.vdev, g_skyOutVkImg, nullptr);
+		g_skyOutVkImg = VK_NULL_HANDLE;
+		return false;
+	}
+	if (c.fns.vkBindImageMemory(c.vdev, g_skyOutVkImg, g_skyOutVkMem, 0) != VK_SUCCESS)
+	{
+		c.fns.vkFreeMemory(c.vdev, g_skyOutVkMem, nullptr);
+		g_skyOutVkMem = VK_NULL_HANDLE;
+		c.fns.vkDestroyImage(c.vdev, g_skyOutVkImg, nullptr);
+		g_skyOutVkImg = VK_NULL_HANDLE;
+		return false;
+	}
+	VkImageViewCreateInfo vci{};
+	vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vci.image = g_skyOutVkImg;
+	vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vci.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+	vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+	if (c.fns.vkCreateImageView(c.vdev, &vci, nullptr, &g_skyOutVkView) != VK_SUCCESS)
+	{
+		g_skyOutVkView = VK_NULL_HANDLE;
+		c.fns.vkFreeMemory(c.vdev, g_skyOutVkMem, nullptr);
+		g_skyOutVkMem = VK_NULL_HANDLE;
+		c.fns.vkDestroyImage(c.vdev, g_skyOutVkImg, nullptr);
+		g_skyOutVkImg = VK_NULL_HANDLE;
+		return false;
+	}
+	g_skyOutVkSrc = g_skyOutHC;
+	return true;
+}
+
+// ---- 一整套 pass 资源 (renderpass/管线/描述符/采样器/LUT 与云 RT) 的幂等建立 ----
+static bool skyPassBuild(PocbCtx& c)
+{
+	if (g_skyPassState == 2)
+		return false;
+	if (!g_skyOn.load(std::memory_order_relaxed))
+		return false;
+	if (c.state.load() != 2 || !c.vdev || !c.queue || !c.pool || !c.fence)
+		return false;
+	auto fail = [&](const std::string& why) {
+		logLine("[sky] VK pass " + why + " → 天空合成关自己 (PoC-B/SSR/入向通路不受影响)");
+		g_skyPassState = 2;
+		return false;
+	};
+	// ---- 入向必须就绪 (T5 的两张镜像); 出向镜像由 hook 面建好后才有 handle ----
+	if (g_skyVkC.state != 1 || g_skyVkD.state != 1)
+		return false;
+	if (!g_skyOutHC)
+		return false;
+	if (g_skyPassDev && g_skyPassDev != c.vdev)
+		return fail("VkDevice 变更 → 本块不支持热重建 (关自己)");
+	g_skyPassDev = c.vdev;
+	if (!skyNoiseBuild(c))
+		return fail("3D 噪声纹理建不出");
+	if (!skyOutVkImport(c))
+		return fail("skyOut 导入失败 (NT/KMT 两轴都试过)");
+
+	// ---- 尺寸 (换档/换分辨率 ⇒ 尺寸变了要重建 RT) ----
+	unsigned lw, lh, cw, ch;
+	skyRtSizes(lw, lh, cw, ch);
+	if (g_skyLutW != lw || g_skyLutH != lh || g_skyCloudW != cw || g_skyCloudH != ch)
+	{
+		for (int i = 0; i < 2; ++i)
+		{
+			skyFreeRt(c, g_skyProbeImg[i], g_skyProbeMem[i], g_skyProbeView[i], g_skyFbProbe[i]);
+			skyFreeRt(c, g_skyLutImg[i], g_skyLutMem[i], g_skyLutView[i], g_skyFbLut[i]);
+			skyFreeRt(c, g_skyCloudImg[i], g_skyCloudMem[i], g_skyCloudView[i], g_skyFbCloud[i]);
+		}
+		g_skyLutW = lw;
+		g_skyLutH = lh;
+		g_skyCloudW = cw;
+		g_skyCloudH = ch;
+		g_skyRtInit = false; // 图重建了 ⇒ 首帧的 UNDEFINED→SHADER_READ_ONLY 迁移要重做
+	}
+	const VkImageUsageFlags rtUsage =
+	    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	for (int i = 0; i < 2; ++i)
+	{
+		if (!g_skyProbeImg[i] &&
+		    !skyMakeRt(c, VK_FORMAT_R16G16B16A16_SFLOAT, rtUsage, VK_IMAGE_TYPE_2D, 1, 2, 1,
+		               VK_IMAGE_VIEW_TYPE_2D, g_skyProbeImg[i], g_skyProbeMem[i], g_skyProbeView[i],
+		               VK_IMAGE_ASPECT_COLOR_BIT))
+			return fail("探针 1x2 RT 建不出");
+		if (!g_skyLutImg[i] &&
+		    !skyMakeRt(c, VK_FORMAT_R16G16B16A16_SFLOAT, rtUsage, VK_IMAGE_TYPE_2D, lw, lh, 1,
+		               VK_IMAGE_VIEW_TYPE_2D, g_skyLutImg[i], g_skyLutMem[i], g_skyLutView[i],
+		               VK_IMAGE_ASPECT_COLOR_BIT))
+			return fail("LUT RT 建不出");
+		if (!g_skyCloudImg[i] &&
+		    !skyMakeRt(c, VK_FORMAT_R16G16B16A16_SFLOAT, rtUsage, VK_IMAGE_TYPE_2D, cw, ch, 1,
+		               VK_IMAGE_VIEW_TYPE_2D, g_skyCloudImg[i], g_skyCloudMem[i], g_skyCloudView[i],
+		               VK_IMAGE_ASPECT_COLOR_BIT))
+			return fail("云 RT 建不出");
+	}
+	// ---- render pass (单附件 RGBA16F, loadOp DONT_CARE 模板; 四个 pass 共用) ----
+	if (!g_skyPassRp)
+	{
+		VkAttachmentDescription att{};
+		att.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+		att.samples = VK_SAMPLE_COUNT_1_BIT;
+		att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; // 全屏三角必然盖满, 不需要读旧值
+		att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		att.finalLayout = VK_IMAGE_LAYOUT_GENERAL; // 跨 pass 用 GENERAL + 显式 barrier
+		VkAttachmentReference cref{};
+		cref.attachment = 0;
+		cref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		VkSubpassDescription sub{};
+		sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		sub.colorAttachmentCount = 1;
+		sub.pColorAttachments = &cref;
+		VkSubpassDependency deps[2]{};
+		deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+		deps[0].dstSubpass = 0;
+		deps[0].srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+		deps[0].srcAccessMask = 0;
+		deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		deps[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+		deps[1].srcSubpass = 0;
+		deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+		deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		deps[1].dstStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+		deps[1].dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+		deps[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+		VkRenderPassCreateInfo rp{};
+		rp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		rp.attachmentCount = 1;
+		rp.pAttachments = &att;
+		rp.subpassCount = 1;
+		rp.pSubpasses = &sub;
+		rp.dependencyCount = 2;
+		rp.pDependencies = deps;
+		if (c.fns.vkCreateRenderPass(c.vdev, &rp, nullptr, &g_skyPassRp) != VK_SUCCESS)
+			return fail("vkCreateRenderPass 建不出");
+	}
+	// ---- 采样器 ----
+	if (!g_skySmpLin || !g_skySmpNear || !g_skySmpRep)
+	{
+		auto mk = [&](VkSampler& h, VkFilter f, VkSamplerAddressMode am) {
+			if (h)
+				return true;
+			VkSamplerCreateInfo s{};
+			s.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+			s.magFilter = f;
+			s.minFilter = f;
+			s.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+			s.addressModeU = am;
+			s.addressModeV = am;
+			s.addressModeW = am;
+			s.minLod = 0.0f;
+			s.maxLod = 0.0f;
+			return c.fns.vkCreateSampler(c.vdev, &s, nullptr, &h) == VK_SUCCESS;
+		};
+		if (!mk(g_skySmpLin, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE))
+			return fail("LINEAR clamp 采样器建不出");
+		if (!mk(g_skySmpNear, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE))
+			return fail("NEAREST clamp 采样器建不出");
+		if (!mk(g_skySmpRep, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT))
+			return fail("REPEAT 采样器建不出");
+	}
+	// ---- 描述符: 最多 5 个 COMBINED_IMAGE_SAMPLER (探针3 / LUT3 / 云5 / 合成5) ----
+	if (!g_skyPassDsl)
+	{
+		VkDescriptorSetLayoutBinding b[5]{};
+		for (int i = 0; i < 5; ++i)
+		{
+			b[i].binding = (uint32_t)i;
+			b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			b[i].descriptorCount = 1;
+			b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		}
+		VkDescriptorSetLayoutCreateInfo li{};
+		li.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		li.bindingCount = 5;
+		li.pBindings = b;
+		if (c.fns.vkCreateDescriptorSetLayout(c.vdev, &li, nullptr, &g_skyPassDsl) != VK_SUCCESS)
+			return fail("vkCreateDescriptorSetLayout 建不出");
+	}
+	if (!g_skyPassDp)
+	{
+		VkDescriptorPoolSize ps{};
+		ps.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		ps.descriptorCount = 5;
+		VkDescriptorPoolCreateInfo pi{};
+		pi.sType = VK_DESCRIPTOR_POOL_CREATE_INFO;
+		pi.maxSets = 4;
+		pi.poolSizeCount = 1;
+		pi.pPoolSizes = &ps;
+		if (c.fns.vkCreateDescriptorPool(c.vdev, &pi, nullptr, &g_skyPassDp) != VK_SUCCESS)
+			return fail("vkCreateDescriptorPool 建不出");
+	}
+	{
+		bool needSet = false;
+		for (int k = 0; k < 4; ++k)
+			if (!g_skyPassSet[k])
+				needSet = true;
+		if (needSet)
+		{
+			VkDescriptorSetLayout lays[4] = {g_skyPassDsl, g_skyPassDsl, g_skyPassDsl, g_skyPassDsl};
+			VkDescriptorSetAllocateInfo ai{};
+			ai.sType = VK_DESCRIPTOR_SET_ALLOCATE_INFO;
+			ai.descriptorPool = g_skyPassDp;
+			ai.descriptorSetCount = 4;
+			ai.pSetLayouts = lays;
+			if (c.fns.vkAllocateDescriptorSets(c.vdev, &ai, g_skyPassSet) != VK_SUCCESS)
+				return fail("vkAllocateDescriptorSets 建不出");
+		}
+	}
+	// ---- framebuffer (view/尺寸变了要重建; 挂在自己的 render pass 上) ----
+	auto mkFb = [&](VkImageView view, unsigned w, unsigned h, VkFramebuffer& fb) -> bool {
+		if (fb)
+			return true;
+		VkFramebufferCreateInfo fi{};
+		fi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		fi.renderPass = g_skyPassRp;
+		fi.attachmentCount = 1;
+		fi.pAttachments = &view;
+		fi.width = w;
+		fi.height = h;
+		fi.layers = 1;
+		return c.fns.vkCreateFramebuffer(c.vdev, &fi, nullptr, &fb) == VK_SUCCESS;
+	};
+	for (int i = 0; i < 2; ++i)
+	{
+		if (!mkFb(g_skyProbeView[i], 1, 2, g_skyFbProbe[i]))
+			return fail("探针 framebuffer 建不出");
+		if (!mkFb(g_skyLutView[i], lw, lh, g_skyFbLut[i]))
+			return fail("LUT framebuffer 建不出");
+		if (!mkFb(g_skyCloudView[i], cw, ch, g_skyFbCloud[i]))
+			return fail("云 framebuffer 建不出");
+	}
+	if (!g_skyFbOut)
+	{
+		// 出向图 view 换了 (skyOut 重建) ⇒ 旧 framebuffer 指向已销毁的 view, 必须先退
+		if (g_skyOutVkView == VK_NULL_HANDLE)
+			return fail("skyOut view 空");
+		VkFramebufferCreateInfo fi{};
+		fi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		fi.renderPass = g_skyPassRp;
+		fi.attachmentCount = 1;
+		fi.pAttachments = &g_skyOutVkView;
+		fi.width = g_skyVkW;
+		fi.height = g_skyVkH;
+		fi.layers = 1;
+		if (c.fns.vkCreateFramebuffer(c.vdev, &fi, nullptr, &g_skyFbOut) != VK_SUCCESS)
+			return fail("出向 framebuffer 建不出");
+	}
+	// ---- skyDepth 的 depth-aspect 采样 view (KMT/D24S8 建的是 DEPTH|STENCIL 两位;
+	//      组合深度模板格式的 layout 迁移**必须**同时带两位, 但采样 view 只取 depth) ----
+	if (!g_skyVkDepthView)
+	{
+		VkImageViewCreateInfo v{};
+		v.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		v.image = g_skyVkD.img;
+		v.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		v.format = VK_FORMAT_D24_UNORM_S8_UINT;
+		v.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+		if (c.fns.vkCreateImageView(c.vdev, &v, nullptr, &g_skyVkDepthView) != VK_SUCCESS)
+		{
+			g_skyVkDepthView = VK_NULL_HANDLE;
+			return fail("skyDepth depth-aspect view 建不出");
+		}
+	}
+	// ---- shader module: 顶点复用 kSsrVertSpv (全屏三角, vUV 与 ssr.frag 同约定) ----
+	if (!g_skyPassVs)
+	{
+		VkShaderModuleCreateInfo sm{};
+		sm.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		sm.codeSize = kSsrVertSpvBytes;
+		sm.pCode = kSsrVertSpv;
+		if (c.fns.vkCreateShaderModule(c.vdev, &sm, nullptr, &g_skyPassVs) != VK_SUCCESS)
+			return fail("vkCreateShaderModule(ssr.vert) 建不出");
+	}
+	// ---- pipeline layout: push constant 128B (相机/时间/参数/档位, 上限见 vkrenderer.h) ----
+	if (!g_skyPassPl)
+	{
+		VkPushConstantRange pcr{};
+		pcr.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		pcr.offset = 0;
+		pcr.size = 128; // 规范下限 maxPushConstantsSize; 与 SSR v1 同上限
+		VkPipelineLayoutCreateInfo li{};
+		li.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		li.setLayoutCount = 1;
+		li.pSetLayouts = &g_skyPassDsl;
+		li.pushConstantRangeCount = 1;
+		li.pPushConstantRanges = &pcr;
+		if (c.fns.vkCreatePipelineLayout(c.vdev, &li, nullptr, &g_skyPassPl) != VK_SUCCESS)
+			return fail("vkCreatePipelineLayout 建不出");
+	}
+	// ---- 四条 fragment 管线 (档位值经 VkSpecializationInfo 烘焙, 仿 kMissFade 模式) ----
+	if (!g_skyPassPipe[0] || !g_skyPassPipe[1] || !g_skyPassPipe[2] || !g_skyPassPipe[3])
+	{
+		const unsigned int* spv[4] = {kSkyProbeSpv, kSkyLutSpv, kSkyCloudSpv, kSkyCompSpv};
+		const size_t spvSz[4] = {kSkyProbeSpvBytes, kSkyLutSpvBytes, kSkyCloudSpvBytes, kSkyCompSpvBytes};
+		// 档位 → spec constant (float 声明, 与 kCubeElev/kMissFade 同款数据块口径):
+		//   LUT  : kLutSteps (lutscale 0.5/1 -> 16, 2 -> 28), kSunThreshDeg=0.35 (低频重算阈值)
+		//   云   : kSteps (sky.cloudsteps 档位值), kHistory (cloudtemporal ? 0.55 : 0)
+		//   合成 : kMix=0.85 (掩码内与原版混合比), kFade=0.0016 (掩码边缘过渡宽度)
+		// 探针无 spec constant (纯函数, 无档位依赖)。
+		float lutSteps = (g_skyLutScale > 1.5f) ? 28.0f : 16.0f;
+		float lutData[2] = {lutSteps, 0.35f};
+		float cloudData[2] = {(float)(g_skyCloudSteps > 0 ? g_skyCloudSteps : 64),
+		                     (g_skyCloudTemporal > 0) ? 0.55f : 0.0f};
+		float compData[2] = {0.85f, 0.0016f};
+		VkSpecializationMapEntry me[2]{};
+		me[0].constantID = 0;
+		me[0].offset = 0;
+		me[0].size = sizeof(float);
+		me[1].constantID = 1;
+		me[1].offset = sizeof(float);
+		me[1].size = sizeof(float);
+		VkSpecializationInfo spec[4]{};
+		spec[1].mapEntryCount = 2;
+		spec[1].pMapEntries = me;
+		spec[1].dataSize = sizeof(lutData);
+		spec[1].pData = lutData;
+		spec[2].mapEntryCount = 2;
+		spec[2].pMapEntries = me;
+		spec[2].dataSize = sizeof(cloudData);
+		spec[2].pData = cloudData;
+		spec[3].mapEntryCount = 2;
+		spec[3].pMapEntries = me;
+		spec[3].dataSize = sizeof(compData);
+		spec[3].pData = compData;
+		// 静态固定态 (无 spec): 视口/无顶点缓冲/无深度/写全 RGBA, 与 SSR v1 同模板
+		VkPipelineVertexInputStateCreateInfo vi{};
+		vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+		VkPipelineInputAssemblyStateCreateInfo ia{};
+		ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+		ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+		VkPipelineViewportStateCreateInfo vs{};
+		vs.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+		vs.viewportCount = 1;
+		vs.scissorCount = 1;
+		VkPipelineRasterizationStateCreateInfo rs{};
+		rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+		rs.polygonMode = VK_POLYGON_MODE_FILL;
+		rs.cullMode = VK_CULL_MODE_NONE;
+		rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+		rs.lineWidth = 1.0f;
+		VkPipelineMultisampleStateCreateInfo ms{};
+		ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+		ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+		VkPipelineDepthStencilStateCreateInfo ds{};
+		ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+		ds.depthTestEnable = VK_FALSE;
+		ds.depthWriteEnable = VK_FALSE;
+		VkPipelineColorBlendAttachmentState cba{};
+		cba.colorWriteMask = 0xF;
+		VkPipelineColorBlendStateCreateInfo cb{};
+		cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+		cb.attachmentCount = 1;
+		cb.pAttachments = &cba;
+		VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+		VkPipelineDynamicStateCreateInfo dy{};
+		dy.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+		dy.dynamicStateCount = 2;
+		dy.pDynamicStates = dyn;
+		for (int k = 0; k < 4; ++k)
+		{
+			if (g_skyPassPipe[k])
+				continue;
+			if (!g_skyPassFs[k])
+			{
+				VkShaderModuleCreateInfo sm{};
+				sm.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+				sm.codeSize = spvSz[k];
+				sm.pCode = spv[k];
+				if (c.fns.vkCreateShaderModule(c.vdev, &sm, nullptr, &g_skyPassFs[k]) != VK_SUCCESS)
+					return fail("fragment shader module 建不出");
+			}
+			VkPipelineShaderStageCreateInfo st[2]{};
+			st[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+			st[0].module = g_skyPassVs;
+			st[0].pName = "main";
+			st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+			st[1].module = g_skyPassFs[k];
+			st[1].pName = "main";
+			st[1].pSpecializationInfo = &spec[k];
+			VkGraphicsPipelineCreateInfo gp{};
+			gp.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+			gp.stageCount = 2;
+			gp.pStages = st;
+			gp.pVertexInputState = &vi;
+			gp.pInputAssemblyState = &ia;
+			gp.pViewportState = &vs;
+			gp.pRasterizationState = &rs;
+			gp.pMultisampleState = &ms;
+			gp.pDepthStencilState = &ds;
+			gp.pColorBlendState = &cb;
+			gp.pDynamicState = &dy;
+			gp.layout = g_skyPassPl;
+			gp.renderPass = g_skyPassRp;
+			gp.subpass = 0;
+			if (c.fns.vkCreateGraphicsPipelines(c.vdev, VK_NULL_HANDLE, 1, &gp, nullptr,
+			                                     &g_skyPassPipe[k]) != VK_SUCCESS)
+				return fail("vkCreateGraphicsPipelines 建不出");
+		}
+	}
+	if (g_skyPassState != 1)
+	{
+		g_skyPassState = 1;
+		logLine("[sky] VK 四 pass 就绪: 探针 1x2 → LUT " + std::to_string(lw) + "x" +
+		        std::to_string(lh) + " → 云 " + std::to_string(cw) + "x" + std::to_string(ch) +
+		        " → 合成 " + std::to_string(g_skyVkW) + "x" + std::to_string(g_skyVkH) +
+		        " (RGBA16F, loadOp=DONT_CARE, 全屏三角 3 顶点) | preset=" +
+		        std::to_string(g_skyPreset) + " cloudscale=" + std::to_string(g_skyCloudScale) +
+		        " cloudsteps=" + std::to_string(g_skyCloudSteps) + " cloudtemporal=" +
+		        std::to_string(g_skyCloudTemporal) + " lutscale=" + std::to_string(g_skyLutScale) +
+		        " (档位值已烘焙进管线 spec constant; 改 ini 需重启)");
+	}
+	return true;
+}
+
+// ---- 每帧四 pass: 录一条命令 → 提交 → fence 等完 ----
+// 录制内容 (顺序即依赖顺序):
+//   ① 入向 skyIn/skyDepth: GENERAL → SHADER_READ_ONLY
+//   ② 探针 pass (写 probe[cur], 读 skyIn + mask + probe[prev])
+//   ③ LUT pass   (写 lut[cur], 读 probe[cur] + probe[prev] + lut[prev])
+//   ④ 云 pass    (写 cloud[cur], 读 probe[cur] + mask + lut[cur] + cloud[prev] + 噪声)
+//   ⑤ 合成 pass  (写 skyOut, 读 skyIn + mask + lut[cur] + cloud[cur] + probe[cur])
+//   ⑥ 出向 skyOut 留在 GENERAL (D3D11 侧 CopyResource 读它)
+//   ⑦ 入向两张复原 GENERAL (下帧 D3D11 的 CopyResource 目的地)
+static void skyPassRecord(PocbCtx& c)
+{
+	const int cur = g_skyPing;
+	const int prv = cur ^ 1;
+	auto barrier = [&](VkImage img, VkImageAspectFlags aspect, VkPipelineStageFlags ss,
+	                   VkAccessFlags sa, VkPipelineStageFlags ds, VkAccessFlags da,
+	                   VkImageLayout ol, VkImageLayout nl) {
+		if (!img)
+			return;
+		VkImageMemoryBarrier imb{};
+		imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		imb.srcAccessMask = sa;
+		imb.dstAccessMask = da;
+		imb.oldLayout = ol;
+		imb.newLayout = nl;
+		imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imb.image = img;
+		imb.subresourceRange = {aspect, 0, 1, 0, 1};
+		c.fns.vkCmdPipelineBarrier(g_skyPassCmd, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &imb);
+	};
+	auto draw = [&](int pass, VkFramebuffer fb, unsigned w, unsigned h) {
+		VkRenderPassBeginInfo rb{};
+		rb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+		rb.renderPass = g_skyPassRp;
+		rb.framebuffer = fb;
+		rb.renderArea.offset = {0, 0};
+		rb.renderArea.extent = VkExtent2D{w, h};
+		rb.clearValueCount = 0; // loadOp = DONT_CARE, 不需要 clearValue
+		c.fns.vkCmdBeginRenderPass(g_skyPassCmd, &rb, VK_SUBPASS_CONTENTS_INLINE);
+		c.fns.vkCmdBindPipeline(g_skyPassCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_skyPassPipe[pass]);
+		c.fns.vkCmdBindDescriptorSets(g_skyPassCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_skyPassPl, 0,
+		                              1, &g_skyPassSet[pass], 0, nullptr);
+		VkViewport vp{};
+		vp.x = 0.0f;
+		vp.y = 0.0f;
+		vp.width = (float)w;
+		vp.height = (float)h;
+		vp.minDepth = 0.0f;
+		vp.maxDepth = 1.0f;
+		c.fns.vkCmdSetViewport(g_skyPassCmd, 0, 1, &vp);
+		VkRect2D sc{};
+		sc.offset = {0, 0};
+		sc.extent = VkExtent2D{w, h};
+		c.fns.vkCmdSetScissor(g_skyPassCmd, 0, 1, &sc);
+		// ---- push constant 128B (三个 frag 共用同一布局) ----
+		struct
+		{
+			float cam[4];  // x=time(s) y=aspect z=tan(fovY/2) w=exposure
+			float sz[4];   // x=cloudW y=cloudH z=windX w=windZ
+			float ctl[4];  // x=coverage y=density z=sunIntensity w=firstFrame
+			float tier[4]; // x=cloudscale y=lutscale z=cloudtemporal w=unused
+			float pad[4][4];
+		} pc;
+		// 时间: 由帧计数推导的**单调**时间轴 (不读系统时钟 ⇒ 可复现; 云靠它漂移)
+		const float t = (float)g_skyPassN * (1.0f / 60.0f);
+		pc.cam[0] = t;
+		pc.cam[1] = (float)g_skyVkW / (float)(g_skyVkH ? g_skyVkH : 1);
+		// FOV: 沿用 SSR 侧同一口径的真投影值 (ssr.fov, ini 里 58.7155 = docs/02 §14.29 实测)
+		pc.cam[2] = std::tan(g_ssrV1Fov * 3.14159265358979f / 360.0f);
+		pc.cam[3] = 1.0f;
+		pc.sz[0] = (float)g_skyCloudW;
+		pc.sz[1] = (float)g_skyCloudH;
+		pc.sz[2] = 0.013f;  // 风速 (世界单位/s) —— 固定量, 不占 ini 键 (T4 已定名五个键, 不新增)
+		pc.sz[3] = 0.007f;
+		// 覆盖度/密度/太阳强度: 固定视觉常量 (随 preset 档位微调, 不新增 ini 键)
+		static const float kCov[4] = {0.45f, 0.52f, 0.58f, 0.65f};
+		static const float kDen[4] = {0.85f, 1.0f, 1.15f, 1.3f};
+		const int pi_ = (g_skyPreset >= 0 && g_skyPreset <= 3) ? g_skyPreset : 2;
+		pc.ctl[0] = kCov[pi_];
+		pc.ctl[1] = kDen[pi_];
+		pc.ctl[2] = 22.0f; // 太阳辐照度 (合成 pass 靠探针 meanLum 归一, 这里只定相对强度)
+		pc.ctl[3] = (g_skyPassN < 3) ? 1.0f : 0.0f; // 首几帧关时域 (历史还没建立)
+		pc.tier[0] = g_skyCloudScale;
+		pc.tier[1] = g_skyLutScale;
+		pc.tier[2] = (float)(g_skyCloudTemporal > 0 ? 1 : 0);
+		pc.tier[3] = 0.0f;
+		for (int i = 0; i < 4; ++i)
+			for (int j = 0; j < 4; ++j)
+				pc.pad[i][j] = 0.0f;
+		c.fns.vkCmdPushConstants(g_skyPassCmd, g_skyPassPl, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+		                         sizeof(pc), &pc);
+		c.fns.vkCmdDraw(g_skyPassCmd, 3, 1, 0, 0);
+		c.fns.vkCmdEndRenderPass(g_skyPassCmd);
+	};
+	// ⓪ 首次: 六张 ping-pong 图 UNDEFINED → SHADER_READ_ONLY。
+	// 历史侧 (probe[prv]/lut[prv]/cloud[prv]) 在头几帧会被当 sampler 读, 而描述符里写的是
+	// SHADER_READ_ONLY_OPTIMAL —— 不先迁一次就是拿 UNDEFINED 布局采样 (未定义行为, 可能读到
+	// 垃圾/NaN 污染第一帧的太阳方向)。图重建 (换分辨率/换档) 后由 skyPassBuild 清位重做。
+	if (!g_skyRtInit)
+	{
+		g_skyRtInit = true;
+		for (int i = 0; i < 2; ++i)
+		{
+			const VkImage trio[3] = {g_skyProbeImg[i], g_skyLutImg[i], g_skyCloudImg[i]};
+			for (int j = 0; j < 3; ++j)
+				barrier(trio[j], VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+				        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+				        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		}
+	}
+	// ① 入向 → SHADER_READ_ONLY (跨 API 的 D3D11 写用 ALL_COMMANDS + MEMORY_WRITE 兜住;
+	//    组合深度模板格式 skyDepth 的迁移**必须**同时带 DEPTH|STENCIL 两位, 与 T5 同口径)
+	barrier(g_skyVkC.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+	        VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+	        VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+	        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	barrier(g_skyVkD.img, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+	        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+	        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	draw(0, g_skyFbProbe[cur], 1, 2);
+	barrier(g_skyProbeImg[cur], VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+	        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+	        VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+	        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	draw(1, g_skyFbLut[cur], g_skyLutW, g_skyLutH);
+	barrier(g_skyLutImg[cur], VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+	        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+	        VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+	        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	draw(2, g_skyFbCloud[cur], g_skyCloudW, g_skyCloudH);
+	barrier(g_skyCloudImg[cur], VK_IMAGE_ASPECT_COLOR_BIT,
+	        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+	        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+	        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	draw(3, g_skyFbOut, g_skyVkW, g_skyVkH);
+	// ⑥ 出向停在 GENERAL (D3D11 侧 CopyResource(321 ← skyOut) 读它)
+	barrier(g_skyOutVkImg, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+	        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+	        VK_ACCESS_MEMORY_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+	// ⑦ 入向复原 GENERAL (下帧 D3D11 的 CopyResource 目的地; 跨 API 只认 GENERAL)
+	barrier(g_skyVkC.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+	        VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+	        VK_ACCESS_MEMORY_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	        VK_IMAGE_LAYOUT_GENERAL);
+	barrier(g_skyVkD.img, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+	        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT,
+	        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+	// 噪声纹理保持 SHADER_READ_ONLY (只读, 无需每帧迁移)
+}
+
+// ---- 描述符填充 (每帧一次: ping-pong 侧与"上帧结果"每帧交替, 出向 view 也可能换) ----
+// binding 语义按 pass 不同 (见各 frag 的 layout 注释):
+//   探针 0=skyIn  1=mask  2=probe[prev]
+//   LUT  0=probe[cur] 1=probe[prev] 2=lut[prev]
+//   云   0=probe[cur] 1=mask 2=lut[cur] 3=cloud[prev] 4=noise3D
+//   合成 0=skyIn 1=mask 2=lut[cur] 3=cloud[cur] 4=probe[cur]
+static void skyPassFillSets(PocbCtx& c)
+{
+	const int cur = g_skyPing;
+	const int prv = cur ^ 1;
+	const VkImageLayout ro = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	auto fill = [&](int pass, const VkSampler* smp, const VkImageView* view,
+	                const VkImageLayout* lay, int n) {
+		VkDescriptorImageInfo di[5]{};
+		for (int i = 0; i < n; ++i)
+		{
+			di[i].sampler = smp[i];
+			di[i].imageView = view[i];
+			di[i].imageLayout = lay[i];
+		}
+		VkWriteDescriptorSet w[5]{};
+		for (int i = 0; i < n; ++i)
+		{
+			w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			w[i].dstSet = g_skyPassSet[pass];
+			w[i].dstBinding = (uint32_t)i;
+			w[i].descriptorCount = 1;
+			w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			w[i].pImageInfo = &di[i];
+		}
+		c.fns.vkUpdateDescriptorSets(c.vdev, (uint32_t)n, w, 0, nullptr);
+	};
+	const VkSampler sLin = g_skySmpLin, sNear = g_skySmpNear, sRep = g_skySmpRep;
+	{ // 探针
+		const VkSampler sm[3] = {sLin, sNear, sNear};
+		const VkImageView vw[3] = {g_skyVkC.view, g_skyVkDepthView, g_skyProbeView[prv]};
+		const VkImageLayout ly[3] = {ro, ro, ro};
+		fill(0, sm, vw, ly, 3);
+	}
+	{ // LUT
+		const VkSampler sm[3] = {sNear, sNear, sLin};
+		const VkImageView vw[3] = {g_skyProbeView[cur], g_skyProbeView[prv], g_skyLutView[prv]};
+		const VkImageLayout ly[3] = {ro, ro, ro};
+		fill(1, sm, vw, ly, 3);
+	}
+	{ // 云
+		const VkSampler sm[5] = {sNear, sNear, sLin, sLin, sRep};
+		const VkImageView vw[5] = {g_skyProbeView[cur], g_skyVkDepthView, g_skyLutView[cur],
+		                          g_skyCloudView[prv], g_skyNoiseView};
+		const VkImageLayout ly[5] = {ro, ro, ro, ro, ro};
+		fill(2, sm, vw, ly, 5);
+	}
+	{ // 合成 (输出 skyOut, 输入全在 mask 内用)
+		const VkSampler sm[5] = {sLin, sNear, sLin, sLin, sNear};
+		const VkImageView vw[5] = {g_skyVkC.view, g_skyVkDepthView, g_skyLutView[cur],
+		                          g_skyCloudView[cur], g_skyProbeView[cur]};
+		const VkImageLayout ly[5] = {ro, ro, ro, ro, ro};
+		fill(3, sm, vw, ly, 5);
+	}
+}
+
+// 每帧: 天空入向 EVENT 闸 → 四 pass (探针/LUT/云/合成) → 提交 + fence 等完
+// 接线位 = pocbInject (与 ssrInGateWait 同一位), 即**排在任何读 skyIn/skyDepth 的 VK 命令之前**;
+// 天空这条闸在 skyVkFrame 开头消费 (skyInGateWait), 与 2c 那道闸各自计数 (R9/R11 归因要求)。
+void skyVkFrame(PocbCtx& c) // vkrenderer.h 有声明 (非 static), 定义必须同链接性
+{
+	// 总闸: sky=0 ⇒ 一行命令都不发, 一条日志都不打 (docs/07 §3.5 静默承诺)
+	if (!g_skyOn.load(std::memory_order_relaxed))
+		return;
+	if (c.state.load() != 2 || !c.vdev || !c.queue || !c.pool || !c.fence)
+		return;
+	// ---- 闸: 等本帧 skyIn/skyDepth 拷贝进 GPU (一次性消费 + 2000ms 超时放行) ----
+	skyInGateWait(c);
+	if (g_skyPassState == 2)
+		return;
+	if (!skyPassBuild(c))
+		return; // 资源还没齐 (入向镜像/出向 handle 未到) ⇒ 下帧再试
+	if (!g_skyPassCmd || !g_skyPassSet[0])
+		return;
+	skyPassFillSets(c);
+	// ---- 录制 (每帧重录: push constant 里的 time 每帧变) ----
+	c.fns.vkResetCommandPool(c.vdev, g_skyPassPool, 0);
+	VkCommandBufferBeginInfo cbb{};
+	cbb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	if (c.fns.vkBeginCommandBuffer(g_skyPassCmd, &cbb) != VK_SUCCESS)
+		return;
+	skyPassRecord(c);
+	if (c.fns.vkEndCommandBuffer(g_skyPassCmd) != VK_SUCCESS)
+		return;
+	// ---- 提交 + 等完 (出向 skyOut 必须在 hook 面 CopyResource 之前完成 ⇒ 必须等) ----
+	const auto f0 = std::chrono::steady_clock::now();
+	c.fns.vkResetFences(c.vdev, 1, &c.fence);
+	VkSubmitInfo si{};
+	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &g_skyPassCmd;
+	VkResult vr = c.fns.vkQueueSubmit(c.queue, 1, &si, c.fence);
+	if (vr == VK_SUCCESS)
+		vr = c.fns.vkWaitForFences(c.vdev, 1, &c.fence, VK_TRUE, UINT64_MAX);
+	const double ms =
+	    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - f0).count();
+	if (vr != VK_SUCCESS)
+	{
+		logLine("[sky] 四 pass 提交/等待 = " + pocbCode(vr) + " → 本帧不回写 (画面留原版天空)");
+		return;
+	}
+	g_skyPing ^= 1;
+	g_skyOutReady = true;
+	++g_skyPassN;
+	g_skyPassMs += ms;
+	if (!g_skyPassLogOnce)
+	{
+		g_skyPassLogOnce = true;
+		logLine("[sky] 四 pass 第 1 帧完成: 探针+LUT+云+合成 = " + std::to_string(ms).substr(0, 5) +
+		        "ms (含提交+fence 同步等完; 出向 skyOut 已就绪, hook 面将 CopyResource(321←skyOut))");
+	}
+	else if ((g_skyPassN % 600) == 0)
+	{
+		logLine("[sky] 四 pass 累计均值 " +
+		        std::to_string(g_skyPassMs / (double)g_skyPassN).substr(0, 5) + "ms/帧 (本帧 " +
+		        std::to_string(ms).substr(0, 5) + "ms, 闸等待均值 " +
+		        std::to_string(g_skyGateN ? g_skyGateMs / (double)g_skyGateN : 0.0).substr(0, 5) +
+		        "ms, 帧=" + std::to_string(g_presentCount.load(std::memory_order_relaxed)) +
+		        ") — 5% 闸账口径 (docs/07 §6 R6)");
+	}
+}
+
 // 每帧: 提交一次 Vulkan 命令 → fence 等待 → 读回像素 → 拷进 backbuffer
 void pocbInject(PocbCtx& c, IDXGISwapChain* sc)
 {
@@ -4944,4 +6194,15 @@ void pocbInject(PocbCtx& c, IDXGISwapChain* sc)
 // 函数都是 Reset→Submit→WaitForFences 等到完成的串行用法, 顺序安全; 也不进 c.accMs。
 	// 本轮**只建不采样** (零读回); T6 在这里接合成 pass + EVENT 闸 (计划 T6「同步」节)。
 	skyMirrorVkBuild(c);
+	// v0.18.36 T6 天空 pass (探针 / 散射 LUT / 体积云 / 合成) + 天空入向 EVENT 闸。
+	// **接线位在这里被有意挪走**: skyVkFrame 不在本函数里跑, 而是由 main.cpp 的段7-end
+	// 消费点调 (hookedOMSetRenderTargets, real() 之后 —— 排在 skyInQueue / 两条入向拷贝之后,
+	// skyOutBuild / skyOutFire 之前)。理由是 docs/07 §4.3 的硬要求: skyOut 是**相机依赖**的,
+	// 消费者 (321 的下采样消) 排在本帧段7 之后, 若把 pass 留到 Present 才跑, 本帧的 CopyResource
+	// 就只能灌上一帧的天空 ⇒ 镜头一动即错位 + 时域鬼影, §4.3 明令"多缓冲/延迟一帧不可接受"。
+	// 段7-end 处跑则 skyOut 由本帧入向 + 本帧视角算出并**同帧**回写 321, 队列序上消费者正好吃到。
+	// 闸的前置条件依然成立且更强: 天空 pass 是整个帧里**第一个**读 skyIn/skyDepth 的 VK 命令,
+	// 且 skyVkFrame 开头就消费自己那道闸 (g_skyGateN/g_skyGateMs 独立计数, 便于 R6 与 2c 那条
+	// 分开归因); skyMirrorVkBuild 只建图不采样, 排在它后面不构成"读到未同步数据"。
+	// 本函数剩下的最后一步因此只留"建导入"这件事, 真正渲染由 hook 侧驱动。
 }

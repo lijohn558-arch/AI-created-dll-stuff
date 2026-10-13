@@ -25,7 +25,11 @@ $pairs = @(
     @{ src = 'pocb.vert'; stage = 'vert' },
     @{ src = 'pocb.frag'; stage = 'frag' },
     @{ src = 'ssr.vert'; stage = 'vert' },
-    @{ src = 'ssr.frag'; stage = 'frag' }
+    @{ src = 'ssr.frag'; stage = 'frag' },
+    @{ src = 'sky_probe.frag'; stage = 'frag' },
+    @{ src = 'sky_lut.frag'; stage = 'frag' },
+    @{ src = 'sky_cloud.frag'; stage = 'frag' },
+    @{ src = 'sky_comp.frag'; stage = 'frag' }
 )
 $fail = 0
 foreach ($p in $pairs) {

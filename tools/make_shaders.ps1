@@ -53,7 +53,11 @@ $pairs = @(
     @{ src = "pocb.vert"; stage = "vert"; name = "PocbVert" },
     @{ src = "pocb.frag"; stage = "frag"; name = "PocbFrag" },
     @{ src = "ssr.vert"; stage = "vert"; name = "SsrVert" },
-    @{ src = "ssr.frag"; stage = "frag"; name = "SsrFrag" }
+    @{ src = "ssr.frag"; stage = "frag"; name = "SsrFrag" },
+    @{ src = "sky_probe.frag"; stage = "frag"; name = "SkyProbe" },
+    @{ src = "sky_lut.frag"; stage = "frag"; name = "SkyLut" },
+    @{ src = "sky_cloud.frag"; stage = "frag"; name = "SkyCloud" },
+    @{ src = "sky_comp.frag"; stage = "frag"; name = "SkyComp" }
 )
 
 $spvList = @()
@@ -70,6 +74,7 @@ $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine("//")
 [void]$sb.AppendLine("// 源: src\poc-presenter\shaders\*.vert/*.frag (GLSL 450 -> SPIR-V 1.x)")
 [void]$sb.AppendLine("//      pocb.* = PoC-B 注入三角; ssr.* = SSR v1 全屏三角 + 采样 (v0.18.7: 平滑批 + 底色 binding2)")
+[void]$sb.AppendLine("//      sky_*  = 天空 T6 四 frag (探针/LUT/云/合成, 复用 ssr.vert 全屏三角)")
 [void]$sb.AppendLine("// 再生成: powershell -NoProfile -ExecutionPolicy Bypass -File tools\make_shaders.ps1")
 [void]$sb.AppendLine("//")
 [void]$sb.AppendLine("// SPIR-V 规范要求 module 大小是 4 的倍数, 且 pCode 按 uint32 对齐 => 这里存字。")

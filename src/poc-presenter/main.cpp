@@ -1371,6 +1371,23 @@ ID3D11Texture2D* g_skyInTexD = nullptr;          // skyDepth 共享镜像 (desc 
 HANDLE           g_skyInHD = nullptr;
 bool  g_skyInColorKmt = false;                   // skyIn 走老式 SHARED (本机应为 false)
 bool  g_skyInDepthKmt = false;                   // skyDepth 走老式 SHARED ⇒ VK 用 KMT handleType
+// ---- v0.18.36 T6 天空出向镜像 (skyOut) + 天空入向 EVENT 闸 ----
+// skyOut: desc 照抄 321 的**出向**共享镜像, 格式/尺寸/规格与 321 逐字段相同 ⇒ CopyResource
+// 的 desc 一致性天然成立 (与 skyIn 同一份 skyMakeShared 建法)。VK 侧当 COLOR_ATTACHMENT
+// 渲染合成结果; hook 面在段7-end 触发链里 CopyResource(321 ← skyOut)。
+// 闸: 两条入向拷贝之后 End 一条 D3D11_QUERY_EVENT + Flush, 由 renderer 侧 skyVkFrame 消费。
+// (docs/07 §4.1 事件闸模板 = 既有 SSR 入向 EVENT 闸; 与 2c 那道闸独立计数便于归因)
+ID3D11Texture2D* g_skyOutTexC = nullptr;         // skyOut 共享镜像 (desc 照抄 321)
+HANDLE g_skyOutHC = nullptr;
+bool  g_skyOutKmt = false;
+bool  g_skyOutReady = false;                     // VK 已把结果填进 skyOut (首帧前 false)
+static bool  g_skyOutBuilt = false;              // skyOut 建齐 (就绪行只打一次)
+static void* g_skyOutTry = nullptr;              // 已试过的 321 源身份: 源换了才重试
+ID3D11Query* g_skyQ = nullptr;                   // D3D11_QUERY_EVENT (惰性创建, 建不出降级为无闸)
+bool  g_skyQLive = false;                        // 已 End、还没等到 (一次性消费)
+bool  g_skyGateWarn = false;                     // "EVENT 查询建不出" 只打一次
+long  g_skyGateN = 0;                            // 闸等到的累计次数
+double g_skyGateMs = 0.0;                        // 闸累计等待 ms
 static bool  g_skyInBuilt = false;                // 两张镜像都建齐 (就绪行只打一次)
 static void* g_skyInTryC = nullptr;               // 已试过的源身份: **源换了才重试**, 不每帧空转
 static void* g_skyInTryD = nullptr;
@@ -1386,6 +1403,10 @@ static void skyDepthFire(ID3D11DeviceContext* ctx);
 // 源换了退旧镜像 (skySeg7End 里就要用到, 定义在拷贝工具那一段)
 static void skyMirrorDrop(ID3D11Texture2D** tex, HANDLE* h, bool* kmt, void* prevSrc, void* src,
                           const char* nm);
+// 出向 skyOut 同样要自愈 (321 换绑 ⇒ desc 过时, CopyResource 会静默丢弃 ⇒ 天空**静默停更**,
+// 画面还正常但再也不更新, 最难查)。单独一个函数而不是复用 skyMirrorDrop: 后者末尾会
+// 无条件清 g_skyInBuilt, 拿它退 skyOut 会连带把入向镜像拖着重建一遍。
+static void skyOutMirrorDrop(void* prevSrc, void* src);
 
 // 静默承诺 (docs/07 §3.5 / 计划 T7 Review Focus 7): sky=1 且 ssr=0 时 `SSR侦察:` 前缀
 // **零出现**、探针/普查 logLine 零出现。sky=0 ⇒ 恒 true ⇒ 既有行为逐字节不变;
@@ -1841,6 +1862,7 @@ static void skySeg7End(UINT n, ID3D11RenderTargetView* const* ppRTV, ID3D11Depth
 			{
 				// 源换了先退旧镜像 (desc 过时 ⇒ CopyResource 静默丢弃), 再换活引用
 				skyMirrorDrop(&g_skyInTexC, &g_skyInHC, &g_skyInColorKmt, g_skyRt0ResObj, robj, "skyIn");
+				skyOutMirrorDrop(g_skyRt0ResObj, robj); // T6 出向同样自愈
 				if (g_skyRt0Res)
 					g_skyRt0Res->Release();
 				g_skyRt0Res = live;
@@ -3300,6 +3322,118 @@ static void skyDepthFire(ID3D11DeviceContext* ctx)
 	ctx->Flush(); // 只提交, 不读回 (同 skyInQueue: 正式 EVENT 闸归 T6)
 }
 
+// 出向 skyOut 的自愈: 321 换绑 (跨场景/换分辨率) 后旧 skyOut 的 desc 过时, CopyResource
+// 会**静默丢弃** —— 画面看着正常但天空再也不更新。这里退掉旧镜像并清就绪位, 让段7-end
+// 的 skyOutBuild 下一帧按新源重建 (VK 侧 skyOutVkImport 也会跟着换 handle 重建导入图)。
+static void skyOutMirrorDrop(void* prevSrc, void* src)
+{
+	if (!g_skyOutTexC || !prevSrc || prevSrc == src)
+		return;
+	logLine("[sky] skyOut 源换了 (" + hexOf(prevSrc) + " → " + hexOf(src) +
+	        ") → 旧镜像 desc 过时, 退掉按新源重建 (否则回写静默丢弃, 天空不再更新)");
+	g_skyOutTexC->Release();
+	g_skyOutTexC = nullptr;
+	if (g_skyOutHC && !g_skyOutKmt)
+		CloseHandle(g_skyOutHC); // 只 NT 轴归我方 (KMT/老式轴归资源)
+	g_skyOutHC = nullptr;
+	g_skyOutKmt = false;
+	g_skyOutBuilt = false;
+	g_skyOutTry = nullptr;
+}
+
+// ---- v0.18.36 T6 天空出向镜像 skyOut: 建 (幂等) + desc 预检回写 (321 ← skyOut) ----
+// 建法照 skyInBuild/skyMakeShared (desc 全抄 321 ⇒ CopyResource 最严口径也成立)。
+// 触发源: 段7-end 消费点 (T5 的 skyInQueue 之后) —— 那一刻 321 恰好解绑, 写它最干净。
+static void skyOutBuild(ID3D11DeviceContext* ctx)
+{
+	if (g_skyOutBuilt || !g_skyRt0Res)
+		return;
+	if (g_skyOutTry == g_skyRt0ResObj && !g_skyOutTexC)
+		return; // 这个源已经试过且失败 ⇒ 不每帧重试 (同 skyInBuild 的 g_skyInTryC 口径)
+	ID3D11Device* dev = nullptr;
+	ctx->GetDevice(&dev);
+	if (!dev)
+		return;
+	if (!g_skyOutTexC)
+	{
+		g_skyOutTry = g_skyRt0ResObj;
+		skyMakeShared(dev, g_skyRt0Res, &g_skyOutTexC, &g_skyOutHC, "skyOut", &g_skyOutKmt);
+	}
+	dev->Release();
+	if (!g_skyOutTexC)
+		return;
+	// desc 必须与 321 逐字段一致, 否则 CopyResource 会**静默丢弃** (C-2 的教训)。
+	// 这里提前比一次, 不一致就别回写 (画面留原版天空, 零破坏)。
+	D3D11_TEXTURE2D_DESC sd{}, od{};
+	void* sobj = nullptr;
+	void* dobj = nullptr;
+	if (!ssrResObj(g_skyRt0Res, &sd, &sobj) || !ssrResObj(g_skyOutTexC, &od, &dobj) ||
+	    !descEqual(sd, od))
+	{
+		logLine("[sky] skyOut 镜像 desc 与 321 不一致 (321=" + descStr(sd) + " skyOut=" + descStr(od) +
+		        ") → 天空回写停用 (画面保留原版天空)");
+		return;
+	}
+	g_skyOutBuilt = true;
+	logLine("[sky] 出向就绪 skyOut=1920x1080 RGBA16F (desc 照抄 321, 与 321 逐字段一致) "
+	        "skyOut轴=" + std::string(g_skyOutKmt ? "KMT(老式SHARED)" : "NT") +
+	        " — 四 pass 渲进 skyOut, 本帧触发链里 CopyResource(321 ← skyOut)");
+}
+
+// T6 回写: CopyResource(321 ← skyOut)。**desc 预检必须做** —— CopyResource 返回 void,
+// desc 不一致时静默丢弃但日志照打 (C-2 教训, 见 copyResDescChecked 的注释)。
+// 计数 g_skyOutN 就是配平的 K3 (T5 留的位, 本轮由这里真写)。
+static void skyOutFire(ID3D11DeviceContext* ctx)
+{
+	if (!ctx || !g_skyRt0Res || !g_skyOutTexC || !g_skyOutBuilt || !g_skyOutReady)
+		return;
+	const long k = ++g_skyOutN;
+	const std::string pfx = "[sky] 回写#" + std::to_string(k) + " 321=" + hexOf(g_skyRt0ResObj) +
+	                        " ← skyOut=" + hexOf(g_skyOutTexC) + " 帧=" +
+	                        std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1);
+	copyResDescChecked(ctx, g_skyRt0Res, g_skyOutTexC, pfx, "321", "skyOut", k);
+}
+
+// T6 入向 EVENT 闸的**发行**侧 (docs/07 §4.1 模板 = ssrInQueue 的 End+Flush):
+// 排在两条入向拷贝 (skyInQueue / skyDepthFire) 之后 —— 队列顺序 = 执行顺序, 所以这条
+// End 一定在两次拷贝之后 ⇒ renderer 侧等它等到, 就等价于"入向拷贝已进 GPU"。
+// 查询惰性建: 建不出就降级为"无闸" (只打一次日志, 那时入向可能差一帧, 不卡帧)。
+// End 之后再 Flush (让查询连同拷贝一起进驱动队列; GetData 带 DONOTFLUSH 不替我们提交)。
+static void skyGateQueue(ID3D11DeviceContext* ctx)
+{
+	if (!ctx)
+		return;
+	if (!g_skyQ)
+	{
+		ID3D11Device* dev = nullptr;
+		ctx->GetDevice(&dev);
+		if (dev)
+		{
+			D3D11_QUERY_DESC qd{};
+			qd.Query = D3D11_QUERY_EVENT;
+			const HRESULT hq = dev->CreateQuery(&qd, &g_skyQ);
+			dev->Release();
+			if (FAILED(hq) || !g_skyQ)
+			{
+				g_skyQ = nullptr;
+				if (!g_skyGateWarn)
+				{
+					g_skyGateWarn = true;
+					logLine("[sky] 入向EVENT闸 查询创建失败 " + hexHr(hq) +
+					        " → 天空无闸 (入向可能不是本帧那份; 不卡帧)");
+				}
+			}
+		}
+	}
+	// 上一条查询还没被 renderer 消费 (VK 侧本帧没跑) 就不再 End, 免得查询结果未取又 End。
+	if (g_skyQ && !g_skyQLive)
+	{
+		ctx->End(g_skyQ);
+		g_skyQLive = true;
+	}
+	ctx->Flush();
+}
+
 // T5 心跳 + 配平汇总。节流按**触发计数** g_skySeg7N 取模 (段7 一次都没出现的帧自然不刷屏),
 // 与本文件 2b/2c/2d 的 k%N 同一口径: 前 8 次全打 + 每 60 帧心跳; 配平汇总每 600 帧一行。
 // K3 (skyOut回写) 由 T6 落, 本轮恒 0 —— 照打真实值, 不假造 (计划 T5 定名)。
@@ -3563,6 +3697,19 @@ static void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* ctx,
 			logLine("[sky] 段7-end 触发#" + std::to_string(k) + " 帧=" +
 			        std::to_string(g_presentCount.load(std::memory_order_relaxed) + 1));
 		skyInQueue(ctx);  // 入向① skyIn ← 321 (只写我方镜像, 不碰游戏的任何绑定)
+		// ---- T6 本帧天空链 (docs/07 §4.2 的窗口次序) ----
+		// 两条入向拷贝 (skyInQueue / 461→520 那条 skyDepthFire) 之后 → End(EVENT)+Flush
+		// → 闸等待 + 三个 pass (提交并等完 fence, skyOut 此时已是本帧像素) → desc 预检 +
+		// CopyResource(321 ← skyOut)。skyOut 由本帧相机/本帧入向算出并**同帧**写回 321:
+		// 321 的下采样消消费者排在段7 之后 ⇒ 队列序上正好吃到这一份 (docs/07 §4.3
+		// "多缓冲/延迟一帧不可接受, 消费者会读到上一帧天空" ⇒ 不把 pass 留到 Present 才跑)。
+		if (g_skyOn.load(std::memory_order_relaxed))
+		{
+			skyGateQueue(ctx); // 闸发行 (无 skyIn/skyDepth 消费时它才被 skyVkFrame 取走)
+			skyVkFrame(g_pocb); // 闸等待 + 探针/LUT/云/合成 + fence 等完
+			skyOutBuild(ctx);   // 幂等建 skyOut 镜像 (desc 全抄 321)
+			skyOutFire(ctx);    // desc 预检 + CopyResource(321 ← skyOut)
+		}
 		skyBalanceLog(k); // 心跳 (每 60) + 配平汇总 (每 600)
 	}
 }
@@ -6956,7 +7103,7 @@ __declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInf
 __declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* skse)
 {
 	g_logPath = pluginDir() + "\\poc-presenter.log";
-	logLine("==== poc-presenter v0.18.35 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 25: 采样基底合成 q=conj(qcap)⊗qchain+换代快照; 26: probedump 每次换代落盘(诊断: PFM 恒=活跃 cube); 27: debug=9 采样方向场定标 + 恒等q守卫(复位占位不发布) + 第2发布点也落盘; 28: shader 产物补生成 —— make_shaders 此前未跑致 v17/v20/v27 ssr.frag 幻影, DLL 一直嵌 v16 旧 shader(miss 无旋转总根因, 修法=tools/spvsync 闸); 29: 撤销25基底合成(cube 世界轴对齐, 直发 q 即真世界方向) + debug 8/7 闸收窄(debug=9 的 hit 走正常合成); 30: P1 读回跟踪期(ssr.probeint 默认2s — 两拍定C1后周期重读探针, FNV 签名有变即换代重传, 修 miss 区外景冻结/队列#7); 31: miss 采样仰角视差补偿 ssr.cubeelev(spec constant 默认7° — 探针原点比真实反射点Q远, cube天际线低6-7°致 miss 区顶部过早切天空, 下压采样仰角对齐真实天际线, 修『从天空变成山峰』倒置/条目32); 32: miss 屏幕钳带交叉淡入 ssr.missfade(spec constant 默认10° — 探针不在反射点: cube 该方位=开放湖岸远景非本处近景, δ<22° miss 改采 Rf 无穷远投影钳回屏内 uColor 真近景+回补同乘权重, 深处渐交 cube 天空, 修『远景当近景』/条目33); 33: 天空总闸 sky(ini sky 0/1 缺省0, T7才开) + 段7-end 六字段结构触发 (NumViews==3 且 RT0=1920x1080 RGBA16F 且 RT1/RT2 非空 且 DSV=1920x1080 D24家族; 首次不满足=段7-end; 判据纯结构化无抓帧 event id; sky=1 时挂载门独立于 ssr/probe, ssr=0 时 SSR侦察/探针/普查日志全静默); 34: sky.preset 分档(0低/1中/2高缺省/3极致, 档位表 constexpr 编入 DLL 换档只改 ini) + 四子键 sky.cloudscale/cloudsteps/cloudtemporal/lutscale 显式 ini 值覆盖档位值、未写则随档, 全键进 `天空:` 启动回显行(knobchk 逐键可验); 35: 天空入向数据通路 —— skyIn←321(段7-end 触发点 real() 之后发行, 此刻 321 已解绑) + skyDepth←520(搭车游戏 461→520 拷贝点, 发行排在 real() 之后保队列顺序), 两张共享镜像(NT handle, 深度源退老式 SHARED→KMT)VK 侧导入只 SAMPLED, 全程零同步读回, 自发行拷贝经 g_ssrSelfCopy 排除标记不污染 copy.sequence 锚点, 掩码判据=skyDepth D24 精确 0xFFFFFF(空掩码⇒合成零工作); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
+	logLine("==== poc-presenter v0.18.36 (PoC-A 出入双向通路 + PoC-B 共享纹理通路 → SSR v1 水面反射 (ssr.mode/smooth/blur/base585/wdep/ripple/v1det/strength), 未命中 ssr.edge 0原版/1延展/2真cubemap (探针 cube 1024²×6面 + P1 读回闸 + P3 相机朝向 槽0..13多条目+VP列正交读回+方向收口camconj); 20: uProbe textureLod 0 原生层 + v1det miss 回补门(仅 edge=2); 21: 观测 ssr.probedump cube 6面 PFM + ssr.camdump 锁定条目 hex(默认关=逐位20); 22: camdump=2 全槽普查(48B 盲区原始字节, 反解真投影); 23: 普查通道(锁后/pin 外仍收新槽首读)+首读全零重试; 24: 方向链 chain=D^f·C^T·D 重建直发四元数(修 quat(C) 方向错, RD 真值 1e-7) + ssr.fov/near/far 对齐真投影(58.7155/15/353467.6); 25: 采样基底合成 q=conj(qcap)⊗qchain+换代快照; 26: probedump 每次换代落盘(诊断: PFM 恒=活跃 cube); 27: debug=9 采样方向场定标 + 恒等q守卫(复位占位不发布) + 第2发布点也落盘; 28: shader 产物补生成 —— make_shaders 此前未跑致 v17/v20/v27 ssr.frag 幻影, DLL 一直嵌 v16 旧 shader(miss 无旋转总根因, 修法=tools/spvsync 闸); 29: 撤销25基底合成(cube 世界轴对齐, 直发 q 即真世界方向) + debug 8/7 闸收窄(debug=9 的 hit 走正常合成); 30: P1 读回跟踪期(ssr.probeint 默认2s — 两拍定C1后周期重读探针, FNV 签名有变即换代重传, 修 miss 区外景冻结/队列#7); 31: miss 采样仰角视差补偿 ssr.cubeelev(spec constant 默认7° — 探针原点比真实反射点Q远, cube天际线低6-7°致 miss 区顶部过早切天空, 下压采样仰角对齐真实天际线, 修『从天空变成山峰』倒置/条目32); 32: miss 屏幕钳带交叉淡入 ssr.missfade(spec constant 默认10° — 探针不在反射点: cube 该方位=开放湖岸远景非本处近景, δ<22° miss 改采 Rf 无穷远投影钳回屏内 uColor 真近景+回补同乘权重, 深处渐交 cube 天空, 修『远景当近景』/条目33); 33: 天空总闸 sky(ini sky 0/1 缺省0, T7才开) + 段7-end 六字段结构触发 (NumViews==3 且 RT0=1920x1080 RGBA16F 且 RT1/RT2 非空 且 DSV=1920x1080 D24家族; 首次不满足=段7-end; 判据纯结构化无抓帧 event id; sky=1 时挂载门独立于 ssr/probe, ssr=0 时 SSR侦察/探针/普查日志全静默); 34: sky.preset 分档(0低/1中/2高缺省/3极致, 档位表 constexpr 编入 DLL 换档只改 ini) + 四子键 sky.cloudscale/cloudsteps/cloudtemporal/lutscale 显式 ini 值覆盖档位值、未写则随档, 全键进 `天空:` 启动回显行(knobchk 逐键可验); 35: 天空入向数据通路 —— skyIn←321(段7-end 触发点 real() 之后发行, 此刻 321 已解绑) + skyDepth←520(搭车游戏 461→520 拷贝点, 发行排在 real() 之后保队列顺序), 两张共享镜像(NT handle, 深度源退老式 SHARED→KMT)VK 侧导入只 SAMPLED, 全程零同步读回, 自发行拷贝经 g_ssrSelfCopy 排除标记不污染 copy.sequence 锚点, 掩码判据=skyDepth D24 精确 0xFFFFFF(空掩码⇒合成零工作); 通路闸: ssr.shared 入向 / ssr.sentinel 哨兵 / Step2c-β VK 交叉校验 / ssr.vkout 出向; 36: 天空四 pass + 出向回写 —— 四个 frag(探针 1x2 RGBA16F 纯 GPU 估太阳方向/地平线/平均亮度, 散射 LUT 按太阳方向阈值 0.35° 低频重算否则直采上一帧, 体积云 3D 值噪声 FBM 32^3 RGBA8 一次上传 + cloudtemporal ping-pong, 合成掩码内替 skyIn 原色), 竖直复用 ssr.vert 全屏三角, push constant 128B, 档位值经 VkSpecializationInfo 烘焙(spec constant 仿 kMissFade), 四套 descriptor set 各一 pass(池 maxSets=4/descriptorCount=20); 回写 CopyResource(321←skyOut, desc 预检逐字段比对+不致就静默停用不写坏画面), 段7-end 触发点同帧跑完 pass 再回写(docs/07 §4.3 禁延迟一帧); 同步照 ssrInGateWait 模板(两条入向拷贝后 End(D3D11_QUERY_EVENT)+Flush, VK 侧 GetData+DONOTFLUSH+Sleep(0) 自旋+2000ms 超时放行+一次性消费, 累计均值单独计数 g_skyGateN/g_skyGateMs); 全链 g_skyOn 总闸, sky=0 零命令零日志; 旋钮见 poc-presenter.ini, 版本史见 git log 与 docs/) ====");
 
 	g_vtableLayer = iniFlag("vtable", true);
 	if (!g_vtableLayer)

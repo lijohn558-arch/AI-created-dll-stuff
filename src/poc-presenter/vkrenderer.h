@@ -145,6 +145,7 @@ void  ssrOutVkFrame(PocbCtx& c);                     // 2d-1: 每帧 入向图�
 bool  ssrKmtProbeVk(HANDLE h, const D3D11_TEXTURE2D_DESC& sd); // 2d-4: 路线 1′ KMT 导入探测 (纯发现)
 void  ssrInGateWait(PocbCtx& c);                     // O-1 正式修法 (v0.18.4): 2c 入向 EVENT 闸
 void  ssrKmtVkFrame(PocbCtx& c);                     // 路线1′ (v0.18.5): 深度 KMT 导入分支 + 跨API读回比对
+void  skyVkFrame(PocbCtx& c);                        // T6: 天空四 pass (探针/LUT/云/合成) + 天空入向 EVENT 闸
 
 // ---- renderer 依赖 hook 面的符号 (v0.17.0 过渡态, 2d 收敛成参数后删除) ----
 namespace pocmain
@@ -263,4 +264,22 @@ namespace pocmain
 	extern HANDLE                  g_skyInHD;         // skyDepth 共享 handle (KMT 或 NT)
 	extern bool                    g_skyInColorKmt;   // skyIn 走老式 SHARED ⇒ 用 KMT handleType
 	extern bool                    g_skyInDepthKmt;   // skyDepth 走老式 SHARED ⇒ 用 KMT handleType
+	// ---- v0.18.36 T6: 天空出向镜像 (skyOut, desc 照抄 321) + 天空入向 EVENT 闸 ----
+	// 出向: 四个 pass 的**最终落点** = skyOut (RGBA16F, 与 skyIn 同 desc ⇒ CopyResource
+	// 的 desc 一致性天然成立)。hook 面在 skyOutFire 里发 CopyResource(321 ← skyOut)。
+	// 闸: D3D11 侧 skyGateQueue 在两条入向拷贝之后 End 一条 EVENT + Flush; 这里消费。
+	extern ID3D11Texture2D*        g_skyOutTexC;      // skyOut 共享镜像 (desc 照抄 321)
+	extern HANDLE                  g_skyOutHC;        // skyOut 共享 handle (VK 导入源)
+	extern bool                    g_skyOutKmt;       // skyOut 走老式 SHARED ⇒ 用 KMT handleType
+	extern bool                    g_skyOutReady;     // VK 已把结果填进 skyOut (首帧前 false)
+	extern ID3D11Query*            g_skyQ;            // D3D11_QUERY_EVENT (main 侧 End / renderer 侧等)
+	extern bool                    g_skyQLive;        // 已 End、还没等到 (一次性消费)
+	extern long                    g_skyGateN;        // 闸等到的累计次数
+	extern double                  g_skyGateMs;       // 闸累计等待 ms
+	// ---- v0.18.34 T4 解析出的档位值 (T6 经 VkSpecializationInfo 烘焙进管线) ----
+	extern int                     g_skyPreset;       // ini sky.preset (0..3)
+	extern float                   g_skyCloudScale;   // ini sky.cloudscale
+	extern int                     g_skyCloudSteps;   // ini sky.cloudsteps
+	extern int                     g_skyCloudTemporal;// ini sky.cloudtemporal (0/1)
+	extern float                   g_skyLutScale;     // ini sky.lutscale
 }
