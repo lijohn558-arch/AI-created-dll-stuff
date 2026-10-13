@@ -107,10 +107,17 @@ void main()
 	// 云 pass 的三个早退写 vec4(0,0,0,**1**) ⇒ alpha=1 ⇒ 这里退化成"只有散射色", 正确。
 	vec4 cl = texture(uCloud, vUV);
 	vec3 sky = cl.rgb + scatter * cl.a;
-	// ---- 强度标定: 与游戏自己天空的平均亮度对齐 ----
+	// ---- 强度标定: 与游戏自己天空的平均亮度对齐 (v0.18.38 改为**帧内**参考量) ----
+	// 原先用**逐像素**的模型亮度 skyLum 做分母 (RC3): gain = meanLum/skyLum 逐像素成立,
+	// 于是 sky*gain ≈ exposure*meanLum 处处相等 —— 天空只剩色相, 模型本身那条「地平线比
+	// 天顶亮」的梯度被彻底抹平; 而近太阳处 Mie 前向峰 × gain 直接吹成全屏白。
+	// 现在分母换成**帧常量**: LUT 天顶散射 (与云 pass 取环境光用的是同一个锚点),
+	// 整帧只有一个标量 ⇒ 模型的梯度原样保留: 地平线变暖、天顶保持蓝、近太阳是一圈
+	// 自然的白晕而不是全屏过曝。云的 RT 本来就是以 zen 为单位写的, 于是云与天空同标定。
 	float meanLum = max(probe.w, 1e-4);
-	float skyLum = dot(sky, vec3(0.2126, 0.7152, 0.0722));
-	float gain = pc.cam.w * clamp(meanLum / max(skyLum, 1e-4), 0.15, 8.0);
+	vec3 zenRef = texture(uLut, vec2(0.5, 0.98)).rgb;
+	float refLum = max(dot(zenRef, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
+	float gain = pc.cam.w * clamp(meanLum / refLum, 0.1, 100.0);
 	sky *= gain;
 	// ---- 与原版混合 + 掩码边缘软过渡 (kFade 是**像素尺度**, 见上面的推导) ----
 	vec3 outc = mix(orig.rgb, sky, kMix);

@@ -68,7 +68,7 @@ vec3 skyRay(vec2 uv, float horizon)
 
 // ---- 三个量的估计 (两个 texel 各算一遍, 代价可忽略; 1x2 = 2 像素) ----
 void skyProbe(out vec3 sunDir, out float meanLum, out float horizon, out float valid,
-              out float peakLum, out float skyFrac)
+              out float peakLum, out float skyFrac, out int peakRow)
 {
 	// ① 地平线: 每列自顶向下第一条非天空行
 	float hSum = 0.0;
@@ -92,6 +92,7 @@ void skyProbe(out vec3 sunDir, out float meanLum, out float horizon, out float v
 	float lumAcc = 0.0;
 	float cnt = 0.0;
 	float peak = 0.0;
+	peakRow = 0;
 	for (int j = 0; j < kClM; ++j)
 	{
 		float v = (float(j) + 0.5) / float(kClM);
@@ -104,7 +105,10 @@ void skyProbe(out vec3 sunDir, out float meanLum, out float horizon, out float v
 			vec3 c = max(texture(uSkyIn, uv).rgb, vec3(0.0));
 			float l = min(skyLum(c), 64.0);
 			if (l > peak)
+			{
 				peak = l;
+				peakRow = j; // V5: 记住最亮那一行 (行 0 = 画面最上沿)
+			}
 			// 方向用粗地平线 (无地平线的场景退到屏幕中线)
 			float hz = hCnt > 0.5 ? (hSum / hCnt) : 0.5;
 			sunAcc += skyRay(uv, hz) * (l * l * l);
@@ -135,7 +139,19 @@ void main()
 {
 	vec3 sunDir;
 	float meanLum, horizon, valid, peakLum, skyFrac;
-	skyProbe(sunDir, meanLum, horizon, valid, peakLum, skyFrac);
+	int peakRow;
+	skyProbe(sunDir, meanLum, horizon, valid, peakLum, skyFrac, peakRow);
+	// ---- V5: 亮度峰落在网格顶部两行 ⇒ 真太阳在画面之上, 加权平均会系统性低估仰角 ----
+	// 网格 18 行铺满屏幕, 顶行 (row 0) 对应约 30° 仰角 (horizon 0.5 / fov 58.7°)。
+	// 若最亮像素就在顶行, 说明太阳本体在画面之外, 亮度³加权平均只能把方向拉回画面
+	// 内 ⇒ LUT 的方位/高度注册与云的受光方向都会偏低。此时把仰角**抬到下限**:
+	// y>=0.5 (≈30°), 正好是"太阳在画面上沿之上"的保守读数。规则只在
+	// peakRow >= kClM-2 (即最后两行) 时触发, 其余场景一个字节都不改。
+	if (peakRow >= kClM - 2)
+	{
+		sunDir.y = max(sunDir.y, 0.5);
+		sunDir = normalize(sunDir);
+	}
 	// ---- 帧间平滑 (仅当上一帧也有效; 否则直接用本帧值) ----
 	vec4 p0 = texture(uState, vec2(0.5, 0.25));
 	vec4 p1 = texture(uState, vec2(0.5, 0.75));

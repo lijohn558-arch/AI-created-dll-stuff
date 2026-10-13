@@ -41,9 +41,29 @@ layout(push_constant) uniform SkyPC
 // 档位烘焙 (VkSpecializationInfo, 仿 kMissFade 模式):
 //   kSteps = sky.cloudsteps (T4 解析出的档位值, 32/48/64/128) —— 每像素步数
 //   kHistory = cloudtemporal=1 时的历史权重 (0 = 关), 烘焙而不是每帧推
+// v0.18.38 (视觉初验): 直接阳光项重建。原先用 sunRad·beer·ph·powder, 其中 beer 由
+// "3 步 × 260m × density 0.06/m" 的光学厚度决定 ⇒ 只要光线在云里 (d>=0.1) OD 就是
+// 15~47, beer = exp(-OD) ≈ 0 **到处都成立** ⇒ 直接项在数学上是死的, 云只被环境项
+// 照亮, 呈现为暗蓝灰团块。现在:
+//   全部以 **LUT 天顶散射 `zen`** 为单位表达 (zen 就是这一帧天空的量级基准), 于是
+//   "受光面 ≈ 2× 天顶 (白天读起来是白的) / 云底内部 ≈ 0.5× 天顶 (灰蓝, 不发黑)"
+//   这两个目标可以直接写成常数, 不依赖 sunIntensity/exposure 的绝对值。
+//   kFace   = 受光面标定: 侧向散射时 phN≈0.054, 取 32 ⇒ 32*0.054*1.18 ≈ 2.0×zen;
+//             phN 另有 0.35 的上限 (见 main), 靠近太阳的前向峰被压住, 只留光晕不吹全屏。
+//   kMs     = **多次散射地板**: 厚云内部的亮光主要来自多次散射, 单次散射的 beer 在
+//             深内部必然趋 0, 所以给直接项加一个下限。0.03 ⇒ 内部直接项 ≈ 32*0.054*0.03
+//             ≈ 0.05×zen, 加上环境项 0.45~1.3×zen ⇒ 落在 0.5~1.35×zen 的灰蓝区间。
+//   kAmb    = 环境项倍数: 云底 (hf=0) 拿 0.35×kAmb, 云顶拿 1.0×kAmb。取 1.3 ⇒
+//             云底 0.45×zen、云顶 1.3×zen —— 云顶比云底亮, 符合实际云 (上表面受光)。
+//   kDistFade = 空气透视: 只对**远于 4 km** 的云段衰减 (见 main 里的 far), 天顶那段
+//             (tEnter 1.4~3.6 km) 一点不暗。
 // 一律 float 声明 (数据块按 float 传, 与 kCubeElev/kMissFade 同款)。
 layout(constant_id = 0) const float kSteps = 64.0;
 layout(constant_id = 1) const float kHistory = 0.55;
+layout(constant_id = 2) const float kMs = 0.03;
+layout(constant_id = 3) const float kDistFade = 1.0 / 6000.0;
+layout(constant_id = 4) const float kAmb = 1.3;
+layout(constant_id = 5) const float kFace = 32.0;
 
 // ---- 掩码判据 (**与 sky_comp.frag 里的同名常量必须逐字一致**) ----
 // skyDepth 是 D24 归一化值, 天空 = 精确满值 0xFFFFFF ⇒ 1.0。留一点点余量吸收驱动端的
@@ -139,23 +159,38 @@ void main()
 	}
 	// 进/出 slab 距离: **两端都要钳**。只钳 tExit 时, 天顶方向 (rd.y≈1) 的 tExit=3600 小于
 	// 天底方向被 rd.y<=0.008 挡掉之前算出的 tEnter 上限区, dt 可能为负 ⇒ 步进反向 ⇒ 最低
-	// 约 5° 的天空里云直接消失。钳成同一个上限 ⇒ 退化成"沿射线走满上限"的极限步进。
+	// 约 5° 的天空里云直接消失。
+	// v0.18.38: 上限从 60000 收到 **12000** —— 这是 RC2 (平视整片黑云幕) 的正解。
+	// 原来 60 km 的上限意味着朝地平线看时 tEnter 一路到 14~60 km, 射线在 slab 里几乎是
+	// **横着**穿过整层云, 在 coverage 0.58 下必然撞满云 ⇒ trans→0, 而云自身又只有
+	// 一点点环境光 ⇒ 贴着地平线的整片天空变成不透明近黑的云幕 (用户看到的「仰视白 /
+	// 平视黑」倒挂)。收到 12 km 之后: 只有高于约 6.7° (1400/12000) 的视线才会进云层,
+	// 更低的天空 tEnter>=tExit ⇒ dt=0 ⇒ 一步都走不到 ⇒ 干净地退回纯散射天空。
+	const float kMarchMax = 12000.0;
 	float tEnter = hBase / rd.y;
 	float tExit = (hBase + hSpan) / rd.y;
-	tEnter = min(tEnter, 60000.0);
-	tExit = min(max(tExit, tEnter), 60000.0);
+	tEnter = min(tEnter, kMarchMax);
+	tExit = min(max(tExit, tEnter), kMarchMax);
 	float coverage = pc.ctl.x;
 	float shape = pc.ctl.y;
-	float density = 0.06; // 每米消光尺度
+	// 消光尺度 0.06 → 0.025 /m。真实的层积云消光系数就在 0.01~0.03 /m 这一档;
+	// 0.06 是上一轮为了让「云看起来厚」随手写的, 代价是直接项被 exp(-47) 彻底杀死。
+	// 改小之后同样 3×260 m 的向阳步进最长 OD = 0.025*780 = 19.5 (原 47), 厚处仍然
+	// 变暗 (beer 仍有真实梯度), 受光面拿到真正的 beer 值而不是恒 0。
+	float density = 0.025;
 	int n = max(int(kSteps + 0.5), 4);
 	float dt = (tExit - tEnter) / float(n);
 	float mu = dot(rd, sunDir);
-	float ph = mix(hg(mu, 0.72), hg(mu, -0.28), 0.35) * 4.0 * kPi;
+	// 相位: 归一化的 HG 混双叶 (原代码乘 4π 只是为了"看得见", 现在以 zen 为单位,
+	// 乘 4π 会让近太阳处直接爆掉)。**上限 0.35**: 纯前向峰在 mu→1 时是 1.7, 比侧向
+	// 散射高 30 倍, 在屏幕锚定的假太阳下会把太阳周围糊成一团白 ⇒ 压到 0.35 (≈6.5×
+	// 侧向), 保留方向感与光晕, 不牺牲其余天空。
+	float phN = min(mix(hg(mu, 0.72), hg(mu, -0.28), 0.35), 0.35);
 	// 太阳低于地平线 => 不给直射 (S5 夜间场景)
 	float sunUp = clamp(sunDir.y * 6.0 + 0.15, 0.0, 1.0);
-	vec3 sunRad = vec3(1.0, 0.92, 0.80) * pc.ctl.z * sunUp;
-	// 天空环境光: 从 LUT 的天顶方向取 (LUT v=1 是天顶)
-	vec3 skyAmb = texture(uLut, vec2(0.5, 0.98)).rgb * 6.0;
+	// 帧内量级基准: LUT 天顶散射 (与合成 pass 的 gain 用的是同一个锚点)。
+	vec3 zen = texture(uLut, vec2(0.5, 0.98)).rgb;
+	vec3 skyAmb = zen * kAmb * sunUp;
 	vec3 scat = vec3(0.0);
 	float trans = 1.0;
 	for (int i = 0; i < n; ++i)
@@ -181,7 +216,10 @@ void main()
 		// 粉末项 (Powder): 视线穿厚云时边缘变亮, 廉价但很出体积感
 		float powder = 1.0 - exp(-d * 6.0);
 		float hf = clamp((p.y - hBase) / hSpan, 0.0, 1.0);
-		vec3 lum = sunRad * beer * ph * (0.55 + 0.75 * powder) + skyAmb * (0.35 + 0.65 * hf);
+		// 直接项 (以 zen 为单位): beer·powder 是单次散射, kMs 是多次散射地板;
+		// 环境项让云底比云顶暗 (hf 权重), 厚处仍有光, 不会黑成一块。
+		vec3 lum = zen * kFace * phN * (beer * (0.55 + 0.75 * powder) + kMs) * sunUp +
+		           skyAmb * (0.35 + 0.65 * hf);
 		float a = 1.0 - exp(-d * density * dt);
 		scat += trans * a * lum;
 		trans *= (1.0 - a);
@@ -196,5 +234,15 @@ void main()
 		float keep = (lc > 0.0008 || lh <= 0.0008) ? kHistory : 0.0;
 		scat = mix(scat, h, keep);
 	}
+	// ---- 空气透视 (RC2 第二道保险) ----
+	// 只对**远于 4 km** 的云段衰减: 天顶 (tEnter 1.4 km) 与 45° (2.0 km) 的头顶云一点不暗;
+	// 10° 仰角 (tEnter 8.0 km) 淡到 0.51, 7° (11.5 km) 淡到 0.29。
+	// **淡向中性而不是淡向黑**: trans 被拉回 1 ⇒ 合成侧 `sky = cl.rgb + scatter*cl.a`
+	// 里的散射项重新全额出现 ⇒ 远处云化成普通的天空颜色, 而不是把那片天空挖成黑洞。
+	// 放在时域复用**之后**, 让写进 cloud[prv] 的是已经淡过的值, 历史与本帧口径一致。
+	float far = max(tEnter - 4000.0, 0.0);
+	float fade = exp(-far * kDistFade);
+	scat *= fade;
+	trans = mix(trans, 1.0, 1.0 - fade);
 	oColor = vec4(max(scat, vec3(0.0)), trans);
 }

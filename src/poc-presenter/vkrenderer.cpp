@@ -5722,16 +5722,24 @@ static bool skyPassBuild(PocbCtx& c)
 		const size_t spvSz[4] = {kSkyProbeSpvBytes, kSkyLutSpvBytes, kSkyCloudSpvBytes, kSkyCompSpvBytes};
 		// 档位 → spec constant (float 声明, 与 kCubeElev/kMissFade 同款数据块口径):
 		//   LUT  : kLutSteps (lutscale 0.5/1 -> 16, 2 -> 28), kSunThreshDeg=0.35 (低频重算阈值)
-		//   云   : kSteps (sky.cloudsteps 档位值), kHistory (cloudtemporal ? 0.55 : 0)
-		//   合成 : kMix=0.85 (掩码内与原版混合比), kFade=0.0016 (掩码边缘过渡宽度)
+		//   云   : kSteps (sky.cloudsteps 档位值), kHistory (cloudtemporal ? 0.55 : 0),
+		//          kMs=0.03 (多次散射地板), kDistFade=1/6000 (空气透视),
+		//          kAmb=1.3 (环境项倍数), kFace=32 (受光面标定)
+		//   合成 : kMix=0.85 (掩码内与原版混合比), kFade=1e-6 (掩码边缘过渡宽度, 像素尺度)
 		// 探针无 spec constant (纯函数, 无档位依赖)。
+		// 云那四个新常量的取值理由见 sky_cloud.frag 顶部注释 (全部以 LUT 天顶散射 zen
+		// 为单位: 受光面 ≈ 2×zen, 云底/内部 ≈ 0.5×zen)。
 		float lutSteps = (g_skyLutScale > 1.5f) ? 28.0f : 16.0f;
 		float lutData[2] = {lutSteps, 0.35f};
-		float cloudData[2] = {(float)(g_skyCloudSteps > 0 ? g_skyCloudSteps : 64),
-		                     (g_skyCloudTemporal > 0) ? 0.55f : 0.0f};
+		float cloudData[6] = {(float)(g_skyCloudSteps > 0 ? g_skyCloudSteps : 64),
+		                     (g_skyCloudTemporal > 0) ? 0.55f : 0.0f,
+		                     0.03f,          // kMs
+		                     1.0f / 6000.0f, // kDistFade
+		                     1.3f,           // kAmb
+		                     32.0f};         // kFace
 		// kFade 是**像素尺度**的接缝柔化宽度 (1e-6 ≈ D24 十几个码宽)。原值 1.6e-3 在游戏
-	// near=15/far=353467.6 下等于 10km 处约 9.4km 的地形深度带, 会把远处地形整片压暗。
-	float compData[2] = {0.85f, 1.0e-6f};
+		// near=15/far=353467.6 下等于 10km 处约 9.4km 的地形深度带, 会把远处地形整片压暗。
+		float compData[2] = {0.85f, 1.0e-6f};
 		VkSpecializationMapEntry me[2]{};
 		me[0].constantID = 0;
 		me[0].offset = 0;
@@ -5739,13 +5747,20 @@ static bool skyPassBuild(PocbCtx& c)
 		me[1].constantID = 1;
 		me[1].offset = sizeof(float);
 		me[1].size = sizeof(float);
+		VkSpecializationMapEntry me6[6]{};
+		for (int i = 0; i < 6; ++i)
+		{
+			me6[i].constantID = (uint32_t)i;
+			me6[i].offset = (uint32_t)(sizeof(float) * i);
+			me6[i].size = sizeof(float);
+		}
 		VkSpecializationInfo spec[4]{};
 		spec[1].mapEntryCount = 2;
 		spec[1].pMapEntries = me;
 		spec[1].dataSize = sizeof(lutData);
 		spec[1].pData = lutData;
-		spec[2].mapEntryCount = 2;
-		spec[2].pMapEntries = me;
+		spec[2].mapEntryCount = 6;
+		spec[2].pMapEntries = me6;
 		spec[2].dataSize = sizeof(cloudData);
 		spec[2].pData = cloudData;
 		spec[3].mapEntryCount = 2;
