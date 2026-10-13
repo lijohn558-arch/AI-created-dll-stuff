@@ -48,11 +48,17 @@ layout(push_constant) uniform SkyPC
 //   全部以 **LUT 天顶散射 `zen`** 为单位表达 (zen 就是这一帧天空的量级基准), 于是
 //   "受光面 ≈ 2× 天顶 (白天读起来是白的) / 云底内部 ≈ 0.5× 天顶 (灰蓝, 不发黑)"
 //   这两个目标可以直接写成常数, 不依赖 sunIntensity/exposure 的绝对值。
-//   kFace   = 受光面标定: 侧向散射时 phN≈0.054, 取 32 ⇒ 32*0.054*1.18 ≈ 2.0×zen;
-//             phN 另有 0.35 的上限 (见 main), 靠近太阳的前向峰被压住, 只留光晕不吹全屏。
+//   kFace   = 受光面标定。**标定用的是侧向散射 (mu=0, 视线⊥太阳) 的 phN = 0.036**:
+//             42 * 0.036 * 1.18 (粉末项) ≈ **1.78×zen ≈ 2×zen**。
+//             关键: 真正被限制的不是 phN 而是**乘积 kFace·phN** (见 kFaceMax)。
+//   kFaceMax = **乘积上限 3.0** (shader 常量)。相位前向峰在 mu→1 是 1.7, 比侧向高 47 倍,
+//             乘上 kFace 就是 42*1.7 ≈ 71×zen —— 游戏自己的 tonemap 吸收不掉, 那正是
+//             上一版 (钳 phN≤0.35, 乘积仍达 11.2 ⇒ 约 15×meanLum) 的过曝缺陷换个地方复发。
+//             钳乘积而不是钳相位: 前向/侧向之比仍保留 3.0/1.51 ≈ 2.0 倍 (银边还在),
+//             但绝对峰值被钉在 3.0*1.18 ≈ 3.5×zen —— 正好落在「前向峰 2~4×zen」的设计意图里。
 //   kMs     = **多次散射地板**: 厚云内部的亮光主要来自多次散射, 单次散射的 beer 在
-//             深内部必然趋 0, 所以给直接项加一个下限。0.03 ⇒ 内部直接项 ≈ 32*0.054*0.03
-//             ≈ 0.05×zen, 加上环境项 0.45~1.3×zen ⇒ 落在 0.5~1.35×zen 的灰蓝区间。
+//             深内部必然趋 0, 所以给直接项加一个下限。0.03 ⇒ 内部直接项 ≈ 1.51*0.03
+//             ≈ 0.045×zen, 加上环境项 0.45~1.3×zen ⇒ 落在 0.5~1.35×zen 的灰蓝区间。
 //   kAmb    = 环境项倍数: 云底 (hf=0) 拿 0.35×kAmb, 云顶拿 1.0×kAmb。取 1.3 ⇒
 //             云底 0.45×zen、云顶 1.3×zen —— 云顶比云底亮, 符合实际云 (上表面受光)。
 //   kDistFade = 空气透视: 只对**远于 4 km** 的云段衰减 (见 main 里的 far), 天顶那段
@@ -63,7 +69,11 @@ layout(constant_id = 1) const float kHistory = 0.55;
 layout(constant_id = 2) const float kMs = 0.03;
 layout(constant_id = 3) const float kDistFade = 1.0 / 6000.0;
 layout(constant_id = 4) const float kAmb = 1.3;
-layout(constant_id = 5) const float kFace = 32.0;
+layout(constant_id = 5) const float kFace = 42.0;
+
+// 受光项乘积上限: 设计意图是「前向峰 2~4×zen, 侧向 ~2×zen」。侧向乘积天然是
+// 42*0.036 = 1.51, 所以上限取 3.0 正好只削前向那一段, 不动侧向标定。
+const float kFaceMax = 3.0;
 
 // ---- 掩码判据 (**与 sky_comp.frag 里的同名常量必须逐字一致**) ----
 // skyDepth 是 D24 归一化值, 天空 = 精确满值 0xFFFFFF ⇒ 1.0。留一点点余量吸收驱动端的
@@ -157,15 +167,16 @@ void main()
 		oColor = vec4(0.0, 0.0, 0.0, 1.0);
 		return;
 	}
-	// 进/出 slab 距离: **两端都要钳**。只钳 tExit 时, 天顶方向 (rd.y≈1) 的 tExit=3600 小于
-	// 天底方向被 rd.y<=0.008 挡掉之前算出的 tEnter 上限区, dt 可能为负 ⇒ 步进反向 ⇒ 最低
-	// 约 5° 的天空里云直接消失。
+	// 进/出 slab 距离: **两端都要钳**。只钳 tExit 时, 天顶方向 (rd.y≈1) 的 tExit=3600 会小于
+	// 低仰角方向算出的 tEnter 上限, dt 可能为负 ⇒ 步进反向。
 	// v0.18.38: 上限从 60000 收到 **12000** —— 这是 RC2 (平视整片黑云幕) 的正解。
 	// 原来 60 km 的上限意味着朝地平线看时 tEnter 一路到 14~60 km, 射线在 slab 里几乎是
 	// **横着**穿过整层云, 在 coverage 0.58 下必然撞满云 ⇒ trans→0, 而云自身又只有
 	// 一点点环境光 ⇒ 贴着地平线的整片天空变成不透明近黑的云幕 (用户看到的「仰视白 /
-	// 平视黑」倒挂)。收到 12 km 之后: 只有高于约 6.7° (1400/12000) 的视线才会进云层,
-	// 更低的天空 tEnter>=tExit ⇒ dt=0 ⇒ 一步都走不到 ⇒ 干净地退回纯散射天空。
+	// 平视黑」倒挂)。收到 12 km 之后, **无云带 = 0.46° ~ 6.7°**:
+	//   上界 6.7°: tEnter = 1400/12000 触顶, 再低就 tEnter>=tExit ⇒ dt=0 ⇒ 一步走不到;
+	//   下界 0.46°: rd.y <= 0.008 的早退 (约 0.46°)。
+	// 这一带退回纯散射天空, 也就是天边那圈本来最该亮的地方。
 	const float kMarchMax = 12000.0;
 	float tEnter = hBase / rd.y;
 	float tExit = (hBase + hSpan) / rd.y;
@@ -182,10 +193,13 @@ void main()
 	float dt = (tExit - tEnter) / float(n);
 	float mu = dot(rd, sunDir);
 	// 相位: 归一化的 HG 混双叶 (原代码乘 4π 只是为了"看得见", 现在以 zen 为单位,
-	// 乘 4π 会让近太阳处直接爆掉)。**上限 0.35**: 纯前向峰在 mu→1 时是 1.7, 比侧向
-	// 散射高 30 倍, 在屏幕锚定的假太阳下会把太阳周围糊成一团白 ⇒ 压到 0.35 (≈6.5×
-	// 侧向), 保留方向感与光晕, 不牺牲其余天空。
-	float phN = min(mix(hg(mu, 0.72), hg(mu, -0.28), 0.35), 0.35);
+	// 乘 4π 会让近太阳处直接爆掉)。**这里不钳相位, 钳的是乘积** (见下面 faceK):
+	// 钳 phN 会把侧向标定一起削掉, 前向/侧向的层次 (银边) 就没了。
+	float phN = mix(hg(mu, 0.72), hg(mu, -0.28), 0.35);
+	// 受光项系数 = kFace·phN, **封顶 kFaceMax**: 侧向 (mu=0) 天然 42*0.036 = 1.51,
+	// 正向 (mu→1) 原本能到 71 ⇒ 峰值被钉在 3.0 ⇒ 前向/侧向仍留 ≈2.0 倍的银边,
+	// 但绝对值落在 3.0*1.18 ≈ 3.5×zen (设计意图: 前向峰 2~4×zen)。
+	float faceK = min(kFace * phN, kFaceMax);
 	// 太阳低于地平线 => 不给直射 (S5 夜间场景)
 	float sunUp = clamp(sunDir.y * 6.0 + 0.15, 0.0, 1.0);
 	// 帧内量级基准: LUT 天顶散射 (与合成 pass 的 gain 用的是同一个锚点)。
@@ -218,7 +232,7 @@ void main()
 		float hf = clamp((p.y - hBase) / hSpan, 0.0, 1.0);
 		// 直接项 (以 zen 为单位): beer·powder 是单次散射, kMs 是多次散射地板;
 		// 环境项让云底比云顶暗 (hf 权重), 厚处仍有光, 不会黑成一块。
-		vec3 lum = zen * kFace * phN * (beer * (0.55 + 0.75 * powder) + kMs) * sunUp +
+		vec3 lum = zen * faceK * (beer * (0.55 + 0.75 * powder) + kMs) * sunUp +
 		           skyAmb * (0.35 + 0.65 * hf);
 		float a = 1.0 - exp(-d * density * dt);
 		scat += trans * a * lum;

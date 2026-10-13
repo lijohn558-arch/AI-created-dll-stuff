@@ -11,7 +11,10 @@
 //
 // 所以这里用**纯 GPU 探针**顶替那个缺失的入向, 一次提交内拿三样东西, 零读回:
 //   texel(0.5,0.25) = vec4(太阳方向 xyz [伪世界系], 天空平均亮度)
-//   texel(0.5,0.75) = vec4(地平线所在的屏幕 v [0..1, y 向下], 有效标志, 峰值亮度, 天空占比)
+//   texel(0.5,0.75) = vec4(地平线所在的屏幕 v [0..1, y 向下], 有效标志,
+//                        **抬升闩锁 run**, 天空占比)
+//     (第三个分量原本是峰值亮度 peakLum, 下游三个 frag 一个都没读 ⇒ 改作 V5 迟滞闩锁,
+//      探针纹理仍是 1x2 RGBA16F, 格式不变)
 // ① 太阳方向: skyIn 上按 32x18 网格取**天空像素** (depth==1.0 精确), 以亮度三次方
 //    加权平均视线方向 —— 游戏自己的天空里最亮的那团就是太阳/最亮的日光方向。
 // ② 地平线: skyDepth 上按 64x64 网格, 每列自顶向下找第一条 depth<1 的行 = 该列的地平线,
@@ -141,21 +144,33 @@ void main()
 	float meanLum, horizon, valid, peakLum, skyFrac;
 	int peakRow;
 	skyProbe(sunDir, meanLum, horizon, valid, peakLum, skyFrac, peakRow);
-	// ---- V5: 亮度峰落在网格顶部两行 ⇒ 真太阳在画面之上, 加权平均会系统性低估仰角 ----
-	// 网格 18 行铺满屏幕, 顶行 (row 0) 对应约 30° 仰角 (horizon 0.5 / fov 58.7°)。
-	// 若最亮像素就在顶行, 说明太阳本体在画面之外, 亮度³加权平均只能把方向拉回画面
-	// 内 ⇒ LUT 的方位/高度注册与云的受光方向都会偏低。此时把仰角**抬到下限**:
-	// y>=0.5 (≈30°), 正好是"太阳在画面上沿之上"的保守读数。规则只在
-	// peakRow >= kClM-2 (即最后两行) 时触发, 其余场景一个字节都不改。
-	if (peakRow >= kClM - 2)
-	{
-		sunDir.y = max(sunDir.y, 0.5);
-		sunDir = normalize(sunDir);
-	}
-	// ---- 帧间平滑 (仅当上一帧也有效; 否则直接用本帧值) ----
+	// ---- 上一帧的闩锁计数 (存在状态图 texel(0.5,0.75).z 里) ----
+	// .z 原本放 peakLum, 而 peakLum 与 .w 的 skyFrac **下游一个都没读过** (三个消费 frag
+	// 只读 .x 地平线与 .y 有效位) ⇒ 拿来当闩锁状态, **探针纹理格式 (1x2 RGBA16F) 不变**。
 	vec4 p0 = texture(uState, vec2(0.5, 0.25));
 	vec4 p1 = texture(uState, vec2(0.5, 0.75));
 	float prevValid = p1.y;
+	// 上一帧状态不可信 (首帧 / 室内 / 刚切场景) 时闩锁从 0 起算, 不让垃圾值传染。
+	float prevRun = (prevValid > 0.5 && prevValid < 1.5) ? p1.z : 0.0;
+	// ---- V5 仰角抬升 (I-1 方向修正 + I-2 迟滞) ----
+	// **网格行号方向**: row j = 0 是画面**最上沿** (v = (j+0.5)/kClM, v 越小越靠上)。
+	// 所以「最亮像素落在**顶部**两行」= peakRow <= 1, 此时真太阳在画面之上, 亮度³加权
+	// 平均只能把方向拉回画面内 ⇒ 仰角被系统性低估 ⇒ 需要抬升。
+	// (上一版误写成 peakRow >= kClM-2, 方向正好反了: 那条规则会在「最亮像素贴着地平线」
+	//  时触发 —— 黄昏/夜间/阴天正是**最不该**拿到 30° 太阳的场景。)
+	// **迟滞规则 (I-2)**: peakRow 是 576 个样本上的裸 argmax, row1/row2 打平时逐帧抖动;
+	// 每抖一次 sunDir.y 跳约 20°, 远大于 kSunThreshDeg=0.35° ⇒ LUT 每帧重算, 低频语义
+	// 作废且太阳方向可见地晃。故用 **3/3 对称迟滞**:
+	//     连续 3 帧 peakRow<=1 ⇒ 闩锁合上 (run 累到 3)
+	//     连续 3 帧 peakRow>1  ⇒ 闩锁打开 (run 减到 0)
+	// 单帧噪声最多把 run 挪 1, 离阈值 3 还差 2 ⇒ **边界不可能来回翻**。
+	float run = (peakRow <= 1) ? min(prevRun + 1.0, 8.0) : max(prevRun - 1.0, 0.0);
+	if (run >= 3.0)
+	{
+		sunDir.y = max(sunDir.y, 0.5); // ≈30°, 保守取「太阳在画面上沿之上」
+		sunDir = normalize(sunDir);
+	}
+	// ---- 帧间平滑 (仅当上一帧也有效; 否则直接用本帧值) ----
 	bool canSmooth = (prevValid > 0.5 && prevValid < 1.5 && valid > 0.5 &&
 	                  dot(p0.xyz, p0.xyz) > 0.25 && p0.w > 0.0);
 	if (canSmooth)
@@ -165,8 +180,8 @@ void main()
 		sunDir = normalize(mixed);
 		horizon = mix(p1.x, horizon, k);
 		meanLum = mix(p0.w, meanLum, k);
-		peakLum = mix(p1.z, peakLum, k);
 	}
-	int row = int(gl_FragCoord.y); // 0 = 上排 (太阳/均值), 1 = 下排 (地平线/有效)
-	oColor = (row == 0) ? vec4(sunDir, meanLum) : vec4(horizon, valid, peakLum, skyFrac);
+	int row = int(gl_FragCoord.y); // 0 = 上排 (太阳/均值), 1 = 下排 (地平线/有效/闩锁)
+	// texel(0.5,0.75) = vec4(地平线 v, 有效标志, **抬升闩锁 run**, 天空占比)
+	oColor = (row == 0) ? vec4(sunDir, meanLum) : vec4(horizon, valid, run, skyFrac);
 }

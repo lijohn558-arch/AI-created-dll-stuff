@@ -117,7 +117,10 @@ void main()
 	float meanLum = max(probe.w, 1e-4);
 	vec3 zenRef = texture(uLut, vec2(0.5, 0.98)).rgb;
 	float refLum = max(dot(zenRef, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
-	float gain = pc.cam.w * clamp(meanLum / refLum, 0.1, 100.0);
+	// 上限 32: refLum 只在 ref 退化到极小时才会顶到这个值 (正常天空 ref≈均值量级, 增益≈1)。
+	// 32 足以覆盖 ref 比均值暗一个半数量级的极端夜景, 又能在 ref 数值异常时把整帧的
+	// 放大锁在 32× 以内, 不至于把画面整体吹白 (上一版无理由放到 100)。
+	float gain = pc.cam.w * clamp(meanLum / refLum, 0.1, 32.0);
 	sky *= gain;
 	// ---- 与原版混合 + 掩码边缘软过渡 (kFade 是**像素尺度**, 见上面的推导) ----
 	vec3 outc = mix(orig.rgb, sky, kMix);
